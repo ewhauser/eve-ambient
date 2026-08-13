@@ -11,3 +11,7 @@ coverage/
 *.tsbuildinfo
 
 .DS_Store
+
+# Local bundle check output. celld re-bundles from `main` at deploy time, so
+# this is never uploaded and never published.
+/celld-worker/build/

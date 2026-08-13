@@ -139,6 +139,7 @@ for a complete production setup. Local tests can use `MemoryMonitorStore` from
 
 ## Documentation
 
+- [RFC 0001: Full-payload idempotent handoffs](https://github.com/ewhauser/eve-ambient/blob/main/docs/rfcs/0001-full-payload-idempotent-handoffs.md) — accepted direction for payload-by-value custody and end-to-end idempotency lineage.
 - [Deployment options](https://github.com/ewhauser/eve-ambient/blob/main/docs/deployment-options.md) — choose an ingestion, event-log, and mailbox topology.
 - [Monitoring model](https://github.com/ewhauser/eve-ambient/blob/main/docs/monitoring-model.md) — define channel events and monitors, then wire decisions and delivery.
 - [Postgres-first deployment](https://github.com/ewhauser/eve-ambient/blob/main/docs/postgres.md) — run the supported default with PostgreSQL as the event store and mailbox.

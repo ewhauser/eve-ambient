@@ -1,4 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { canonicalizeChannelDelivery } from "./idempotency.js";
+import type {
+  AcceptedChannelEvent,
+  CanonicalChannelEvent,
+  ChannelCanonicalizationContract,
+  EventKey,
+  IdempotentEnvelope,
+} from "./idempotency.js";
 import type {
   JsonValue,
   MonitorBindingView,
@@ -13,6 +21,52 @@ import type {
 import { BindingConflictError } from "./types.js";
 import { scopedKey } from "./storage.js";
 import { canonicalJson, cloneJson, freeze, stableHash } from "./util.js";
+
+/**
+ * Verifies the channel-normalization properties required by the idempotency
+ * contract. Equivalent provider retries must produce the same key and hash;
+ * semantic conflicts under the same provider identity must preserve the key
+ * while changing the hash.
+ */
+export async function assertChannelCanonicalization<
+  TRaw,
+  TEvent extends CanonicalChannelEvent,
+>(
+  contract: ChannelCanonicalizationContract<TRaw, TEvent>,
+  options: {
+    readonly applicationId: string;
+    readonly original: TRaw;
+    readonly equivalentRetries: readonly TRaw[];
+    readonly conflictingRetries?: readonly TRaw[] | undefined;
+  },
+): Promise<IdempotentEnvelope<AcceptedChannelEvent<TEvent>, EventKey>> {
+  const baseline = await canonicalizeChannelDelivery(contract, options.original, {
+    applicationId: options.applicationId,
+  });
+  for (const [index, retry] of options.equivalentRetries.entries()) {
+    const result = await canonicalizeChannelDelivery(contract, retry, {
+      applicationId: options.applicationId,
+    });
+    if (result.idempotency.key !== baseline.idempotency.key) {
+      throw new Error(`equivalent retry ${index} changed the event key`);
+    }
+    if (result.idempotency.inputHash !== baseline.idempotency.inputHash) {
+      throw new Error(`equivalent retry ${index} changed the input hash`);
+    }
+  }
+  for (const [index, retry] of (options.conflictingRetries ?? []).entries()) {
+    const result = await canonicalizeChannelDelivery(contract, retry, {
+      applicationId: options.applicationId,
+    });
+    if (result.idempotency.key !== baseline.idempotency.key) {
+      throw new Error(`conflicting retry ${index} changed the event key instead of conflicting`);
+    }
+    if (result.idempotency.inputHash === baseline.idempotency.inputHash) {
+      throw new Error(`conflicting retry ${index} did not change the input hash`);
+    }
+  }
+  return baseline;
+}
 
 export class VirtualMonitorClock implements MonitorClock {
   #milliseconds: number;

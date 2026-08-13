@@ -1,5 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { JsonValue, StandardSchema } from "./types.js";
+import { canonicalJson } from "./canonical.js";
+
+export { assertJsonValue, canonicalJson, cloneJson } from "./canonical.js";
 
 /**
  * The duration and timestamp helpers live in `./time.js`, which imports no
@@ -39,56 +42,6 @@ export function assertIdentifier(value: string, name: string): void {
 
 export function jsonBytes(value: unknown, name = "value"): number {
   return Buffer.byteLength(canonicalJson(value, name), "utf8");
-}
-
-export function assertJsonValue(value: unknown, name = "value"): asserts value is JsonValue {
-  canonicalJson(value, name);
-}
-
-export function canonicalJson(value: unknown, name = "value"): string {
-  const seen = new Set<object>();
-  const normalize = (current: unknown, path: string): JsonValue => {
-    if (
-      current === null ||
-      typeof current === "string" ||
-      typeof current === "boolean"
-    ) {
-      return current;
-    }
-    if (typeof current === "number") {
-      if (!Number.isFinite(current)) throw new TypeError(`${path} must contain finite numbers`);
-      return current;
-    }
-    if (typeof current !== "object") {
-      throw new TypeError(`${path} must be JSON-safe; received ${typeof current}`);
-    }
-    if (seen.has(current)) throw new TypeError(`${path} must not contain circular references`);
-    seen.add(current);
-    try {
-      if (Array.isArray(current)) {
-        return current.map((item, index) => normalize(item, `${path}[${index}]`));
-      }
-      const prototype = Object.getPrototypeOf(current);
-      if (prototype !== Object.prototype && prototype !== null) {
-        throw new TypeError(`${path} must contain only plain JSON objects`);
-      }
-      const output: Record<string, JsonValue> = {};
-      for (const key of Object.keys(current as Record<string, unknown>).sort()) {
-        output[key] = normalize(
-          (current as Record<string, unknown>)[key],
-          `${path}.${key}`,
-        );
-      }
-      return output;
-    } finally {
-      seen.delete(current);
-    }
-  };
-  return JSON.stringify(normalize(value, name));
-}
-
-export function cloneJson<T extends JsonValue>(value: T): T {
-  return JSON.parse(canonicalJson(value)) as T;
 }
 
 export function stableHash(value: string): string {

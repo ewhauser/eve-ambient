@@ -392,19 +392,19 @@ is rejected by `initialize()` today.
    theirs from the first append — so one deployment serves every monitor.
 
    ```sh
-   cp -r node_modules/eve-ambient/celld-worker ./mailbox   # edit its vars
+   cp -r node_modules/@ewhauser/eve-ambient/celld-worker ./mailbox   # edit its vars
    CELLD_ESBUILD=/path/to/esbuild node ./mailbox/build.mjs # pre-flight bundle
    celld deploy --config ./mailbox/wrangler.jsonc
    ```
 
-   The copied `index.ts` re-exports `eve-ambient/celld-worker`, so it resolves
+   The copied `index.ts` re-exports `@ewhauser/eve-ambient/celld-worker`, so it resolves
    through your own `node_modules` and stays in step with the installed
    version.
 
 2. Mount the evaluator on a route the fleet can reach.
 
    ```ts
-   import { createEvaluationFetchHandler } from "eve-ambient/celld";
+   import { createEvaluationFetchHandler } from "@ewhauser/eve-ambient/celld";
 
    const evaluate = createEvaluationFetchHandler(runtime, {
      secret: process.env.MAILBOX_SECRET!,

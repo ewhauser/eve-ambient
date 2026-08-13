@@ -6,9 +6,9 @@
 //
 //   node build.mjs
 //
-// index.ts is a one-line re-export of `eve-ambient/celld-worker`, so run this
+// index.ts is a one-line re-export of `@ewhauser/eve-ambient/celld-worker`, so run this
 // from a directory whose node_modules resolves that package — either in place
-// inside node_modules/eve-ambient, or from a copy inside your application.
+// inside node_modules/@ewhauser/eve-ambient, or from a copy inside your application.
 //
 // esbuild is the caller's, not this package's: celld shells out to a binary
 // rather than depending on one, and so does this script. It is resolved from

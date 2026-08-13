@@ -1,7 +1,7 @@
-// The celld fleet entry point for the eve-ambient correlation mailbox.
+// The celld fleet entry point for the @ewhauser/eve-ambient correlation mailbox.
 //
 // The implementation is `src/celld-worker.ts`, published as
-// `eve-ambient/celld-worker`. This file exists because celld requires a
+// `@ewhauser/eve-ambient/celld-worker`. This file exists because celld requires a
 // Worker's `main` to be a path inside the project directory, and because a
 // fleet project wants a directory of its own for wrangler.jsonc and build.mjs.
 //
@@ -11,4 +11,4 @@
 //
 // See ./README.md for the walkthrough.
 
-export { MonitorInstance, default } from "eve-ambient/celld-worker";
+export { MonitorInstance, default } from "@ewhauser/eve-ambient/celld-worker";

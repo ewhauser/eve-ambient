@@ -1,4 +1,4 @@
-# eve-ambient celld mailbox worker
+# @ewhauser/eve-ambient celld mailbox worker
 
 The correlation mailbox as a [celld](https://github.com/denoland/celld) fleet
 application: one cell per correlation instance, running the package's own
@@ -14,8 +14,8 @@ where the decision pipeline, budgets, and run records already live.
 ## Deploy
 
 ```bash
-# from your application, after `npm i eve-ambient`
-cp -r node_modules/eve-ambient/celld-worker ./mailbox
+# from your application, after `npm i @ewhauser/eve-ambient`
+cp -r node_modules/@ewhauser/eve-ambient/celld-worker ./mailbox
 cd mailbox
 
 # check the bundle before the fleet does; CELLD_ESBUILD should be the same
@@ -26,10 +26,10 @@ CELLD_ESBUILD=/path/to/esbuild node build.mjs
 celld deploy --config wrangler.jsonc
 ```
 
-`index.ts` is a one-line re-export of `eve-ambient/celld-worker`, so the copy
+`index.ts` is a one-line re-export of `@ewhauser/eve-ambient/celld-worker`, so the copy
 resolves the implementation through your application's `node_modules` and needs
 nothing else from the package. Keep it beside a `node_modules` that has
-`eve-ambient` installed and both `build.mjs` and `celld deploy` will bundle it.
+`@ewhauser/eve-ambient` installed and both `build.mjs` and `celld deploy` will bundle it.
 
 celld deploys are stop-the-world fleet restarts today (`rollout.percent` is
 not exposed), and cells resume from durable storage afterwards. Treat a worker

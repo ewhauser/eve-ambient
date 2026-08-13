@@ -1,12 +1,12 @@
 {
-  // Deployment template for the eve-ambient correlation mailbox as a celld
+  // Deployment template for the @ewhauser/eve-ambient correlation mailbox as a celld
   // fleet application. Copy it next to your own configuration and change the
   // two vars; nothing else here is per-deployment.
   //
   //   celld deploy --config wrangler.jsonc
   //
   // `main` is TypeScript on purpose: celld shells out to esbuild, which
-  // compiles and bundles .ts entry points and resolves the eve-ambient sources
+  // compiles and bundles .ts entry points and resolves the @ewhauser/eve-ambient sources
   // this worker imports. Point CELLD_ESBUILD at the binary if it is not on
   // PATH, and run ./build.mjs first to see bundling failures before a deploy.
   "name": "eve-ambient-mailbox",

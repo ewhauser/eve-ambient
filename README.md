@@ -7,6 +7,27 @@ accepts typed events, deduplicates and filters them, correlates related events,
 buffers them by key, makes a bounded rule or model decision, and delivers
 immutable evidence to an Eve session only when the agent should wake.
 
+```text
+   Eve channels      signal pipeline      durable log
+         │                  │                  │
+         └──────────────────┼──────────────────┘
+                            ▼
+                        publish()
+                            │
+               ┌─ eve-ambient ──────────┐
+               │            ▼           │
+               │  dedupe · filter ──► ✕ │
+               │            ▼           │
+               │  correlate · buffer ◄──┼── [ Postgres | celld ]
+               │            ▼           │
+               │  decide ── ignore ─► ✕ │
+               │            ▼ wake      │
+               │        deliver         │
+               └─────┬──────────┬───────┘
+                     ▼          ▼
+      Postgres: runs · audit    Eve session
+```
+
 ## Why?
 
 Agents are most useful when they can notice what is happening around them, not
@@ -53,16 +74,6 @@ See [Deployment options](https://github.com/ewhauser/eve-ambient/blob/main/docs/
 for the full responsibility boundaries, tradeoffs, and selection guidance.
 
 ## How it works
-
-```mermaid
-flowchart LR
-    A["Channels or external publishers"] --> B["Validate and deduplicate"]
-    B --> C["Filter and correlate"]
-    C --> D["Buffer by key"]
-    D --> E["Rule or model decision"]
-    E --> F["Evidence and delivery"]
-    F --> G["Eve session"]
-```
 
 Across every deployment profile, the runtime provides:
 

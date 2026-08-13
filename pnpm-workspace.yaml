@@ -1,0 +1,9 @@
+packages:
+  - "."
+
+allowBuilds:
+  esbuild: true
+
+# Hold new direct and transitive releases for one day. Security updates can
+# still be selected explicitly when a faster upgrade is required.
+minimumReleaseAge: 1440

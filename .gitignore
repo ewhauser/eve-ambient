@@ -1,0 +1,13 @@
+node_modules/
+.pnpm-store/
+
+.env
+.env.*
+!.env.example
+
+dist/
+coverage/
+/release-artifacts/
+*.tsbuildinfo
+
+.DS_Store

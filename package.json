@@ -1,5 +1,5 @@
 {
-  "name": "eve-ambient",
+  "name": "@ewhauser/eve-ambient",
   "version": "0.3.0",
   "description": "Durable typed event monitors and ambient attention for Eve agents.",
   "license": "MIT",
@@ -40,7 +40,10 @@
   },
   "scripts": {
     "build": "pnpm run clean && tsc -p tsconfig.build.json",
+    "check": "pnpm typecheck && pnpm test && pnpm build && pnpm pack:check",
     "clean": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\"",
+    "pack:check": "node scripts/check-package-artifact.mjs",
+    "pack:release": "node scripts/pack-release-artifact.mjs",
     "prepare": "pnpm run build",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -67,6 +70,7 @@
       "optional": true
     }
   },
+  "packageManager": "pnpm@11.15.0+sha512.266f8957a30d2be6e9468e5e66bcdedd35a794175f71b067ba8504d686cce1d0c0f429b33c323c3c569ad4891e667574a49ff71d1b89a22cc66f13c65818c578",
   "engines": {
     "node": ">=24"
   },
@@ -75,13 +79,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ewhauser/eve-extensions.git",
-    "directory": "packages/eve-ambient"
+    "url": "git+https://github.com/ewhauser/eve-ambient.git"
   },
   "bugs": {
-    "url": "https://github.com/ewhauser/eve-extensions/issues"
+    "url": "https://github.com/ewhauser/eve-ambient/issues"
   },
-  "homepage": "https://github.com/ewhauser/eve-extensions/tree/main/packages/eve-ambient#readme",
+  "homepage": "https://github.com/ewhauser/eve-ambient#readme",
   "dependencies": {
     "xstate": "^5.20.0"
   }

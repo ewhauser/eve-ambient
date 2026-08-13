@@ -1,6 +1,6 @@
-# eve-ambient
+# @ewhauser/eve-ambient
 
-`eve-ambient` is a durable ambient-attention runtime for Eve applications. It
+`@ewhauser/eve-ambient` is a durable ambient-attention runtime for Eve applications. It
 accepts typed events from channels, applies deterministic filtering and exact
 correlation, buffers by key, makes a restricted rule or model decision, and
 delivers immutable structured evidence through a channel-owned conversation
@@ -17,19 +17,24 @@ conversation bindings, and session ingress.
 ## Install
 
 ```sh
-pnpm add eve-ambient
+pnpm add @ewhauser/eve-ambient
 ```
 
-The optional `eve-ambient/ai-sdk` adapter additionally requires `ai` and `zod`:
+This scoped package continues the former unscoped `eve-ambient` package at
+version 0.3.0. Existing applications should replace both the dependency name
+and import specifiers with `@ewhauser/eve-ambient`; the runtime API is
+unchanged.
+
+The optional `@ewhauser/eve-ambient/ai-sdk` adapter additionally requires `ai` and `zod`:
 
 ```sh
 pnpm add ai zod
 ```
 
 For production, apply `migrations/001_eve_ambient.sql` to PostgreSQL. The
-runtime accepts a `pg`-compatible pool through `eve-ambient/postgres` without
+runtime accepts a `pg`-compatible pool through `@ewhauser/eve-ambient/postgres` without
 forcing a particular PostgreSQL client dependency. Local tests can use
-`MemoryMonitorStore` from `eve-ambient/memory`.
+`MemoryMonitorStore` from `@ewhauser/eve-ambient/memory`.
 
 ## Define a channel event
 
@@ -40,7 +45,7 @@ import { z } from "zod";
 import {
   defineChannelEvent,
   defineInboundChannel,
-} from "eve-ambient";
+} from "@ewhauser/eve-ambient";
 
 export const slackEvents = defineInboundChannel({
   id: "slack",
@@ -76,7 +81,7 @@ import {
   defineMonitor,
   ignore,
   modelDecision,
-} from "eve-ambient";
+} from "@ewhauser/eve-ambient";
 
 export const ambientEngineering = defineMonitor({
   id: "ambient-engineering",
@@ -170,9 +175,9 @@ exact stable string or `null`; there is no semantic join or instance merge.
 ## Wire the runtime
 
 ```ts
-import { MonitorRuntime } from "eve-ambient";
-import { createAiSdkMonitorInvoker } from "eve-ambient/ai-sdk";
-import { PostgresMonitorStore } from "eve-ambient/postgres";
+import { MonitorRuntime } from "@ewhauser/eve-ambient";
+import { createAiSdkMonitorInvoker } from "@ewhauser/eve-ambient/ai-sdk";
+import { PostgresMonitorStore } from "@ewhauser/eve-ambient/postgres";
 
 const monitors = new MonitorRuntime({
   applicationId: "engineering-agent",
@@ -267,7 +272,7 @@ It must:
   active, without merging or dropping human input; and
 - execute only as the application principal.
 
-`MemoryConversationChannel` in `eve-ambient/testing` is a binding and
+`MemoryConversationChannel` in `@ewhauser/eve-ambient/testing` is a binding and
 coalescing conformance implementation for tests.
 
 ## Model boundary

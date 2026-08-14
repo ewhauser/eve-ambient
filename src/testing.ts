@@ -36,10 +36,16 @@ export async function assertChannelCanonicalization<
   options: {
     readonly applicationId: string;
     readonly original: TRaw;
-    readonly equivalentRetries: readonly TRaw[];
-    readonly conflictingRetries?: readonly TRaw[] | undefined;
+    readonly equivalentRetries: readonly [TRaw, ...TRaw[]];
+    readonly conflictingRetries: readonly [TRaw, ...TRaw[]];
   },
 ): Promise<IdempotentEnvelope<AcceptedChannelEvent<TEvent>, EventKey>> {
+  if (options.equivalentRetries.length === 0) {
+    throw new TypeError("equivalentRetries must contain at least one fixture");
+  }
+  if (options.conflictingRetries.length === 0) {
+    throw new TypeError("conflictingRetries must contain at least one fixture");
+  }
   const baseline = await canonicalizeChannelDelivery(contract, options.original, {
     applicationId: options.applicationId,
   });
@@ -54,7 +60,7 @@ export async function assertChannelCanonicalization<
       throw new Error(`equivalent retry ${index} changed the input hash`);
     }
   }
-  for (const [index, retry] of (options.conflictingRetries ?? []).entries()) {
+  for (const [index, retry] of options.conflictingRetries.entries()) {
     const result = await canonicalizeChannelDelivery(contract, retry, {
       applicationId: options.applicationId,
     });

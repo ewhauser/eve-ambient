@@ -27,6 +27,13 @@ export function canonicalJson(value: unknown, name = "value"): string {
     seen.add(current);
     try {
       if (Array.isArray(current)) {
+        const keys = Object.keys(current);
+        if (
+          keys.length !== current.length ||
+          keys.some((key, index) => key !== String(index))
+        ) {
+          throw new TypeError(`${path} arrays must not contain holes or named properties`);
+        }
         return current.map((item, index) => normalize(item, `${path}[${index}]`));
       }
       const prototype = Object.getPrototypeOf(current);

@@ -330,8 +330,10 @@ Each stateful component implements the equivalent of:
 ```ts
 type BeginResult<R> =
   | { readonly status: "new" }
+  | { readonly status: "retry"; readonly previousReceipt: R }
   | { readonly status: "in_progress"; readonly retryAt?: string }
   | { readonly status: "completed"; readonly receipt: R }
+  | { readonly status: "failed"; readonly receipt: R }
   | { readonly status: "conflict"; readonly existingInputHash: string };
 
 interface IdempotencyLedger<R> {
@@ -359,7 +361,7 @@ interface IdempotencyLedger<R> {
 }
 ```
 
-`begin`, the component's durable state transition, and creation of its durable result SHOULD be one transaction whenever the backend supports it. Lease expiry may allow a new worker to resume an incomplete operation, but it never creates a new logical key.
+`begin`, the component's durable state transition, and creation of its durable result SHOULD be one transaction whenever the backend supports it. Lease expiry may allow a new worker to resume an incomplete operation, but it never creates a new logical key. A matching retryable failure may be atomically reserved again and returns `retry` with the prior failure receipt. A matching non-retryable failure returns `failed` with its terminal receipt and MUST NOT reacquire the operation.
 
 Receipt storage is component-local:
 

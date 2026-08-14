@@ -367,10 +367,26 @@ export type IdempotencyBeginResult<
   TKey extends IdempotencyKey = IdempotencyKey,
 > =
   | { readonly status: "new" }
+  | {
+      /** A matching retryable failure was atomically reserved for another attempt. */
+      readonly status: "retry";
+      readonly previousReceipt: Extract<
+        IdempotencyReceipt<TResult, TKey>,
+        { readonly status: "failed" }
+      > & { readonly retryable: true };
+    }
   | { readonly status: "in_progress"; readonly retryAt?: string | undefined }
   | {
       readonly status: "completed";
       readonly receipt: Extract<IdempotencyReceipt<TResult, TKey>, { readonly status: "completed" }>;
+    }
+  | {
+      /** A matching non-retryable failure is terminal and must not run again. */
+      readonly status: "failed";
+      readonly receipt: Extract<
+        IdempotencyReceipt<TResult, TKey>,
+        { readonly status: "failed" }
+      > & { readonly retryable: false };
     }
   | { readonly status: "conflict"; readonly existingInputHash: InputHash };
 
@@ -383,6 +399,10 @@ export interface IdempotencyLedger<
    * existing state; a different input hash returns `conflict` and must not
    * replace the original reservation. Expiry ends this component's guarantee
    * and is deliberately independent of payload retention.
+   *
+   * `new` means the first or post-expiry attempt was reserved. `retry` means a
+   * matching retryable failure was atomically reserved again under the same
+   * key. `failed` replays a terminal failure without reacquiring the operation.
    */
   begin(input: {
     readonly namespace: string;

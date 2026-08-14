@@ -13,9 +13,9 @@ Evaluate a topology along these dimensions:
 | Ingress | Which component receives provider events and normalizes them into channel events? |
 | Selection | Does Eve Ambient see the raw normalized stream, or only events selected upstream? |
 | Durable acceptance | At what point may a webhook be acknowledged or a source offset be committed? |
-| Event ownership | Where do normalized payloads live for replay, dedupe, and evaluation? |
+| Payload custody | Which component owns each complete payload until the next durable handoff accepts it? |
 | Mailbox ownership | Which system serializes one correlation key, buffers events, and schedules debounce or cooldown expiry? |
-| Ordering and replay | Which guarantees exist, and which component is responsible for preserving them? |
+| Ordering | Which guarantees exist, and which component is responsible for preserving them? |
 | Operations | How many stateful systems, workers, credentials, and failure boundaries must be operated? |
 
 The same monitor definition can be used across the supported profiles, but
@@ -26,7 +26,7 @@ not a runtime toggle.
 
 | Profile | Ingress and selection | Event and payload storage | Mailbox and timers | Scaling | Operational burden | Maturity |
 |---|---|---|---|---|---|---|
-| **Postgres-first** | Eve channels normalize events; Eve Ambient filters after durable acceptance | PostgreSQL | PostgreSQL instance rows, due scans, and leased claims | Add workers and scale PostgreSQL vertically; validate the actual workload before introducing another stateful tier | One durable system plus workers | Supported; default |
+| **Postgres-first** | Eve channels normalize events; Eve Ambient filters after durable acceptance | Full branch and batch values in PostgreSQL until their next handoff or terminal completion | PostgreSQL instance rows, due scans, and leased claims | Add workers and scale PostgreSQL vertically; validate the actual workload before introducing another stateful tier | One durable system plus workers | Supported; default |
 | **Bring your own signal pipeline** | An external system selects events and calls `publish()` | External system before Eve acceptance; PostgreSQL for accepted events | PostgreSQL unless celld is selected separately | Raw-stream work scales outside Eve; Eve scales with the selected-event rate | External pipeline plus Eve and PostgreSQL | Supported through the publishing API |
 | **External log + distributed mailbox** | A channel gateway writes a durable log; partitioned consumers normalize and may perform coarse selection before publishing | Kafka or a similar log owns the raw stream; PostgreSQL holds events accepted through `publish()`, runs, decisions, dead letters, and audit | celld cells hold references, per-key lifecycle state, and alarms | Partition consumers by the upstream log and add celld nodes for mailbox concurrency | Multiple stateful systems and explicit handoff recovery | Supported as a custom `publish()` bridge with experimental celld; a first-class Kafka/EventLog adapter is not shipped |
 
@@ -42,9 +42,9 @@ This is the right starting point for most installations.
 
 ```text
 provider -> channel -> publish() -> PostgreSQL -> drain() -> decision -> delivery
-                                  event store     mailbox
-                                  dedupe          timers
-                                  audit           leases
+                                  ingress receipt mailbox by value
+                                  dedupe tombstone timers
+                                  lineage          leases
 ```
 
 `publish()` returns after the normalized event and matching subscription
@@ -72,7 +72,7 @@ decision and delivery lifecycle. A trivial monitor filter is acceptable when
 the upstream system already performs all deterministic selection.
 
 This profile reduces the volume entering Eve, but it also moves raw-event
-replay, upstream ordering, selection explainability, and pre-acceptance loss
+retention, upstream ordering, selection explainability, and pre-acceptance loss
 recovery outside the package. See [Prefiltered ingress](prefiltered-ingress.md).
 
 ## External log and distributed mailbox
@@ -86,29 +86,27 @@ channel gateway -> Kafka -> consumer -> publish() -> PostgreSQL event and audit
                                                    -> evaluator -> delivery
 ```
 
-Kafka, or an equivalent durable log, owns source retention, replay, ordering,
+Kafka, or an equivalent durable log, owns source retention, ordering,
 and consumer offsets. A consumer normalizes the record and calls `publish()`;
 it may perform coarse selection first when PostgreSQL should not receive the
 entire raw firehose. Eve Ambient then retains schema validation, phase handling,
 dedupe, deterministic monitor filtering, correlation, and loop prevention.
 Only filter-surviving event references are appended to celld. PostgreSQL remains
 the authoritative accepted-payload, run, decision, dead-letter, budget, and
-audit store.
+audit store. This is the current transitional implementation, not the target
+system interface: RFC 0001 Phase 3 moves complete envelopes into celld and its
+evaluator callback.
 
 With today's public API, the upstream consumer may commit its offset after
 `publish()` returns `accepted` or `duplicate`. The event and subscription are
 then durable in PostgreSQL, and the store-to-cell handoff retries under a stable
 subscription ID if a process crashes or a response is lost.
 
-A future external-reference `EventLog` integration could leave accepted
-payloads in Kafka and bypass PostgreSQL event acceptance. In that different
-topology, the source offset could be committed only after the mailbox append was
-durably accepted.
-
-The package does not currently ship a generic `EventLog` interface or Kafka
-adapter. Applications can build this topology around the public publishing API,
-but should describe the guarantees of their integration instead of implying
-that ordering, replay, or payload loading is supplied automatically.
+The package intentionally does not expose a generic event repository or
+reference-loading interface. Applications can build this topology around the
+public publishing API, but every adapter must pass the complete normalized
+payload to its next durable receiver and should describe its own ordering and
+offset guarantees explicitly.
 
 The celld mailbox is separately documented in [celld mailbox](celld.md).
 
@@ -121,8 +119,8 @@ Use prefiltered ingress when the organization already has a durable and
 observable signal pipeline, or when Eve should intentionally receive only a
 small selected subset of a much larger stream.
 
-Add an external log when replayable high-volume ingestion and partitioned
-consumption are requirements. Add celld only when per-key mailbox serialization
+Add an external log when high-volume partitioned consumption or independent
+source retention is required. Add celld only when per-key mailbox serialization
 or PostgreSQL due-scan and advisory-lock traffic is the measured bottleneck.
 Those are independent decisions: an external log does not require celld, and
 celld does not require Kafka.

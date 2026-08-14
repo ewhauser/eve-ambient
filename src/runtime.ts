@@ -26,7 +26,9 @@ import type {
   MailboxOptions,
 } from "./mailbox.js";
 import type {
-  BufferedEventRef,
+  BufferedEvent,
+  FrozenMonitorBatch,
+  FrozenMonitorBatchSummary,
   MonitorStore,
   MonitorStoreTransaction,
   StoredEvent,
@@ -36,6 +38,16 @@ import type {
   StoredSubscription,
 } from "./storage.js";
 import { instanceStoreKey, scopedKey } from "./storage.js";
+import {
+  assertIdempotencyInput,
+  deriveBatchKey,
+  deriveBranchKey,
+  deriveEventKey,
+  deriveRunKey,
+  deriveWakeKey,
+  freezeMembership,
+  hashIdempotencyInput,
+} from "./idempotency.js";
 import {
   BindingConflictError,
   TransientMonitorError,
@@ -138,23 +150,6 @@ export interface DrainResult {
   readonly evaluations: number;
   readonly runs: number;
   readonly remaining: boolean;
-}
-
-export interface ReplayOptions {
-  readonly decision: "recorded" | "live";
-  readonly shadow?: boolean | undefined;
-  readonly canary?: {
-    readonly channel: MonitorDeliveryChannel;
-    readonly target: JsonValue;
-  } | undefined;
-}
-
-export interface ReplayResult {
-  readonly runId: string;
-  readonly decision: MonitorDecision;
-  readonly evidence: JsonValue;
-  readonly route: { readonly channelId: string; readonly target: JsonValue } | null;
-  readonly delivered: boolean;
 }
 
 /**
@@ -487,77 +482,6 @@ export class MonitorRuntime {
     };
   }
 
-  async replay(runId: string, options: ReplayOptions): Promise<ReplayResult> {
-    this.#assertInitialized();
-    const run = await this.#store.getRun(runId);
-    if (run === null || run.applicationId !== this.#applicationId) {
-      throw new Error(`unknown monitor run ${runId}`);
-    }
-    if (run.replayExpiresAt <= this.#now()) {
-      throw new Error(
-        `monitor run ${runId} replay input expired at ${run.replayExpiresAt}; ` +
-        `the decision record remains available until ${run.expiresAt}`,
-      );
-    }
-    const monitor = this.#definition(run.monitorId, run.definitionVersion);
-    const events = await this.#loadRunEvents(run);
-    const contextBase = {
-      events,
-      instance: freeze(structuredClone(run.instanceView)),
-      batch: freeze(batchView(run.batch)),
-    };
-    let decisionValue: MonitorDecision;
-    if (options.decision === "recorded") {
-      if (run.decision === undefined) throw new Error(`run ${runId} has no recorded decision`);
-      decisionValue = structuredClone(run.decision);
-    } else {
-      const decisionDefinition = monitor.definition.decision;
-      if (typeof decisionDefinition === "function") {
-        decisionValue = this.#callPure("rule decision", () => decisionDefinition(contextBase));
-      } else {
-        decisionValue = await this.#invokeModelDecision(
-          decisionDefinition,
-          contextBase,
-          { ...run, id: this.#id("replay"), mode: "shadow" },
-        );
-      }
-    }
-    validateDecision(decisionValue, "replay decision");
-    const wakeContext = freeze({ ...contextBase, decision: decisionValue }) as MonitorWakeContext<ChannelEvent>;
-    const evidence = this.#callPure("replay evidence projection", () =>
-      monitor.definition.task.evidence(wakeContext),
-    );
-    assertSizedJson(evidence, "replay evidence", this.#maxEvidenceBytes);
-    const route = this.#callPure("replay route", () => monitor.definition.route(wakeContext));
-    if (route !== null) {
-      if (route.auth !== "app") throw new TypeError('monitor routes must use auth: "app"');
-      if (this.#deliveryChannels.get(route.channel.id) !== route.channel) {
-        throw new TypeError(`route channel ${route.channel.id} is not registered with this runtime`);
-      }
-      assertSizedJson(route.target, "replay route target", TARGET_MAX_BYTES);
-    }
-    const projectedRoute =
-      route === null ? null : { channelId: route.channel.id, target: cloneJson(route.target) };
-    let delivered = false;
-    if (decisionValue.action === "wake" && options.shadow === false && options.canary !== undefined) {
-      const snapshot = this.#snapshot(run, decisionValue, evidence, contextBase.batch, `replay_${run.id}`);
-      await options.canary.channel.deliver({
-        tenantId: run.tenantId,
-        applicationId: run.applicationId,
-        idempotencyKey: `monitor-replay:${run.id}:${options.decision}`,
-        auth: "app",
-        target: options.canary.target,
-        session: { strategy: monitor.definition.session?.strategy ?? "channel" },
-        taskInstructions: monitor.definition.task.instructions,
-        evidence: snapshot,
-        trigger: this.#trigger(run, snapshot, events),
-        concurrency: "coalesce",
-      });
-      delivered = true;
-    }
-    return { runId, decision: decisionValue, evidence, route: projectedRoute, delivered };
-  }
-
   async listRuns(monitorId?: string): Promise<readonly StoredMonitorRun[]> {
     return this.#store.listRuns({ applicationId: this.#applicationId, monitorId });
   }
@@ -607,15 +531,35 @@ export class MonitorRuntime {
     }
     const now = this.#now();
     const traceId = input.trace?.traceId ?? this.#id("trace");
-    const dedupeKey = `dedupe:${stableHash(
-      scopedKey(
-        input.tenantId,
-        this.#applicationId,
-        channel.id,
-        input.installationId,
-        input.id,
-      ),
-    )}`;
+    const eventKey = await deriveEventKey({
+      tenantId: input.tenantId,
+      applicationId: this.#applicationId,
+      channelId: channel.id,
+      installationId: input.installationId,
+      sourceEventId: input.id,
+    });
+    const inputHash = await hashIdempotencyInput({
+      applicationId: this.#applicationId,
+      canonicalizationVersion: 1,
+      event: {
+        id: input.id,
+        type: String(type),
+        version: definition.version,
+        ...(input.occurredAt === undefined ? {} : { occurredAt: input.occurredAt }),
+        data: parsed,
+        source: {
+          channelId: channel.id,
+          installationId: input.installationId,
+          tenantId: input.tenantId,
+        },
+        ...(input.actor === undefined ? {} : { actor: input.actor }),
+        ...(input.authRef === undefined ? {} : { authRef: input.authRef }),
+        ...(parsedReplyTarget === undefined ? {} : { replyTarget: parsedReplyTarget }),
+        ...(input.subjects === undefined ? {} : { subjects: input.subjects }),
+        origin: { ...input.origin, depth: input.origin.depth ?? 0 },
+      },
+    });
+    const dedupeKey = eventKey;
     const matching = this.#matchingMonitors(channel.id, String(type), phase);
     const retentionMonitors = this.#retentionMonitors(channel.id, String(type));
     const retentionMs =
@@ -694,6 +638,8 @@ export class MonitorRuntime {
     };
     const record: Omit<StoredEvent, "ingressSequence"> = {
       ref,
+      eventKey,
+      inputHash,
       dedupeKey,
       tenantId: input.tenantId,
       applicationId: this.#applicationId,
@@ -722,10 +668,16 @@ export class MonitorRuntime {
     const result = await this.#store.transaction(`ingress:${dedupeKey}`, async (tx) => {
       const duplicate = await tx.getEventByDedupeKey(dedupeKey);
       if (duplicate !== null && duplicate.dedupeExpiresAt > now) {
+        assertIdempotencyInput({
+          namespace: "ingress",
+          key: eventKey,
+          existingInputHash: duplicate.inputHash,
+          receivedInputHash: inputHash,
+        });
         return { status: "duplicate" as const, eventId: duplicate.ref, traceId: duplicate.traceId };
       }
       if (duplicate !== null) {
-        // Preserve the expired event tombstone for buffered refs while freeing
+        // Preserve the expired ingress receipt while freeing
         // the provider dedupe key for this newly accepted delivery.
         await tx.releaseEventDedupe(duplicate.ref);
       }
@@ -735,13 +687,13 @@ export class MonitorRuntime {
       const acceptedRecord: StoredEvent = { ...record, ingressSequence };
       await tx.putEvent(acceptedRecord);
       for (const monitor of matching) {
-        await tx.putSubscription(this.#newSubscription(acceptedRecord, monitor, phase));
+        await tx.putSubscription(await this.#newSubscription(acceptedRecord, monitor, phase));
       }
       return { status: "accepted" as const, eventId: ref, traceId };
     });
     await this.#emit(
       result.status === "accepted" ? "monitor.event.accepted" : "monitor.event.deduplicated",
-      { tenantId: input.tenantId, eventRef: result.eventId },
+      { tenantId: input.tenantId, eventRef: result.eventId, eventKey },
     );
     return result;
   }
@@ -813,7 +765,7 @@ export class MonitorRuntime {
       if (outcome === "undispatched") {
         const matching = this.#matchingMonitors(event.channelId, event.eventType, outcome);
         for (const monitor of matching) {
-          const subscription = this.#newSubscription(event, monitor, outcome);
+          const subscription = await this.#newSubscription(event, monitor, outcome);
           if ((await tx.getSubscription(subscription.id)) === null) {
             await tx.putSubscription(subscription);
           }
@@ -886,6 +838,7 @@ export class MonitorRuntime {
       id: this.#id("dlq"),
       tenantId: event.tenantId,
       applicationId: event.applicationId,
+      eventKey: event.eventKey,
       eventRef: event.ref,
       stage: "direct-dispatch",
       reason,
@@ -893,18 +846,49 @@ export class MonitorRuntime {
     };
   }
 
-  #newSubscription(
+  async #newSubscription(
     event: StoredEvent,
     monitor: CompiledMonitor,
     phase?: "observed" | "undispatched",
-  ): StoredSubscription {
+  ): Promise<StoredSubscription> {
     const now = this.#now();
-    const id = `sub_${stableHash(
-      scopedKey(monitor.definition.id, monitor.version, event.ref, phase ?? "event"),
-    )}`;
+    if (event.event === undefined) {
+      throw new Error(`accepted event ${event.eventKey} payload disappeared before fan-out`);
+    }
+    const branchKey = await deriveBranchKey({
+      eventKey: event.eventKey,
+      monitorId: monitor.definition.id,
+      definitionVersion: monitor.version,
+      ...(phase === undefined ? {} : { phase }),
+    });
+    const branchEvent = freeze({
+      ...structuredClone(event.event),
+      source: {
+        ...structuredClone(event.event.source),
+        ...(phase === undefined ? {} : { phase }),
+      },
+    }) as ChannelEvent<string, JsonValue, JsonValue>;
+    const inputHash = await hashIdempotencyInput({
+      parentInputHash: event.inputHash,
+      eventKey: event.eventKey,
+      branchKey,
+      tenantId: event.tenantId,
+      applicationId: event.applicationId,
+      monitorId: monitor.definition.id,
+      definitionVersion: monitor.version,
+      phase: phase ?? null,
+      acceptedAt: event.acceptedAt,
+      orderingKey: event.ingressSequence,
+    });
     return {
-      id,
-      eventRef: event.ref,
+      id: branchKey,
+      branchKey,
+      eventKey: event.eventKey,
+      eventInputHash: event.inputHash,
+      inputHash,
+      event: branchEvent,
+      bytes: event.bytes,
+      acceptedAt: event.acceptedAt,
       tenantId: event.tenantId,
       applicationId: event.applicationId,
       monitorId: monitor.definition.id,
@@ -922,19 +906,8 @@ export class MonitorRuntime {
   async #processSubscription(id: string): Promise<void> {
     const claimed = await this.#claimSubscription(id);
     if (claimed === null) return;
-    const eventRecord = await this.#store.getEvent(claimed.eventRef);
-    if (eventRecord === null || eventRecord.event === undefined || eventRecord.payloadExpiresAt <= this.#now()) {
-      await this.#deadLetterSubscription(claimed, "ingress", "source payload expired before preprocessing");
-      return;
-    }
     const monitor = this.#definition(claimed.monitorId, claimed.definitionVersion);
-    const event = freeze({
-      ...structuredClone(eventRecord.event),
-      source: {
-        ...structuredClone(eventRecord.event.source),
-        ...(claimed.phase === undefined ? {} : { phase: claimed.phase }),
-      },
-    }) as ChannelEvent;
+    const event = freeze(structuredClone(claimed.event)) as ChannelEvent;
 
     if (this.#isLoop(event, monitor.definition)) {
       await this.#finishSubscription(claimed, "filtered", "loop-prevention");
@@ -975,7 +948,7 @@ export class MonitorRuntime {
       } else {
         correlationKey =
           monitor.definition.correlate === undefined
-            ? event.ref
+            ? claimed.eventKey
             : this.#callPure("correlate", () => monitor.definition.correlate!({ event }));
       }
       if (correlationKey !== null) {
@@ -1053,18 +1026,13 @@ export class MonitorRuntime {
       return processing;
     });
     if (claimed === null) return;
-    const event = await this.#store.getEvent(claimed.eventRef);
-    if (event === null || event.event === undefined || event.payloadExpiresAt <= this.#now()) {
-      await this.#deadLetterSubscription(claimed, "buffer", "source payload expired before append");
-      return;
-    }
     const correlationKey = claimed.correlationKey;
     if (correlationKey === undefined) {
       await this.#deadLetterSubscription(claimed, "buffer", "preprocessed correlation key is missing");
       return;
     }
     const monitor = this.#definition(claimed.monitorId, claimed.definitionVersion);
-    await this.#appendSubscription(claimed, event, monitor, correlationKey);
+    await this.#appendSubscription(claimed, monitor, correlationKey);
   }
 
   async #claimSubscription(id: string): Promise<StoredSubscription | null> {
@@ -1077,26 +1045,20 @@ export class MonitorRuntime {
         return null;
       }
       if (current.attempt >= this.#retry.maxAttempts) {
-        const terminal: StoredSubscription = {
-          ...current,
-          status: "dead-lettered",
-          outcome: "maximum retry attempts exceeded",
-          leaseExpiresAt: undefined,
-          updatedAt: now,
-        };
-        await tx.putSubscription(terminal);
         await tx.putDeadLetter({
           id: this.#id("dlq"),
           tenantId: current.tenantId,
           applicationId: current.applicationId,
           monitorId: current.monitorId,
           definitionVersion: current.definitionVersion,
-          eventRef: current.eventRef,
+          eventKey: current.eventKey,
+          branchKey: current.branchKey,
           subscriptionId: current.id,
           stage: "retry",
           reason: "maximum retry attempts exceeded",
           createdAt: now,
         });
+        await tx.deleteSubscription(current.id);
         return null;
       }
       const claimed: StoredSubscription = {
@@ -1113,7 +1075,6 @@ export class MonitorRuntime {
 
   async #appendSubscription(
     subscription: StoredSubscription,
-    event: StoredEvent,
     monitor: CompiledMonitor,
     correlationKey: string,
   ): Promise<void> {
@@ -1126,18 +1087,17 @@ export class MonitorRuntime {
       correlationKeyHash: keyHash,
     });
     const buffer = monitor.definition.buffer ?? { mode: "immediate" as const };
-    if (buffer.mode === "debounce" && event.bytes > buffer.maxBytes) {
+    if (buffer.mode === "debounce" && subscription.bytes > buffer.maxBytes) {
       await this.#deadLetterSubscription(
         subscription,
         "buffer",
-        `event is ${event.bytes} bytes and exceeds monitor maxBytes ${buffer.maxBytes}`,
+        `event is ${subscription.bytes} bytes and exceeds monitor maxBytes ${buffer.maxBytes}`,
       );
       return;
     }
     if (this.#mailbox.mode === "celld") {
       await this.#appendSubscriptionToCell(
         subscription,
-        event,
         monitor,
         correlationKey,
         keyHash,
@@ -1172,15 +1132,18 @@ export class MonitorRuntime {
             instance = this.#newInstance(instanceId, subscription, monitor, correlationKey, keyHash);
             nextOutcome = "opened";
           }
-          const ref: BufferedEventRef = {
-            ref: event.ref,
-            bytes: event.bytes,
-            acceptedAt: event.acceptedAt,
-            ingressSequence: event.ingressSequence,
+          const buffered: BufferedEvent = {
+            branchKey: subscription.branchKey,
+            eventKey: subscription.eventKey,
+            inputHash: subscription.inputHash,
+            event: structuredClone(subscription.event),
+            bytes: subscription.bytes,
+            acceptedAt: subscription.acceptedAt,
+            ingressSequence: subscription.ingressSequence,
           };
           const append = dispatchLifecycle(instance, monitor.definition, {
             type: "APPEND",
-            ref,
+            event: buffered,
             now,
           });
           instance = {
@@ -1193,14 +1156,9 @@ export class MonitorRuntime {
           };
           if (append.flushed) nextOutcome = "flushed";
           await tx.putInstance(instance);
-          await tx.putSubscription({
-            ...subscription,
-            status: "buffered",
-            correlationKeyHash: keyHash,
-            outcome: "appended",
-            leaseExpiresAt: undefined,
-            updatedAt: now,
-          });
+          // The instance now owns a complete copy. The branch handoff row is
+          // ephemeral and can disappear in the same transaction.
+          await tx.deleteSubscription(subscription.id);
           return nextOutcome;
         });
       } catch (error) {
@@ -1246,7 +1204,6 @@ export class MonitorRuntime {
    */
   async #appendSubscriptionToCell(
     subscription: StoredSubscription,
-    event: StoredEvent,
     monitor: CompiledMonitor,
     correlationKey: string,
     keyHash: string,
@@ -1269,10 +1226,14 @@ export class MonitorRuntime {
       correlationKey,
       correlationKeyHash: keyHash,
       subscriptionId: subscription.id,
-      ref: event.ref,
-      bytes: event.bytes,
-      ingressSequence: event.ingressSequence,
-      acceptedAt: event.acceptedAt,
+      branchKey: subscription.branchKey,
+      eventKey: subscription.eventKey,
+      inputHash: subscription.inputHash,
+      ...(subscription.phase === undefined ? {} : { phase: subscription.phase }),
+      ref: subscription.event.ref,
+      bytes: subscription.bytes,
+      ingressSequence: subscription.ingressSequence,
+      acceptedAt: subscription.acceptedAt,
     };
     let outcome: CelldAppendOutcome;
     try {
@@ -1308,14 +1269,8 @@ export class MonitorRuntime {
     await this.#store.transaction(`subscription:${subscription.id}`, async (tx) => {
       const current = await tx.getSubscription(subscription.id);
       if (current === null) return;
-      await tx.putSubscription({
-        ...current,
-        status: "buffered",
-        correlationKeyHash: keyHash,
-        outcome: "appended",
-        leaseExpiresAt: undefined,
-        updatedAt: now,
-      });
+      // celld owns the accepted branch after its append receipt commits.
+      await tx.deleteSubscription(current.id);
     });
     await this.#emit(
       outcome === "opened"
@@ -1403,6 +1358,19 @@ export class MonitorRuntime {
       throw new EvaluationRequestError(errorMessage(error), "unknown-definition");
     }
     const now = this.#now();
+    const mode = monitor.definition.mode ?? "active";
+    const presentedBatchIdentity = await this.#batchIdentity({
+      instanceId: request.instanceId,
+      monitorId: request.monitorId,
+      definitionVersion: request.definitionVersion,
+      batch: request.batch,
+      frozenAt: request.claimedAt,
+    });
+    const presentedRunIdentity = await this.#runIdentity({
+      batch: presentedBatchIdentity,
+      mode,
+      instanceView: request.instanceView,
+    });
     const existing = await this.#store.getRun(request.runId);
     if (existing !== null) {
       if (
@@ -1417,6 +1385,22 @@ export class MonitorRuntime {
           "run-conflict",
         );
       }
+      if (existing.runKey !== presentedRunIdentity.runKey) {
+        throw new EvaluationRequestError(
+          `run ${request.runId} was presented with different frozen membership`,
+          "run-conflict",
+        );
+      }
+      try {
+        assertIdempotencyInput({
+          namespace: "evaluation",
+          key: existing.runKey,
+          existingInputHash: existing.inputHash,
+          receivedInputHash: presentedRunIdentity.inputHash,
+        });
+      } catch (error) {
+        throw new EvaluationRequestError(errorMessage(error), "run-conflict");
+      }
       if (isTerminalRunStatus(existing.status)) return recordedEvaluation(existing);
       const retryAt = evaluationUnavailableUntil(existing, now);
       if (retryAt !== null) return scheduledEvaluation(existing.id, retryAt);
@@ -1424,28 +1408,68 @@ export class MonitorRuntime {
     const retention = monitor.definition.retention ?? DEFAULT_RETENTION;
     let run: StoredMonitorRun;
     if (existing === null) {
-      const replayExpiries: string[] = [];
+      const events: BufferedEvent[] = [];
       for (const reference of request.batch.events) {
         const record = await this.#store.getEvent(reference.ref);
-        if (record !== null) replayExpiries.push(record.payloadExpiresAt);
+        if (record === null || record.event === undefined) {
+          throw new EvaluationRequestError(
+            `celld source event ${reference.eventKey} is unavailable`,
+            "source-unavailable",
+          );
+        }
+        if (record.eventKey !== reference.eventKey) {
+          throw new EvaluationRequestError(
+            `celld source event ${reference.ref} does not match ${reference.eventKey}`,
+            "event-conflict",
+          );
+        }
+        events.push({
+          branchKey: reference.branchKey,
+          eventKey: reference.eventKey,
+          inputHash: reference.inputHash,
+          event: freeze({
+            ...structuredClone(record.event),
+            source: {
+              ...structuredClone(record.event.source),
+              ...(reference.phase === undefined ? {} : { phase: reference.phase }),
+            },
+          }),
+          bytes: reference.bytes,
+          acceptedAt: reference.acceptedAt,
+          ingressSequence: reference.ingressSequence,
+        });
       }
+      const batch = await this.#freezeMonitorBatch({
+        instanceId: request.instanceId,
+        monitorId: request.monitorId,
+        definitionVersion: request.definitionVersion,
+        batch: { ...structuredClone(request.batch), events },
+        frozenAt: request.claimedAt,
+      });
+      const identity = await this.#runIdentity({
+        batch,
+        mode,
+        instanceView: request.instanceView,
+      });
       run = {
         id: request.runId,
+        runKey: identity.runKey,
+        inputHash: identity.inputHash,
+        eventKeys: batch.eventKeys,
         instanceId: request.instanceId,
         tenantId: request.tenantId,
         applicationId: request.applicationId,
         monitorId: request.monitorId,
         definitionVersion: request.definitionVersion,
         correlationKeyHash: request.correlationKeyHash,
-        batch: structuredClone(request.batch),
-        mode: monitor.definition.mode ?? "active",
+        batch,
+        mode,
         instanceView: structuredClone(request.instanceView),
         status: "processing",
         stage: "decision",
         attempt: 1,
         availableAt: now,
         leaseExpiresAt: addMs(now, this.#retry.leaseMs),
-        replayExpiresAt: replayExpiries.sort()[0] ?? now,
         createdAt: now,
         updatedAt: now,
         expiresAt: addMs(now, durationMs(retention.decisions)),
@@ -1504,6 +1528,79 @@ export class MonitorRuntime {
     );
   }
 
+  async #freezeMonitorBatch(input: {
+    readonly instanceId: string;
+    readonly monitorId: string;
+    readonly definitionVersion: string;
+    readonly batch: StoredMonitorBatch<BufferedEvent>;
+    readonly frozenAt: string;
+  }): Promise<FrozenMonitorBatch> {
+    const identity = await this.#batchIdentity(input);
+    return freeze({
+      ...structuredClone(input.batch),
+      ...identity,
+    });
+  }
+
+  async #batchIdentity(input: {
+    readonly instanceId: string;
+    readonly monitorId: string;
+    readonly definitionVersion: string;
+    readonly batch: Pick<StoredMonitorBatch, "bytes" | "openedAt" | "closedAt" | "closedBy"> & {
+      readonly events: readonly Pick<BufferedEvent, "branchKey" | "eventKey" | "inputHash">[];
+    };
+    readonly frozenAt: string;
+  }) {
+    const membership = await freezeMembership({
+      namespace: `monitor-batch:${input.instanceId}`,
+      orderedMembers: input.batch.events.map((event) => ({
+        key: event.branchKey,
+        inputHash: event.inputHash,
+      })),
+      frozenAt: input.frozenAt,
+      deriveOperationKey: (orderedBranchKeys) => deriveBatchKey({
+        instanceId: input.instanceId,
+        orderedBranchKeys,
+      }),
+    });
+    const eventKeys = [...new Set(input.batch.events.map((event) => event.eventKey))];
+    const inputHash = await hashIdempotencyInput({
+      instanceId: input.instanceId,
+      monitorId: input.monitorId,
+      definitionVersion: input.definitionVersion,
+      batchKey: membership.operationKey,
+      members: membership.members,
+      frozenAt: membership.frozenAt,
+      openedAt: input.batch.openedAt,
+      closedAt: input.batch.closedAt,
+      closedBy: input.batch.closedBy,
+      eventCount: input.batch.events.length,
+      bytes: input.batch.bytes,
+    });
+    return {
+      batchKey: membership.operationKey,
+      inputHash,
+      eventKeys,
+      frozenAt: membership.frozenAt,
+    };
+  }
+
+  async #runIdentity(input: {
+    readonly batch: Pick<FrozenMonitorBatch, "batchKey" | "inputHash">;
+    readonly mode: "active" | "shadow" | "disabled";
+    readonly instanceView: MonitorInstanceView;
+  }) {
+    const runKey = await deriveRunKey({ batchKey: input.batch.batchKey });
+    const inputHash = await hashIdempotencyInput({
+      runKey,
+      batchKey: input.batch.batchKey,
+      batchInputHash: input.batch.inputHash,
+      mode: input.mode,
+      instanceView: input.instanceView,
+    });
+    return { runKey, inputHash };
+  }
+
   #newInstance(
     id: string,
     subscription: StoredSubscription,
@@ -1545,42 +1642,49 @@ export class MonitorRuntime {
       }
       const monitor = this.#definition(instance.monitorId, instance.definitionVersion);
       const generation = instance.evaluationGeneration + 1;
-      const runId = `run_${stableHash(scopedKey(instance.id, String(generation)))}`;
+      const provisionalRunId = `freezing_${stableHash(scopedKey(instance.id, String(generation)))}`;
       const claim = dispatchLifecycle(instance, monitor.definition, {
         type: "CLAIM",
-        runId,
+        runId: provisionalRunId,
         now,
       });
       if (claim.claimedBatch === undefined) {
         await tx.putInstance({ ...claim.instance, updatedAt: now });
         return null;
       }
-      const replayExpiries: string[] = [];
-      for (const reference of claim.claimedBatch.events) {
-        const event = await tx.getEvent(reference.ref);
-        if (event !== null) replayExpiries.push(event.payloadExpiresAt);
-      }
-      const replayExpiresAt = replayExpiries.sort()[0] ?? now;
+      const batch = await this.#freezeMonitorBatch({
+        instanceId,
+        monitorId: instance.monitorId,
+        definitionVersion: instance.definitionVersion,
+        batch: claim.claimedBatch,
+        frozenAt: now,
+      });
+      const mode = monitor.definition.mode ?? "active";
+      const view = instanceView(instance);
+      const identity = await this.#runIdentity({ batch, mode, instanceView: view });
       const nextInstance: StoredMonitorInstance = {
         ...claim.instance,
+        activeRunId: identity.runKey,
         updatedAt: now,
       };
       const run: StoredMonitorRun = {
-        id: runId,
+        id: identity.runKey,
+        runKey: identity.runKey,
+        inputHash: identity.inputHash,
+        eventKeys: batch.eventKeys,
         instanceId,
         tenantId: instance.tenantId,
         applicationId: instance.applicationId,
         monitorId: instance.monitorId,
         definitionVersion: instance.definitionVersion,
         correlationKeyHash: instance.correlationKeyHash,
-        batch: claim.claimedBatch,
-        mode: monitor.definition.mode ?? "active",
-        instanceView: instanceView(instance),
+        batch,
+        mode,
+        instanceView: view,
         status: "pending",
         stage: "decision",
         attempt: 0,
         availableAt: now,
-        replayExpiresAt,
         createdAt: now,
         updatedAt: now,
         expiresAt: addMs(now, durationMs((monitor.definition.retention ?? DEFAULT_RETENTION).decisions)),
@@ -1650,11 +1754,12 @@ export class MonitorRuntime {
   async #continueRun(initial: StoredMonitorRun, context?: CelldEvaluationContext): Promise<void> {
     let run = initial;
     const monitor = this.#definition(run.monitorId, run.definitionVersion);
-    const events = await this.#loadRunEvents(run);
+    const actionableBatch = requireActionableBatch(run);
+    const events = actionableBatch.events.map((buffered) => freeze(structuredClone(buffered.event)));
     const base = freeze({
       events,
       instance: structuredClone(run.instanceView),
-      batch: batchView(run.batch),
+      batch: batchView(actionableBatch),
     });
 
     if (run.decision === undefined) {
@@ -1776,12 +1881,13 @@ export class MonitorRuntime {
       delivery = { correlationKey: context.correlationKey, binding: context.binding };
     }
     const channel = this.#deliveryChannels.get(run.route!.channelId)!;
+    const wakeKey = await deriveWakeKey({ runKey: run.runKey, routeId: run.route!.channelId });
     await this.#emit("monitor.delivery.started", this.#runDetails(run));
     const idleTimeout = monitor.definition.session?.idleTimeout;
     const receipt = await channel.deliver({
       tenantId: run.tenantId,
       applicationId: run.applicationId,
-      idempotencyKey: `monitor:${run.id}:0`,
+      idempotencyKey: wakeKey,
       auth: "app",
       target: run.route!.target,
       ...(delivery.binding?.bindingRef === undefined
@@ -1827,7 +1933,7 @@ export class MonitorRuntime {
     if (invocation.initialLimit !== undefined) {
       const limited = invocation.initialLimit;
       throw new Error(
-        `live replay denied by ${limited.scope} ${limited.cause} until ${limited.retryAt}`,
+        `model invocation denied by ${limited.scope} ${limited.cause} until ${limited.retryAt}`,
       );
     }
     return invocation.decision;
@@ -2196,8 +2302,8 @@ export class MonitorRuntime {
     if (context !== undefined) {
       // celld mode: the instance lives in the cell, so the terminal
       // `RUN_COMPLETED` transition is dispatched there, from the outcome this
-      // records and returns. The run record is written identically either way,
-      // which is what keeps `replay()` mode-independent.
+      // records and returns. The run record uses the same terminal shape in
+      // either mailbox mode.
       const completed = await this.#store.transaction(
         `instance:${run.instanceId}`,
         async (tx) => {
@@ -2205,6 +2311,7 @@ export class MonitorRuntime {
           if (currentRun === null) return null;
           const next: StoredMonitorRun = {
             ...currentRun,
+            batch: summarizeBatch(requireActionableBatch(currentRun)),
             status,
             stage: "complete",
             leaseExpiresAt: undefined,
@@ -2252,6 +2359,7 @@ export class MonitorRuntime {
       await tx.putInstance(nextInstance);
       await tx.putRun({
         ...currentRun,
+        batch: summarizeBatch(requireActionableBatch(currentRun)),
         status,
         stage: "complete",
         leaseExpiresAt: undefined,
@@ -2358,6 +2466,7 @@ export class MonitorRuntime {
     reason = boundedReason(reason);
     await tx.putRun({
       ...run,
+      batch: summarizeBatch(requireActionableBatch(run)),
       status: "dead-lettered",
       stage: "complete",
       leaseExpiresAt: undefined,
@@ -2390,18 +2499,6 @@ export class MonitorRuntime {
     });
   }
 
-  async #loadRunEvents(run: StoredMonitorRun): Promise<readonly ChannelEvent[]> {
-    const events: ChannelEvent[] = [];
-    for (const reference of run.batch.events) {
-      const record = await this.#store.getEvent(reference.ref);
-      if (record === null || record.event === undefined || record.payloadExpiresAt <= this.#now()) {
-        throw new Error(`source event ${reference.ref} is unavailable`);
-      }
-      events.push(freeze(structuredClone(record.event)));
-    }
-    return events;
-  }
-
   async #finishSubscription(
     subscription: StoredSubscription,
     status: "filtered" | "uncorrelated" | "suppressed",
@@ -2410,13 +2507,7 @@ export class MonitorRuntime {
     await this.#store.transaction(`subscription:${subscription.id}`, async (tx) => {
       const current = await tx.getSubscription(subscription.id);
       if (current === null) return;
-      await tx.putSubscription({
-        ...current,
-        status,
-        outcome,
-        leaseExpiresAt: undefined,
-        updatedAt: this.#now(),
-      });
+      await tx.deleteSubscription(current.id);
     });
     if (status !== "suppressed") {
       await this.#emit(
@@ -2455,25 +2546,20 @@ export class MonitorRuntime {
       const current = await tx.getSubscription(subscription.id);
       if (current === null) return;
       const now = this.#now();
-      await tx.putSubscription({
-        ...current,
-        status: "dead-lettered",
-        outcome: reason,
-        leaseExpiresAt: undefined,
-        updatedAt: now,
-      });
       await tx.putDeadLetter({
         id: this.#id("dlq"),
         tenantId: subscription.tenantId,
         applicationId: subscription.applicationId,
         monitorId: subscription.monitorId,
         definitionVersion: subscription.definitionVersion,
-        eventRef: subscription.eventRef,
+        eventKey: subscription.eventKey,
+        branchKey: subscription.branchKey,
         subscriptionId: subscription.id,
         stage,
         reason,
         createdAt: now,
       });
+      await tx.deleteSubscription(current.id);
     });
     await this.#emit("monitor.dead_lettered", {
       ...this.#eventDetails(subscription),
@@ -2491,8 +2577,9 @@ export class MonitorRuntime {
     return freeze({
       id,
       runId: run.id,
+      runKey: run.runKey,
       createdAt: this.#now(),
-      sourceEventRefs: run.batch.events.map((event) => event.ref),
+      sourceEventKeys: run.eventKeys,
       projectedEvidence: cloneJson(evidence),
       decision: structuredClone(decisionValue),
       completeness: structuredClone(completeness),
@@ -2510,6 +2597,7 @@ export class MonitorRuntime {
       monitorId: run.monitorId,
       definitionVersion: run.definitionVersion,
       runId: run.id,
+      runKey: run.runKey,
       correlationKeyHash: run.correlationKeyHash,
       evidenceSnapshotId: snapshot.id,
       sourceTypes: [...new Set(events.map((event) => event.type))],
@@ -2658,8 +2746,40 @@ export class MonitorRuntime {
         await this.#store.transaction(`subscription:${subscription.id}`, async (tx) => {
           const current = await tx.getSubscription(subscription.id);
           if (current === null || current.status === "processing") return;
+          const branchKey = await deriveBranchKey({
+            eventKey: current.eventKey,
+            monitorId: to,
+            definitionVersion: target.version,
+            ...(current.phase === undefined ? {} : { phase: current.phase }),
+          });
+          const inputHash = await hashIdempotencyInput({
+            parentInputHash: current.eventInputHash,
+            eventKey: current.eventKey,
+            branchKey,
+            tenantId: current.tenantId,
+            applicationId: current.applicationId,
+            monitorId: to,
+            definitionVersion: target.version,
+            phase: current.phase ?? null,
+            acceptedAt: current.acceptedAt,
+            orderingKey: current.ingressSequence,
+          });
+          const collision = await tx.getSubscription(branchKey);
+          if (collision !== null) {
+            assertIdempotencyInput({
+              namespace: "branch-migration",
+              key: branchKey,
+              existingInputHash: collision.inputHash,
+              receivedInputHash: inputHash,
+            });
+          }
+          await tx.deleteSubscription(current.id);
+          if (collision !== null) return;
           await tx.putSubscription({
             ...current,
+            id: branchKey,
+            branchKey,
+            inputHash,
             monitorId: to,
             definitionVersion: target.version,
             updatedAt: this.#now(),
@@ -2820,7 +2940,9 @@ export class MonitorRuntime {
       applicationId: subscription.applicationId,
       monitorId: subscription.monitorId,
       definitionVersion: subscription.definitionVersion,
-      eventRef: subscription.eventRef,
+      eventRef: subscription.event.ref,
+      eventKey: subscription.eventKey,
+      branchKey: subscription.branchKey,
       ...extra,
     };
   }
@@ -2833,6 +2955,7 @@ export class MonitorRuntime {
       definitionVersion: run.definitionVersion,
       correlationKeyHash: run.correlationKeyHash,
       runId: run.id,
+      runKey: run.runKey,
     };
   }
 
@@ -3004,7 +3127,7 @@ function validateEvaluationRequest(request: EvaluationRequest): void {
       throw new EvaluationRequestError(`evaluation ${name} must be a non-empty string`);
     }
   }
-  const batch = request.batch as StoredMonitorBatch | undefined;
+  const batch = request.batch;
   if (batch === undefined || batch === null || !Array.isArray(batch.events)) {
     throw new EvaluationRequestError("evaluation batch must carry an event list");
   }
@@ -3181,17 +3304,39 @@ function assertSizedJson(value: unknown, name: string, maxBytes: number): assert
 
 
 
-function batchView(batch: StoredMonitorBatch): MonitorBatchView {
+function batchView(batch: StoredMonitorBatch | FrozenMonitorBatchSummary): MonitorBatchView {
   return freeze({
     openedAt: batch.openedAt,
     closedAt: batch.closedAt,
     closedBy: batch.closedBy,
-    eventCount: batch.events.length,
+    eventCount: "events" in batch ? batch.events.length : batch.eventCount,
     bytes: batch.bytes,
     isPartial: false,
     omittedEventCount: 0,
     omittedBytes: 0,
   });
+}
+
+function requireActionableBatch(run: StoredMonitorRun): FrozenMonitorBatch {
+  if (!("events" in run.batch)) {
+    throw new Error(`terminal monitor run ${run.id} has no actionable event payload`);
+  }
+  return run.batch;
+}
+
+function summarizeBatch(batch: FrozenMonitorBatch): FrozenMonitorBatchSummary {
+  return {
+    batchKey: batch.batchKey,
+    inputHash: batch.inputHash,
+    branchKeys: batch.events.map((event) => event.branchKey),
+    eventKeys: batch.eventKeys,
+    eventCount: batch.events.length,
+    bytes: batch.bytes,
+    openedAt: batch.openedAt,
+    closedAt: batch.closedAt,
+    closedBy: batch.closedBy,
+    frozenAt: batch.frozenAt,
+  };
 }
 
 function instanceView(instance: StoredMonitorInstance): MonitorInstanceView {

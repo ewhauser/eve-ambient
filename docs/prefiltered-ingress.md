@@ -70,7 +70,7 @@ It should retry any unknown or failed outcome with the same source ID.
 | Responsibility | External pipeline | Eve Ambient after `publish()` |
 |---|---:|---:|
 | Provider acknowledgement and raw source retention | Yes | No |
-| Raw-stream ordering and replay | Yes | No |
+| Raw-stream ordering and source retention | Yes | No |
 | Upstream selection and its audit trail | Yes | No |
 | Channel schema validation | No | Yes |
 | Scoped source dedupe | No | Yes |
@@ -92,10 +92,10 @@ its offset protocol and must preserve these rules:
 1. Use a stable provider or log-record identity for `id`.
 2. Retry ambiguous outcomes with that same identity.
 3. Commit the source offset only after `accepted` or `duplicate`.
-4. Do not claim stronger ordering or replay semantics than the source and
+4. Do not claim stronger ordering or delivery semantics than the source and
    consumer actually provide.
-5. Preserve authoritative payload access for as long as replay or evaluation
-   requires it.
+5. Send the complete normalized payload on every handoff and retain it locally
+   until the next durable receiver accepts it.
 
 For a topology that also separates the correlation mailbox from PostgreSQL,
 see [celld mailbox](celld.md). The event-log and mailbox choices are independent.

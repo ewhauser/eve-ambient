@@ -15,11 +15,18 @@ import {
   defineChannelEvent,
   defineInboundChannel,
   defineMonitor,
+  deriveBatchKey,
+  deriveRunKey,
+  deriveWakeKey,
+  freezeMembership,
+  hashIdempotencyInput,
   ignore,
   MonitorRuntime,
   wake,
   type ChannelEvent,
+  type BranchKey,
   type CompiledMonitor,
+  type StoredMonitorRun,
 } from "../src/index.js";
 import { createEvaluationFetchHandler } from "../src/celld.js";
 import { MemoryMonitorStore } from "../src/memory.js";
@@ -166,10 +173,27 @@ async function oracleVerdict(world: World) {
   const cellName = world.fleet.cellNames[0]!;
   const state = await cellState(world, cellName);
   const published = new Map<string, PublishedEvent>();
-  for (const entry of state.log as { kind: string; ref?: string }[]) {
-    if (entry.kind !== "append" || entry.ref === undefined) continue;
+  for (const entry of state.log as {
+    kind: string;
+    ref?: string;
+    branchKey?: PublishedEvent["branchKey"];
+    eventKey?: PublishedEvent["eventKey"];
+    inputHash?: PublishedEvent["inputHash"];
+    phase?: PublishedEvent["phase"] | null;
+  }[]) {
+    if (
+      entry.kind !== "append" ||
+      entry.ref === undefined ||
+      entry.branchKey === undefined ||
+      entry.eventKey === undefined ||
+      entry.inputHash === undefined
+    ) continue;
     const record = (await world.store.getEvent(entry.ref))!;
     published.set(entry.ref, {
+      branchKey: entry.branchKey,
+      eventKey: entry.eventKey,
+      inputHash: entry.inputHash,
+      ...(entry.phase === undefined || entry.phase === null ? {} : { phase: entry.phase }),
       bytes: record.bytes,
       acceptedAt: record.acceptedAt,
       ingressSequence: record.ingressSequence,
@@ -297,8 +321,11 @@ describe("MonitorRuntime with the celld mailbox", () => {
     expect(run.status).toBe("delivered");
     expect(run.stage).toBe("complete");
     expect(run.decision).toMatchObject({ action: "wake", reason: "useful" });
-    expect(run.batch.events.map((event) => event.ref)).toHaveLength(2);
-    expect(request.idempotencyKey).toBe(`monitor:${run.id}:0`);
+    expect(run.batch).toMatchObject({ eventCount: 2 });
+    expect(run.batch).not.toHaveProperty("events");
+    expect(request.idempotencyKey).toBe(
+      await deriveWakeKey({ runKey: run.runKey, routeId: "slack-delivery" }),
+    );
 
     // The cell applied RUN_COMPLETED from the response and entered cooldown.
     const state = await cellState(world, world.fleet.cellNames[0]!);
@@ -332,22 +359,7 @@ describe("MonitorRuntime with the celld mailbox", () => {
     expect(verdict.instance.consecutiveIgnores).toBe(1);
   });
 
-  it("replays a celld-recorded run exactly like a store-recorded one", async () => {
-    await world.runtime.publish(slack, "message", publishInput("1", "please wake me"));
-    await world.runtime.drain();
-    world.clock.advance(1_000);
-    await world.fleet.fireDueAlarms();
-    const run = (await world.runtime.listRuns())[0]!;
-
-    const replayed = await world.runtime.replay(run.id, { decision: "recorded" });
-
-    expect(replayed.decision).toMatchObject({ action: "wake", reason: "useful" });
-    expect(replayed.evidence).toEqual({ texts: ["please wake me"] });
-    expect(replayed.route).toEqual({ channelId: "slack-delivery", target: { channel: "C1" } });
-    expect(replayed.delivered).toBe(false);
-  });
-
-  it("is idempotent by runId: a replayed evaluation delivers nothing twice", async () => {
+  it("is idempotent by runId: a repeated evaluation delivers nothing twice", async () => {
     await world.runtime.publish(slack, "message", publishInput("1", "please wake me"));
     await world.runtime.drain();
     world.clock.advance(1_000);
@@ -367,6 +379,17 @@ describe("MonitorRuntime with the celld mailbox", () => {
     expect(repeat.binding).toBeDefined();
     expect(world.delivery.deliveries).toHaveLength(1);
     expect(await world.runtime.listRuns()).toHaveLength(1);
+
+    const member = (sent as any).batch.events[0];
+    const changedHash = `${member.inputHash.slice(0, -1)}${member.inputHash.endsWith("0") ? "1" : "0"}`;
+    await expect(world.runtime.handleEvaluation({
+      ...sent,
+      secret: SECRET,
+      batch: {
+        ...(sent as any).batch,
+        events: [{ ...member, inputHash: changedHash }],
+      },
+    } as EvaluationRequest)).rejects.toMatchObject({ code: "run-conflict" });
   });
 
   it("rejects an evaluation presenting the wrong secret", async () => {
@@ -435,23 +458,74 @@ describe("MonitorRuntime with the celld mailbox", () => {
       if (!seeded) {
         seeded = true;
         const now = world.clock.now().toISOString();
+        const eventKeys = body.batch.events.map((event: any) => event.eventKey);
+        const fullEvents = await Promise.all(
+          body.batch.events.map(async (member: any) => {
+            const stored = await world.store.getEvent(member.ref);
+            if (stored?.event === undefined) throw new Error(`missing test event ${member.ref}`);
+            return { ...member, event: stored.event };
+          }),
+        );
+        const membership = await freezeMembership({
+          namespace: `monitor-batch:${body.instanceId}`,
+          orderedMembers: body.batch.events.map((event: any) => ({
+            key: event.branchKey as BranchKey,
+            inputHash: event.inputHash,
+          })),
+          frozenAt: body.claimedAt,
+          deriveOperationKey: (orderedBranchKeys) => deriveBatchKey({
+            instanceId: body.instanceId,
+            orderedBranchKeys: orderedBranchKeys as readonly BranchKey[],
+          }),
+        });
+        const batchKey = membership.operationKey;
+        const batchInputHash = await hashIdempotencyInput({
+          instanceId: body.instanceId,
+          monitorId: body.monitorId,
+          definitionVersion: body.definitionVersion,
+          batchKey,
+          members: membership.members,
+          frozenAt: membership.frozenAt,
+          openedAt: body.batch.openedAt,
+          closedAt: body.batch.closedAt,
+          closedBy: body.batch.closedBy,
+          eventCount: body.batch.events.length,
+          bytes: body.batch.bytes,
+        });
+        const runKey = await deriveRunKey({ batchKey });
+        const inputHash = await hashIdempotencyInput({
+          runKey,
+          batchKey,
+          batchInputHash,
+          mode: "active",
+          instanceView: body.instanceView,
+        });
         await world.store.transaction(`instance:${body.instanceId}`, async (tx) => {
           await tx.putRun({
             id: body.runId,
+            runKey,
+            inputHash,
+            eventKeys,
             instanceId: body.instanceId,
             tenantId: body.tenantId,
             applicationId: body.applicationId,
             monitorId: body.monitorId,
             definitionVersion: body.definitionVersion,
             correlationKeyHash: body.correlationKeyHash,
-            batch: body.batch,
+            batch: {
+              ...body.batch,
+              batchKey,
+              inputHash: batchInputHash,
+              eventKeys,
+              frozenAt: membership.frozenAt,
+              events: fullEvents,
+            },
             mode: "active",
             instanceView: body.instanceView,
             status: "retry",
             stage: "decision",
             attempt: 1,
             availableAt: retryAt,
-            replayExpiresAt: now,
             createdAt: now,
             updatedAt: now,
             expiresAt: new Date(world.clock.now().getTime() + 30 * 86_400_000).toISOString(),

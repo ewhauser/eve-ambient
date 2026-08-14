@@ -1,7 +1,7 @@
 # RFC: Full-Payload, End-to-End Idempotent Event Handoffs
 
 - Status: Accepted
-- Implementation: Planned in follow-up pull requests
+- Implementation: Phases 1 and 2 implemented; later transport phases pending
 - Scope: End-to-end protocol across Eve Ambient ingress, fan-out, mailboxes, evaluation, session delivery, and final actions
 - Related: `ewhauser/eve-ambient` issue #3
 
@@ -797,6 +797,7 @@ Obsolete types, methods, schema objects, tests, and documentation are removed di
 - Replace buffered references with full event envelopes.
 - Make batches and runs self-contained and assign `batchKey` only at membership freeze/claim.
 - Remove evaluator payload lookup.
+- Remove the replay API and reduce terminal batches to lineage/completeness metadata.
 - Preserve existing filtering, correlation, ordering, batching, cooldown, and deployment pinning behavior.
 
 ### Phase 3: Celld by value
@@ -813,7 +814,7 @@ Obsolete types, methods, schema objects, tests, and documentation are removed di
 - Add SQS full-message consume/delete semantics.
 - Validate each adapter against the same idempotency and failure-injection suite.
 - Remove central event payload APIs and storage dependencies.
-- Remove replay and event-retention capabilities.
+- Remove remaining central event-retention capabilities.
 - Remove ref-resolution tests and documentation.
 - Retain backend-native retention documentation only as operational guidance.
 

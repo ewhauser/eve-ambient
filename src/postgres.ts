@@ -11,6 +11,11 @@ import type {
   SubscriptionStatus,
 } from "./storage.js";
 import { scopedKey } from "./storage.js";
+import {
+  assertIdempotencyInput,
+  parseIdempotencyKey,
+  parseInputHash,
+} from "./idempotency.js";
 import { TransientMonitorError } from "./types.js";
 import { addMs } from "./util.js";
 
@@ -287,34 +292,6 @@ export class PostgresMonitorStore implements MonitorStore {
         client,
         `INSERT INTO ${this.#table("eve_ambient_dead_letters")}
            (id, application_id, monitor_id, created_at, record)
-         SELECT 'purge:' || subscription.id,
-                subscription.application_id,
-                subscription.monitor_id,
-                $1::timestamptz,
-                jsonb_build_object(
-                  'id', 'purge:' || subscription.id,
-                  'tenantId', subscription.tenant_id,
-                  'applicationId', subscription.application_id,
-                  'monitorId', subscription.monitor_id,
-                  'definitionVersion', subscription.definition_version,
-                  'eventRef', subscription.event_ref,
-                  'subscriptionId', subscription.id,
-                  'stage', 'retention',
-                  'reason', 'source dedupe retention expired before subscription completed',
-                  'createdAt', $1::timestamptz
-                )
-           FROM ${this.#table("eve_ambient_subscriptions")} AS subscription
-           JOIN ${this.#table("eve_ambient_events")} AS event
-             ON event.ref = subscription.event_ref
-          WHERE event.dedupe_expires_at <= $1::timestamptz
-            AND subscription.status = ANY(ARRAY['pending','processing','ready']::text[])
-         ON CONFLICT (id) DO NOTHING`,
-        [now],
-      );
-      await postgresQuery(
-        client,
-        `INSERT INTO ${this.#table("eve_ambient_dead_letters")}
-           (id, application_id, monitor_id, created_at, record)
          SELECT 'purge:direct:' || event.ref,
                 event.application_id,
                 NULL,
@@ -332,15 +309,6 @@ export class PostgresMonitorStore implements MonitorStore {
           WHERE event.dedupe_expires_at <= $1::timestamptz
             AND event.record->'directDispatch'->>'status' = ANY(ARRAY['pending','processing']::text[])
          ON CONFLICT (id) DO NOTHING`,
-        [now],
-      );
-      await postgresQuery(
-        client,
-        `DELETE FROM ${this.#table("eve_ambient_subscriptions")}
-          WHERE event_ref IN (
-            SELECT ref FROM ${this.#table("eve_ambient_events")}
-             WHERE dedupe_expires_at <= $1::timestamptz
-          )`,
         [now],
       );
       const deletedEvents = await postgresQuery(
@@ -441,6 +409,17 @@ class PostgresTransaction implements MonitorStoreTransaction {
   }
 
   async putEvent(event: StoredEvent): Promise<void> {
+    parseIdempotencyKey("event", event.eventKey);
+    parseInputHash(event.inputHash);
+    const existing = await this.getEventByDedupeKey(event.dedupeKey);
+    if (existing !== null) {
+      assertIdempotencyInput({
+        namespace: "postgres-ingress",
+        key: event.eventKey,
+        existingInputHash: existing.inputHash,
+        receivedInputHash: event.inputHash,
+      });
+    }
     await postgresQuery(
       this.#client,
       `INSERT INTO ${this.#table("eve_ambient_events")}
@@ -478,12 +457,31 @@ class PostgresTransaction implements MonitorStoreTransaction {
   }
 
   async putSubscription(subscription: StoredSubscription): Promise<void> {
+    parseIdempotencyKey("branch", subscription.branchKey);
+    parseIdempotencyKey("event", subscription.eventKey);
+    parseInputHash(subscription.eventInputHash);
+    parseInputHash(subscription.inputHash);
+    if (subscription.id !== subscription.branchKey) {
+      throw new TypeError("subscription id must equal branchKey");
+    }
+    const existing = await this.getSubscription(subscription.id);
+    if (existing !== null) {
+      assertIdempotencyInput({
+        namespace: "postgres-branch",
+        key: subscription.branchKey,
+        existingInputHash: existing.inputHash,
+        receivedInputHash: subscription.inputHash,
+      });
+    }
     await postgresQuery(
       this.#client,
       `INSERT INTO ${this.#table("eve_ambient_subscriptions")}
-         (id, event_ref, tenant_id, application_id, monitor_id, definition_version, correlation_key_hash, ingress_sequence, status, available_at, lease_expires_at, record)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::bigint,$9,$10::timestamptz,$11::timestamptz,$12::jsonb)
+         (id, branch_key, event_key, input_hash, tenant_id, application_id, monitor_id, definition_version, correlation_key_hash, ingress_sequence, status, available_at, lease_expires_at, record)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::bigint,$11,$12::timestamptz,$13::timestamptz,$14::jsonb)
        ON CONFLICT (id) DO UPDATE SET
+         branch_key = EXCLUDED.branch_key,
+         event_key = EXCLUDED.event_key,
+         input_hash = EXCLUDED.input_hash,
          monitor_id = EXCLUDED.monitor_id,
          definition_version = EXCLUDED.definition_version,
          correlation_key_hash = EXCLUDED.correlation_key_hash,
@@ -493,7 +491,9 @@ class PostgresTransaction implements MonitorStoreTransaction {
          record = EXCLUDED.record`,
       [
         subscription.id,
-        subscription.eventRef,
+        subscription.branchKey,
+        subscription.eventKey,
+        subscription.inputHash,
         subscription.tenantId,
         subscription.applicationId,
         subscription.monitorId,
@@ -582,6 +582,20 @@ class PostgresTransaction implements MonitorStoreTransaction {
   }
 
   async putRun(run: StoredMonitorRun): Promise<void> {
+    parseIdempotencyKey("run", run.runKey);
+    parseInputHash(run.inputHash);
+    const existing = await this.getRun(run.id);
+    if (existing !== null) {
+      if (existing.runKey !== run.runKey) {
+        throw new TypeError(`run ${run.id} changed runKey`);
+      }
+      assertIdempotencyInput({
+        namespace: "postgres-run",
+        key: run.runKey,
+        existingInputHash: existing.inputHash,
+        receivedInputHash: run.inputHash,
+      });
+    }
     await postgresQuery(
       this.#client,
       `INSERT INTO ${this.#table("eve_ambient_runs")}

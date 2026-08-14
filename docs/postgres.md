@@ -1,9 +1,10 @@
 # Postgres-first deployment
 
 The Postgres-first profile is the supported default and the recommended place
-to start. PostgreSQL stores normalized events, subscription snapshots,
-correlation mailboxes, timers, runs, decisions, dead letters, budgets, dedupe
-tombstones, and deployment identity.
+to start. PostgreSQL stores ingress receipts, full branch handoffs, correlation
+mailboxes, timers, actionable runs, decisions, dead letters, budgets, dedupe
+tombstones, and deployment identity. Branch and run event bodies are ephemeral:
+they are removed after their next durable handoff or terminal completion.
 
 There is no sleeping workflow or resident actor for each active key. Short-lived
 workers claim work using durable leases, process different keys concurrently,
@@ -119,7 +120,7 @@ deployment's actual:
 - worker, subscription, and evaluation concurrency.
 
 Scale workers and PostgreSQL first. Consider a separate durable ingress log
-when raw-stream replay or partitioned ingestion is a requirement. Consider
+when partitioned ingestion or independent source retention is a requirement. Consider
 celld when the measured bottleneck is per-key serialization, due scans, or
 mailbox advisory-lock traffic—not simply because the raw ingress rate is high.
 
@@ -134,10 +135,10 @@ See [Deployment options](deployment-options.md) for the complete comparison.
   dead-letter growth.
 - Call `purgeExpired()` on a schedule compatible with configured retention.
 - Test delivery-channel idempotency and conversation-binding conflicts.
-- Exercise replay against an isolated canary target before using it during an
-  incident or rollout.
-- Back up PostgreSQL according to the event, decision, and audit recovery
-  requirements of the application.
+- Exercise new canary input through the normal ingress path before a rollout.
+- Back up PostgreSQL according to the decision, receipt, lineage, and audit
+  recovery requirements of the application; terminal event payloads are not
+  retained for recovery.
 
 More failure and trust boundaries are documented in
 [Operations and security](operations-and-security.md).

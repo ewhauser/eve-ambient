@@ -9,8 +9,9 @@ monitor is running.
 - The correlation-instance lifecycle—idle, collecting, evaluating, and
   cooldown—is an explicit XState statechart in `src/instance-machine.ts`. It is
   a pure transition table with no live actor or in-process timer requirement.
-- Ingress, subscription results, mailboxes, timer generations, runs, evidence
-  snapshots, quotas, dead letters, and deployment identity are durable.
+- Ingress receipts, active branch handoffs, mailboxes, timer generations,
+  actionable runs, evidence snapshots, quotas, dead letters, and deployment
+  identity are durable.
 - Debounce closes on quiet period, mandatory maximum wait, count, or byte
   threshold. The overflowing event starts the next batch. A single oversized
   monitor event is dead-lettered rather than trimmed.
@@ -20,22 +21,20 @@ monitor is running.
   keys. Model-provider failures use the declared fallback. Deterministic
   callback failures dead-letter immediately and cannot block other keys or
   tenants.
-- Raw event content is redacted at payload expiry. The source-dedupe tombstone
-  remains through the longer dedupe window.
-- Dedupe expiry records unfinished subscriptions as retention dead letters.
-  Reaccepting a provider ID preserves the expired tombstone until normal purging
-  so buffered audit references are not orphaned.
+- Every branch row and mailbox batch carries a complete event envelope. Branch
+  rows are deleted atomically after mailbox acceptance. An actionable run keeps
+  its frozen full batch through retries; terminal completion replaces it with
+  lineage and completeness metadata so event payloads do not become history.
+- The ingress table may redact or delete its internal payload copy according to
+  backend retention without invalidating accepted branches or actionable runs.
+  A source-dedupe tombstone can remain through a longer dedupe window.
 
 ## Operator APIs
 
-Use `listRuns()`, `listDeadLetters()`, `replay()`, and `purgeExpired()` to build
-operator tooling.
-
-Recorded replay never routes to production: delivery requires an explicit
-canary channel and target. Live replay is labeled separately and is not
-represented as deterministic. Runs expose `replayExpiresAt`; recorded and live
-replay require normalized source payloads and therefore share their shorter
-payload-retention lifetime even when decision records remain available longer.
+Use `listRuns()`, `listDeadLetters()`, and `purgeExpired()` to build operator
+tooling. Terminal runs retain decisions, receipts, projected evidence, lineage
+keys, and batch completeness, but not source event bodies. Replay is not a
+runtime capability or retention requirement.
 
 Lifecycle events expose separate classifier tokens or cost estimates and
 delivery outcomes. Model prices remain an application or provider concern;
@@ -55,8 +54,8 @@ compileMonitor(newDefinition, "v2", { compatibleWith: ["v1"] });
 ```
 
 Use `mode: "shadow"` to run the full decision, quota, evidence, and route path
-without binding or delivery. Use `replay(..., { canary: ... })` to exercise
-binding, evidence persistence, and coalescing against an isolated target before
+without binding or delivery. Test binding, evidence persistence, and
+coalescing with new canary input through the normal ingress path before
 production activation.
 
 Mailbox ownership is durable deployment state. Switching an existing
@@ -84,9 +83,10 @@ enforce the same boundary rather than trusting a source actor or target alone.
 ## Delivery guarantees
 
 Delivery is idempotent, not exactly-once. A delivery adapter must deduplicate
-the stable `monitor:<run-id>:0` key and return the same durable receipt for a
-retry. It must resolve canonical targets through its own conversation-binding
-registry and reject a conflict with a non-terminal binding.
+the stable `eve:wake:v1:...` key derived from the run and route and return the
+same durable receipt for a retry. It must resolve canonical targets through its
+own conversation-binding registry and reject a conflict with a non-terminal
+binding.
 
 Human and monitor requests belong on the same durable session ingress path.
 While a turn is active, a delivery channel may coalesce monitor evidence into

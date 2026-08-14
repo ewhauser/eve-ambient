@@ -8,10 +8,22 @@ import {
   MonitorRuntime,
   wake,
   type ChannelEvent,
+  type MonitorDeliveryRequest,
   type MonitorDefinition,
 } from "../src/index.js";
 import { MemoryMonitorStore } from "../src/memory.js";
 import { MemoryConversationChannel, VirtualMonitorClock } from "../src/testing.js";
+import { TransientMonitorError } from "../src/types.js";
+
+class RetryOnceConversationChannel extends MemoryConversationChannel {
+  attempts = 0;
+
+  override async deliver(request: MonitorDeliveryRequest) {
+    this.attempts += 1;
+    if (this.attempts === 1) throw new TransientMonitorError("delivery unavailable");
+    return super.deliver(request);
+  }
+}
 
 const source = defineInboundChannel({
   id: "events",
@@ -51,7 +63,7 @@ function event(id: string, value = "v1") {
   };
 }
 
-describe("deployment identity, replay, and retention", () => {
+describe("deployment identity and retention", () => {
   it("refuses mailbox ownership changes that would strand durable work", async () => {
     const clock = new VirtualMonitorClock();
     const store = new MemoryMonitorStore();
@@ -305,42 +317,10 @@ describe("deployment identity, replay, and retention", () => {
     expect((await retained.listRuns())[0]?.definitionVersion).toBe("v1");
   });
 
-  it("replays recorded downstream behavior only to an explicit canary", async () => {
+  it("redacts ingress payload before dedupe expiry while the frozen run remains self-contained", async () => {
     const clock = new VirtualMonitorClock();
     const store = new MemoryMonitorStore();
-    const production = new MemoryConversationChannel({ id: "production", clock });
-    const canary = new MemoryConversationChannel({ id: "canary", clock });
-    const definition = monitor("replayable", production);
-    const runtime = new MonitorRuntime({
-      applicationId: "app",
-      deployment: { monitors: [compileMonitor(definition, "v1")] },
-      channels: [source],
-      deliveryChannels: [production],
-      store,
-      clock,
-    });
-    await runtime.initialize();
-    await runtime.publish(source, "changed", event("one", "original"));
-    await runtime.drain();
-    const run = (await runtime.listRuns())[0]!;
-
-    const shadow = await runtime.replay(run.id, { decision: "recorded" });
-    expect(shadow.delivered).toBe(false);
-    expect(production.deliveries).toHaveLength(1);
-    const active = await runtime.replay(run.id, {
-      decision: "recorded",
-      shadow: false,
-      canary: { channel: canary, target: { id: "canary-target" } },
-    });
-    expect(active.delivered).toBe(true);
-    expect(canary.deliveries).toHaveLength(1);
-    expect(active.evidence).toEqual({ values: ["original"] });
-  });
-
-  it("redacts payload before dedupe expiry and retains delivered immutable evidence", async () => {
-    const clock = new VirtualMonitorClock();
-    const store = new MemoryMonitorStore();
-    const delivery = new MemoryConversationChannel({ id: "delivery", clock });
+    const delivery = new RetryOnceConversationChannel({ id: "delivery", clock });
     const definition = monitor("retention", delivery, {
       retention: { payload: "1s", decisions: "1h", dedupe: "2s" },
     });
@@ -355,22 +335,27 @@ describe("deployment identity, replay, and retention", () => {
     await runtime.initialize();
     const accepted = await runtime.publish(source, "changed", event("one", "secret"));
     await runtime.drain();
+    const pending = (await runtime.listRuns())[0]!;
+    expect(pending.status).toBe("retry");
+    if (!("events" in pending.batch)) throw new Error("retry run lost its actionable payload");
+    expect(pending.batch.events[0]?.event.data).toEqual({ key: "key", value: "secret" });
     clock.advance(1_000);
     await runtime.purgeExpired();
     expect((await store.getEvent(accepted.eventId))?.event).toBeUndefined();
+    await runtime.drain();
     expect(delivery.deliveries[0]?.evidence.projectedEvidence).toEqual({ values: ["secret"] });
     const run = (await runtime.listRuns())[0]!;
-    expect(run.replayExpiresAt).toBe("2026-01-01T00:00:01.000Z");
-    await expect(runtime.replay(run.id, { decision: "recorded" })).rejects.toThrow(
-      "replay input expired at 2026-01-01T00:00:01.000Z",
-    );
-    expect((await runtime.publish(source, "changed", event("one"))).status).toBe("duplicate");
+    expect(run.batch).not.toHaveProperty("events");
+    expect(run.batch).toMatchObject({ eventCount: 1 });
+    expect(run.batch.batchKey).toMatch(/^eve:batch:v1:/);
+    expect(run.runKey).toMatch(/^eve:run:v1:/);
+    expect((await runtime.publish(source, "changed", event("one", "secret"))).status).toBe("duplicate");
     clock.advance(1_000);
     await runtime.purgeExpired();
     expect((await runtime.publish(source, "changed", event("one", "new"))).status).toBe("accepted");
   });
 
-  it("preserves an expired event tombstone when the provider ID is accepted again", async () => {
+  it("rejects provider-ID reuse while its earlier branch is still active", async () => {
     const clock = new VirtualMonitorClock();
     const store = new MemoryMonitorStore();
     const delivery = new MemoryConversationChannel({ id: "delivery", clock });
@@ -389,6 +374,11 @@ describe("deployment identity, replay, and retention", () => {
     const first = await runtime.publish(source, "changed", event("reused", "old"));
     clock.advance(1_000);
 
+    await expect(
+      runtime.publish(source, "changed", event("reused", "new")),
+    ).rejects.toMatchObject({ name: "IdempotencyConflictError" });
+
+    await runtime.drain();
     const second = await runtime.publish(source, "changed", event("reused", "new"));
 
     expect(second.status).toBe("accepted");
@@ -396,7 +386,7 @@ describe("deployment identity, replay, and retention", () => {
     expect(await store.getEvent(first.eventId)).not.toBeNull();
   });
 
-  it("dead-letters unfinished subscriptions before dedupe retention removes them", async () => {
+  it("keeps an unfinished branch self-contained after ingress dedupe retention expires", async () => {
     const clock = new VirtualMonitorClock();
     const store = new MemoryMonitorStore();
     const delivery = new MemoryConversationChannel({ id: "delivery", clock });
@@ -417,9 +407,14 @@ describe("deployment identity, replay, and retention", () => {
 
     await runtime.purgeExpired();
 
-    expect(await runtime.listDeadLetters()).toMatchObject([
-      { stage: "retention", reason: "source dedupe retention expired before subscription completed" },
-    ]);
+    expect(await runtime.listDeadLetters()).toEqual([]);
+    await expect(store.listSubscriptionsForMonitor({
+      applicationId: "app",
+      monitorId: definition.id,
+    })).resolves.toMatchObject([{ event: { data: { value: "v1" } } }]);
+
+    await runtime.drain();
+    expect(delivery.deliveries).toHaveLength(1);
     await expect(store.listSubscriptionsForMonitor({
       applicationId: "app",
       monitorId: definition.id,

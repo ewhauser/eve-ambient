@@ -17,7 +17,9 @@ CREATE INDEX IF NOT EXISTS eve_ambient_events_dedupe_expiry_idx
 
 CREATE TABLE IF NOT EXISTS eve_ambient_subscriptions (
   id text PRIMARY KEY,
-  event_ref text NOT NULL,
+  branch_key text NOT NULL UNIQUE,
+  event_key text NOT NULL,
+  input_hash text NOT NULL,
   tenant_id text NOT NULL,
   application_id text NOT NULL,
   monitor_id text NOT NULL,
@@ -30,11 +32,6 @@ CREATE TABLE IF NOT EXISTS eve_ambient_subscriptions (
   record jsonb NOT NULL
 );
 
--- Keep the bootstrap migration re-runnable for pre-release installations that
--- applied an earlier draft before correlation hashes became relational.
-ALTER TABLE eve_ambient_subscriptions
-  ADD COLUMN IF NOT EXISTS correlation_key_hash text;
-
 CREATE INDEX IF NOT EXISTS eve_ambient_subscriptions_due_idx
   ON eve_ambient_subscriptions (
     application_id,
@@ -45,7 +42,7 @@ CREATE INDEX IF NOT EXISTS eve_ambient_subscriptions_due_idx
     ingress_sequence
   );
 CREATE INDEX IF NOT EXISTS eve_ambient_subscriptions_event_idx
-  ON eve_ambient_subscriptions (event_ref);
+  ON eve_ambient_subscriptions (event_key);
 CREATE INDEX IF NOT EXISTS eve_ambient_subscriptions_ordering_idx
   ON eve_ambient_subscriptions (
     application_id,

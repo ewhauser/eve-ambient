@@ -5,7 +5,7 @@ import {
   CELLD_MALFORMED_APPEND,
 } from "../src/mailbox.js";
 import type { CelldAppendRequest, EvaluationResponse } from "../src/mailbox.js";
-import type { StoredMonitorInstance } from "../src/storage.js";
+import type { BufferedEventRef, StoredMonitorInstance } from "../src/storage.js";
 import { VirtualMonitorClock } from "../src/testing.js";
 import {
   createFakeDurableObjectState,
@@ -16,6 +16,15 @@ import {
 type EvaluatorMock = Mock<(input: string, init: RequestInit) => Promise<Response>>;
 
 const CELL = "instance-key-alpha";
+
+function identity(ref: string) {
+  const digit = ref.endsWith("2") ? "2" : "1";
+  return {
+    branchKey: `eve:branch:v1:${digit.repeat(64)}` as CelldAppendRequest["branchKey"],
+    eventKey: `eve:event:v1:${digit.repeat(64)}` as CelldAppendRequest["eventKey"],
+    inputHash: `eve:input:v1:${digit.repeat(64)}` as CelldAppendRequest["inputHash"],
+  };
+}
 
 const DEBOUNCE_CONFIG = {
   buffer: {
@@ -37,7 +46,7 @@ interface Harness {
   append(ref: string, overrides?: Partial<CelldAppendRequest>): Promise<Response>;
   route(action: string, method?: string): Promise<Response>;
   fireAlarm(retryCount?: number): Promise<unknown>;
-  instance(): Promise<StoredMonitorInstance>;
+  instance(): Promise<StoredMonitorInstance<BufferedEventRef>>;
 }
 
 function wake(runId: string, status: "delivered" | "ignored" = "delivered"): EvaluationResponse {
@@ -73,6 +82,7 @@ function makeHarness(options: { evaluator?: EvaluatorMock } = {}): Harness {
     clock,
     evaluator,
     async append(ref, overrides = {}) {
+      const eventIdentity = identity(ref);
       const body: CelldAppendRequest = {
         monitorId: "ambient",
         definitionVersion: "v1",
@@ -82,8 +92,9 @@ function makeHarness(options: { evaluator?: EvaluatorMock } = {}): Harness {
         applicationId: "app-a",
         correlationKey: "C1",
         correlationKeyHash: "hash-C1",
-        subscriptionId: `sub-${ref}`,
+        subscriptionId: eventIdentity.branchKey,
         ref,
+        ...eventIdentity,
         bytes: 32,
         ingressSequence: "1",
         acceptedAt: clock.now().toISOString(),
@@ -114,7 +125,7 @@ function makeHarness(options: { evaluator?: EvaluatorMock } = {}): Harness {
       }
     },
     async instance() {
-      return JSON.parse(state.map.get("instance") as string) as StoredMonitorInstance;
+      return JSON.parse(state.map.get("instance") as string) as StoredMonitorInstance<BufferedEventRef>;
     },
   };
 }
@@ -156,16 +167,29 @@ describe("celld mailbox cell", () => {
     expect(marker).not.toHaveProperty("payload");
   });
 
+  it("rejects reuse of a branch key with a different input hash", async () => {
+    const harness = makeHarness();
+    await harness.append("evt-1");
+
+    const conflict = await harness.append("evt-1", {
+      inputHash: `eve:input:v1:${"9".repeat(64)}` as CelldAppendRequest["inputHash"],
+    });
+
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({ code: "append-conflict" });
+    expect((await harness.instance()).eventsSinceLastWake).toBe(1);
+  });
+
   it("recovers a missing append receipt from the persisted instance", async () => {
     const harness = makeHarness();
     await harness.append("evt-1");
     // The instance write committed, but the response/receipt did not.
-    harness.state.map.delete("append:sub-evt-1");
+    harness.state.map.delete(`append:${identity("evt-1").branchKey}`);
 
     await harness.append("evt-1");
 
     expect((await harness.instance()).openBatch?.events).toHaveLength(1);
-    expect(harness.state.map.has("append:sub-evt-1")).toBe(true);
+    expect(harness.state.map.has(`append:${identity("evt-1").branchKey}`)).toBe(true);
   });
 
   it("appends, claims on the quiet period, evaluates, and enters cooldown", async () => {
@@ -252,7 +276,7 @@ describe("celld mailbox cell", () => {
 
     expect(harness.state.map.has("instance")).toBe(false);
     expect(harness.state.map.has("evt:evt-1")).toBe(false);
-    expect(harness.state.map.has("append:sub-evt-1")).toBe(false);
+    expect(harness.state.map.has(`append:${identity("evt-1").branchKey}`)).toBe(false);
     expect(harness.state.alarmAt).toBeNull();
   });
 

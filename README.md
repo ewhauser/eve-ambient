@@ -42,7 +42,7 @@ hot key overwhelms a worker, or a classifier succeeds but delivery fails.
 
 Eve Ambient provides a durable attention layer for that gap. It keeps event
 data separate from trusted task instructions, gives every decision and
-delivery a stable identity, and makes buffering, cooldown, retry, replay, and
+delivery a stable identity, and makes buffering, cooldown, retry, and
 retention explicit rather than incidental.
 
 It is not a general event bus or workflow engine. Channels and external systems
@@ -53,22 +53,24 @@ events merit cognition.
 
 Event architectures are rarely interchangeable. A small deployment may value
 one database and minimal operations. A high-volume chat system may need a
-replayable log, partitioned consumers, and independently scalable mailboxes.
+partitioned ingress log, consumer groups, and independently scalable mailboxes.
 Another organization may already operate a signal-detection pipeline and want
 to send Eve only actionable events.
 
 Eve Ambient keeps the monitoring and attention semantics consistent while
 allowing those deployment boundaries to change.
 
-| Profile | What enters Eve Ambient | Durable event owner | Mailbox and timers | Scale profile | Complexity | Maturity |
+| Profile | What enters Eve Ambient | Payload custody | Mailbox and timers | Scale profile | Complexity | Maturity |
 |---|---|---|---|---|---|---|
-| **Postgres-first** | Normalized channel events | PostgreSQL | PostgreSQL due scans and leased claims | Add workers horizontally and scale the database vertically first | Low | Supported; default |
+| **Postgres-first** | Normalized channel events | Full branch and batch values in PostgreSQL until terminal completion | PostgreSQL due scans and leased claims | Add workers horizontally and scale the database vertically first | Low | Supported; default |
 | **Bring your own signal pipeline** | Events already selected by an external rules, stream-processing, or detection system | The external system before acceptance; PostgreSQL after `publish()` | PostgreSQL by default | Eve work follows the selected-event rate instead of the raw firehose | Medium | Supported through the publishing API |
-| **External log + distributed mailbox** | Channel or gateway events consumed from Kafka or another durable log | External log for the source stream; PostgreSQL for runs, decisions, dead letters, and audit | celld owns per-key buffers and alarms | Horizontally partitioned ingestion and correlation | High | celld is experimental; a first-class Kafka `EventLog` adapter is not shipped yet |
+| **External log + distributed mailbox** | Channel or gateway events consumed from Kafka or another durable log | External log before acceptance; the current experimental celld path temporarily uses PostgreSQL payload custody | celld owns per-key buffers and alarms | Horizontally partitioned ingestion and correlation | High | celld full-value handoff is a pending RFC phase; external-log bridges are application-owned |
 
 The celld tier does not run filters. Schema validation, dedupe, deterministic
 filtering, correlation, loop prevention, and event budgets run before a
-filter-surviving event reference is appended to its cell.
+filter-surviving event reference is appended to its cell. That reference-only
+wire boundary is transitional; RFC 0001 Phase 3 replaces it with full payload
+handoffs.
 
 See [Deployment options](https://github.com/ewhauser/eve-ambient/blob/main/docs/deployment-options.md)
 for the full responsibility boundaries, tradeoffs, and selection guidance.
@@ -83,7 +85,7 @@ Across every deployment profile, the runtime provides:
 - restricted rule or structured model decisions;
 - separate trusted instructions and untrusted structured evidence;
 - tenant, application, monitor, and key-scoped budgets;
-- durable runs, retries, dead letters, retention, replay, and shadow mode; and
+- durable runs, retries, dead letters, retention, and shadow mode; and
 - idempotent delivery through channel-owned conversation bindings.
 
 The detailed concepts and APIs are covered in the
@@ -142,10 +144,10 @@ for a complete production setup. Local tests can use `MemoryMonitorStore` from
 - [RFC 0001: Full-payload idempotent handoffs](https://github.com/ewhauser/eve-ambient/blob/main/docs/rfcs/0001-full-payload-idempotent-handoffs.md) — accepted direction for payload-by-value custody and end-to-end idempotency lineage.
 - [Deployment options](https://github.com/ewhauser/eve-ambient/blob/main/docs/deployment-options.md) — choose an ingestion, event-log, and mailbox topology.
 - [Monitoring model](https://github.com/ewhauser/eve-ambient/blob/main/docs/monitoring-model.md) — define channel events and monitors, then wire decisions and delivery.
-- [Postgres-first deployment](https://github.com/ewhauser/eve-ambient/blob/main/docs/postgres.md) — run the supported default with PostgreSQL as the event store and mailbox.
+- [Postgres-first deployment](https://github.com/ewhauser/eve-ambient/blob/main/docs/postgres.md) — run the supported default with PostgreSQL as the by-value mailbox.
 - [Prefiltered ingress](https://github.com/ewhauser/eve-ambient/blob/main/docs/prefiltered-ingress.md) — connect an existing rules, detection, or stream-processing pipeline.
 - [celld mailbox](https://github.com/ewhauser/eve-ambient/blob/main/docs/celld.md) — operate the experimental distributed mailbox and alarm tier.
-- [Operations and security](https://github.com/ewhauser/eve-ambient/blob/main/docs/operations-and-security.md) — durability, replay, rollout, retention, trust boundaries, and deliberate limits.
+- [Operations and security](https://github.com/ewhauser/eve-ambient/blob/main/docs/operations-and-security.md) — durability, rollout, retention, trust boundaries, and deliberate limits.
 - [celld worker deployment](https://github.com/ewhauser/eve-ambient/blob/main/celld-worker/README.md) — build and deploy the packaged worker.
 
 The optional `@ewhauser/eve-ambient/ai-sdk` adapter additionally requires `ai`

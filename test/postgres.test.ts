@@ -1,8 +1,49 @@
 import { describe, expect, it } from "vitest";
 import { MemoryMonitorStore } from "../src/memory.js";
 import { PostgresMonitorStore, type PostgresClient, type PostgresPool } from "../src/postgres.js";
-import type { StoredMonitorRun } from "../src/storage.js";
+import type { StoredMonitorRun, StoredSubscription } from "../src/storage.js";
 import { TransientMonitorError } from "../src/types.js";
+
+function subscription(
+  id: string,
+  applicationId: string,
+  tenantId: string,
+  ingressSequence: string,
+): StoredSubscription {
+  const now = "2026-01-01T00:00:00.000Z";
+  const digest = Buffer.from(id).toString("hex").padEnd(64, "0").slice(0, 64);
+  const branchKey = `eve:branch:v1:${digest}` as StoredSubscription["branchKey"];
+  return {
+    id: branchKey,
+    branchKey,
+    eventKey: `eve:event:v1:${digest}` as StoredSubscription["eventKey"],
+    eventInputHash: `eve:input:v1:${"0".repeat(64)}` as StoredSubscription["eventInputHash"],
+    inputHash: `eve:input:v1:${"1".repeat(64)}` as StoredSubscription["inputHash"],
+    event: {
+      ref: `ref_${id}`,
+      id: `source_${id}`,
+      type: "message",
+      version: 1,
+      receivedAt: now,
+      data: { id },
+      source: { channelId: "test", installationId: "install", tenantId, phase: "observed" },
+      origin: { kind: "external", depth: 0 },
+      trace: { traceId: `trace_${id}` },
+    },
+    bytes: 1,
+    acceptedAt: now,
+    tenantId,
+    applicationId,
+    monitorId: "monitor",
+    definitionVersion: "v1",
+    ingressSequence,
+    status: "pending",
+    attempt: 0,
+    availableAt: now,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
 
 describe("PostgresMonitorStore error boundaries", () => {
   it("classifies query failures as transient store failures", async () => {
@@ -46,19 +87,10 @@ describe("subscription leases", () => {
     const store = new MemoryMonitorStore();
     await store.transaction("subscription", async (tx) => {
       await tx.putSubscription({
-        id: "subscription",
-        eventRef: "event",
-        tenantId: "tenant",
-        applicationId: "app",
-        monitorId: "monitor",
-        definitionVersion: "v1",
-        ingressSequence: "1",
+        ...subscription("subscription", "app", "tenant", "1"),
         status: "processing",
         attempt: 1,
-        availableAt: "2026-01-01T00:00:00.000Z",
         leaseExpiresAt: "2026-01-01T00:00:30.000Z",
-        createdAt: "2026-01-01T00:00:00.000Z",
-        updatedAt: "2026-01-01T00:00:00.000Z",
       });
     });
 
@@ -89,20 +121,7 @@ describe("subscription leases", () => {
       ["other", "other-app", "tenant-c", "4"],
     ] as const) {
       await store.transaction(`subscription:${id}`, async (tx) => {
-        await tx.putSubscription({
-          id,
-          eventRef: `event:${id}`,
-          tenantId,
-          applicationId,
-          monitorId: "monitor",
-          definitionVersion: "v1",
-          ingressSequence: sequence,
-          status: "pending",
-          attempt: 0,
-          availableAt: "2026-01-01T00:00:00.000Z",
-          createdAt: "2026-01-01T00:00:00.000Z",
-          updatedAt: "2026-01-01T00:00:00.000Z",
-        });
+        await tx.putSubscription(subscription(id, applicationId, tenantId, sequence));
       });
     }
 
@@ -114,8 +133,8 @@ describe("subscription leases", () => {
         limit: 2,
       }),
     ).resolves.toMatchObject([
-      { id: "a-1", tenantId: "tenant-a" },
-      { id: "b-1", tenantId: "tenant-b" },
+      { id: subscription("a-1", "app", "tenant-a", "1").id, tenantId: "tenant-a" },
+      { id: subscription("b-1", "app", "tenant-b", "3").id, tenantId: "tenant-b" },
     ]);
   });
 });
@@ -162,6 +181,8 @@ describe("PostgresMonitorStore due queries", () => {
     await store.transaction("run", async (tx) => {
       await tx.putRun({
         id: "run",
+        runKey: `eve:run:v1:${"1".repeat(64)}`,
+        inputHash: `eve:input:v1:${"2".repeat(64)}`,
         instanceId: "instance",
         tenantId: "tenant",
         applicationId: "app",
@@ -216,7 +237,7 @@ describe("PostgresMonitorStore due queries", () => {
     expect(ordering).toContain("correlation_key_hash IS NULL OR correlation_key_hash = $5");
   });
 
-  it("dead-letters open subscriptions before retention purges them", async () => {
+  it("does not couple branch-row retention to ingress dedupe retention", async () => {
     const calls: string[] = [];
     const query = (async (text: string) => {
       calls.push(text);
@@ -230,11 +251,7 @@ describe("PostgresMonitorStore due queries", () => {
 
     await store.purgeExpired("2026-01-01T00:00:00.000Z");
 
-    const retentionDeadLetter = calls.find((text) =>
-      text.includes("source dedupe retention expired before subscription completed"),
-    );
-    expect(retentionDeadLetter).toContain("INSERT INTO");
-    expect(retentionDeadLetter).toContain("['pending','processing','ready']");
+    expect(calls.some((text) => text.includes("eve_ambient_subscriptions"))).toBe(false);
   });
 });
 

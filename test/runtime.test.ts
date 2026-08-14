@@ -6,6 +6,7 @@ import {
   defineInboundChannel,
   defineMonitor,
   ignore,
+  IdempotencyConflictError,
   modelDecision,
   MonitorRuntime,
   TransientMonitorError,
@@ -81,6 +82,9 @@ describe("MonitorRuntime", () => {
     expect(first.directDispatch).toBe("undispatched");
     expect(duplicate.status).toBe("duplicate");
     expect(duplicate.directDispatch).toBe("undispatched");
+    await expect(
+      runtime.publishChat(slack, "message", eventInput("1", "different payload"), []),
+    ).rejects.toBeInstanceOf(IdempotencyConflictError);
     expect(delivery.deliveries).toHaveLength(0);
     expect((await runtime.listRuns())[0]?.status).toBe("ignored");
   });
@@ -273,7 +277,7 @@ describe("MonitorRuntime", () => {
     await runtime.drain();
     expect(delivery.deliveries).toHaveLength(1);
     expect(delivery.deliveries[0]?.evidence.completeness.closedBy).toBe("max-wait");
-    expect(delivery.deliveries[0]?.evidence.sourceEventRefs).toHaveLength(6);
+    expect(delivery.deliveries[0]?.evidence.sourceEventKeys).toHaveLength(6);
   });
 
   it("uses explicit model settings, repairs once, and validates action metadata", async () => {

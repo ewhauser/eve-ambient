@@ -2,94 +2,10 @@
 
 Durable ambient attention for Eve agents.
 
-`@ewhauser/eve-ambient` sits between event ingestion and agent cognition. It
-accepts typed events, deduplicates and filters them, correlates related events,
-buffers them by key, makes a bounded rule or model decision, and delivers
-immutable evidence to an Eve session only when the agent should wake.
-
-```text
-   Eve channels      signal pipeline      durable log
-         │                  │                  │
-         └──────────────────┼──────────────────┘
-                            ▼
-                        publish()
-                            │
-               ┌─ eve-ambient ──────────┐
-               │            ▼           │
-               │  dedupe · filter ──► ✕ │
-               │            ▼           │
-               │  correlate · buffer ◄──┼── [ Postgres | celld ]
-               │            ▼           │
-               │  decide ── ignore ─► ✕ │
-               │            ▼ wake      │
-               │        deliver         │
-               └─────┬──────────┬───────┘
-                     ▼          ▼
-      Postgres: runs · audit    Eve session
-```
-
-## Why?
-
-Agents are most useful when they can notice what is happening around them, not
-only when someone sends them a direct prompt. But turning every message,
-webhook, alert, or state change into an agent run is noisy, expensive, and hard
-to operate safely.
-
-The usual alternative is application-specific glue: an in-process debounce,
-some queue consumers, a classifier, and enough retry state to keep the pieces
-together. That works until a process restarts, an event is delivered twice, a
-hot key overwhelms a worker, or a classifier succeeds but delivery fails.
-
-Eve Ambient provides a durable attention layer for that gap. It keeps event
-data separate from trusted task instructions, gives every decision and
-delivery a stable identity, and makes buffering, cooldown, retry, and
-retention explicit rather than incidental.
-
-It is not a general event bus or workflow engine. Channels and external systems
-still own transport and normalization; Eve Ambient decides whether normalized
-events merit cognition.
-
-## One attention model, several deployment choices
-
-Event architectures are rarely interchangeable. A small deployment may value
-one database and minimal operations. A high-volume chat system may need a
-partitioned ingress log, consumer groups, and independently scalable mailboxes.
-Another organization may already operate a signal-detection pipeline and want
-to send Eve only actionable events.
-
-Eve Ambient keeps the monitoring and attention semantics consistent while
-allowing those deployment boundaries to change.
-
-| Profile | What enters Eve Ambient | Payload custody | Mailbox and timers | Scale profile | Complexity | Maturity |
-|---|---|---|---|---|---|---|
-| **Postgres-first** | Normalized channel events | Full branch and batch values in PostgreSQL until terminal completion | PostgreSQL due scans and leased claims | Add workers horizontally and scale the database vertically first | Low | Supported; default |
-| **Bring your own signal pipeline** | Events already selected by an external rules, stream-processing, or detection system | The external system before acceptance; full PostgreSQL branch values after `publish()` | PostgreSQL by default | Eve work follows the selected-event rate instead of the raw firehose | Medium | Supported through the publishing API |
-| **External log + distributed mailbox** | Channel or gateway events consumed from Kafka or another durable log | External log before Eve acceptance; PostgreSQL owns the branch until celld accepts a complete copy, then celld owns the mailbox payload | celld owns full-payload per-key buffers and alarms | Horizontally partitioned ingestion and correlation | High | Full-value celld is implemented but experimental; external-log bridges are application-owned |
-
-The celld tier does not run filters. Schema validation, dedupe, deterministic
-filtering, correlation, loop prevention, and event budgets run before a
-filter-surviving complete event envelope is appended to its cell. The cell can
-evaluate that work after the sender's local payload copy is deleted; it never
-resolves an Eve event reference.
-
-See [Deployment options](https://github.com/ewhauser/eve-ambient/blob/main/docs/deployment-options.md)
-for the full responsibility boundaries, tradeoffs, and selection guidance.
-
-## How it works
-
-Across every deployment profile, the runtime provides:
-
-- typed ingress with source-event deduplication;
-- synchronous deterministic filtering and exact correlation;
-- immediate or bounded debounce buffering with cooldown accumulation;
-- restricted rule or structured model decisions;
-- separate trusted instructions and untrusted structured evidence;
-- tenant, application, monitor, and key-scoped budgets;
-- durable runs, retries, dead letters, retention, and shadow mode; and
-- idempotent delivery through channel-owned conversation bindings.
-
-The detailed concepts and APIs are covered in the
-[Monitoring model](https://github.com/ewhauser/eve-ambient/blob/main/docs/monitoring-model.md).
+`@ewhauser/eve-ambient` is the provider-independent runtime for typed ingress,
+correlation, bounded decisions, durable mailboxes, and delivery admission. Read
+the repository's [project overview](https://github.com/ewhauser/eve-ambient#readme)
+for the problem it solves, architecture, and deployment profiles.
 
 ## Install
 

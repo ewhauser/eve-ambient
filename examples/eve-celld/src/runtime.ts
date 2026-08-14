@@ -10,10 +10,13 @@ import {
 } from "@ewhauser/eve-ambient-eve";
 import type { ChannelFrom } from "eve/channels";
 
+import { githubChannel } from "./channels/github.js";
+import { blockedPullRequestRule } from "./rules/blocked-pull-request.js";
+
 export interface EveCelldRuntimeOptions
   extends Omit<
     MonitorRuntimeOptions,
-    "deliveryChannels" | "mailbox" | "store"
+    "channels" | "deliveryChannels" | "deployment" | "mailbox" | "store"
   > {
   readonly eve: {
     readonly auth: EveChannelAuth;
@@ -28,9 +31,12 @@ export function createEveCelldRuntime(
   options: EveCelldRuntimeOptions,
 ): MonitorRuntime {
   const { eve, mailbox, pool, ...runtime } = options;
+  const delivery = createEveDeliveryChannel({ ...eve, id: "eve" });
   return new MonitorRuntime({
     ...runtime,
-    deliveryChannels: [createEveDeliveryChannel(eve)],
+    channels: [githubChannel],
+    deliveryChannels: [delivery],
+    deployment: { monitors: [blockedPullRequestRule(delivery)] },
     mailbox,
     store: new PostgresMonitorStore({ pool }),
   });

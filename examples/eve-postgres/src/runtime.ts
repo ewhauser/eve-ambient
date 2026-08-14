@@ -10,10 +10,13 @@ import {
 import type { ChannelFrom } from "eve/channels";
 import type { Pool } from "pg";
 
+import { slackChannel } from "./channels/slack.js";
+import { incidentEscalationRule } from "./rules/incident-escalation.js";
+
 export interface EvePostgresRuntimeOptions
   extends Omit<
     MonitorRuntimeOptions,
-    "deliveryChannels" | "mailbox" | "store"
+    "channels" | "deliveryChannels" | "deployment" | "mailbox" | "store"
   > {
   readonly eve: {
     readonly auth: EveChannelAuth;
@@ -27,9 +30,12 @@ export function createEvePostgresRuntime(
   options: EvePostgresRuntimeOptions,
 ): MonitorRuntime {
   const { eve, pool, ...runtime } = options;
+  const delivery = createEveDeliveryChannel({ ...eve, id: "eve" });
   return new MonitorRuntime({
     ...runtime,
-    deliveryChannels: [createEveDeliveryChannel(eve)],
+    channels: [slackChannel],
+    deliveryChannels: [delivery],
+    deployment: { monitors: [incidentEscalationRule(delivery)] },
     store: new PostgresMonitorStore({ pool }),
   });
 }

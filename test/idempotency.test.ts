@@ -16,6 +16,8 @@ import {
   parseIdempotencyKey,
   parseInputHash,
   type CanonicalChannelEvent,
+  type IdempotencyBeginResult,
+  type IdempotencyReceipt,
   type JsonValue,
 } from "../src/index.js";
 import { assertChannelCanonicalization } from "../src/testing.js";
@@ -97,6 +99,11 @@ describe("idempotency identity", () => {
     await expect(hashIdempotencyInput({ unsafe: Number.NaN })).rejects.toThrow(
       "finite numbers",
     );
+    const sparse = new Array(1);
+    await expect(hashIdempotencyInput(sparse)).rejects.toThrow(
+      "arrays must not contain holes or named properties",
+    );
+    await expect(hashIdempotencyInput([null])).resolves.toMatch(/^eve:input:v1:[0-9a-f]{64}$/);
     const prototypeKey = JSON.parse('{"__proto__":"kept-as-data"}') as JsonValue;
     await expect(hashIdempotencyInput(prototypeKey)).resolves.not.toBe(
       await hashIdempotencyInput({}),
@@ -182,6 +189,47 @@ describe("idempotency identity", () => {
       });
       expect((error as Error).message).not.toContain(receivedInputHash);
     }
+  });
+
+  it("distinguishes retry acquisition from replaying a terminal failure", async () => {
+    const key = await deriveEventKey({
+      tenantId: "tenant",
+      applicationId: "app",
+      channelId: "slack",
+      installationId: "workspace",
+      sourceEventId: "event",
+    });
+    const inputHash = await hashIdempotencyInput({ text: "original" });
+    const receiptBase = {
+      namespace: "ingress",
+      key,
+      inputHash,
+      createdAt: "2026-08-13T20:00:00.000Z",
+      expiresAt: "2026-08-20T20:00:00.000Z",
+      status: "failed",
+      errorClass: "provider_unavailable",
+      failedAt: "2026-08-13T20:01:00.000Z",
+    } as const;
+    const retryableReceipt = {
+      ...receiptBase,
+      retryable: true,
+    } satisfies IdempotencyReceipt;
+    const terminalReceipt = {
+      ...receiptBase,
+      errorClass: "invalid_request",
+      retryable: false,
+    } satisfies IdempotencyReceipt;
+    const retry = {
+      status: "retry",
+      previousReceipt: retryableReceipt,
+    } satisfies IdempotencyBeginResult;
+    const failed = {
+      status: "failed",
+      receipt: terminalReceipt,
+    } satisfies IdempotencyBeginResult;
+
+    expect(retry.previousReceipt.retryable).toBe(true);
+    expect(failed.receipt.retryable).toBe(false);
   });
 
   it("freezes ordered distinct members into one immutable operation", async () => {
@@ -412,7 +460,24 @@ describe("channel canonicalization", () => {
       applicationId: "app",
       original,
       equivalentRetries: [{ ...original, attempt: 2 }],
+      conflictingRetries: [{ ...original, text: "meaningfully changed" }],
     })).rejects.toThrow("equivalent retry 0 changed the input hash");
+  });
+
+  it("requires equivalent and conflicting retry fixtures", async () => {
+    await expect(assertChannelCanonicalization(canonicalization(), {
+      applicationId: "app",
+      original,
+      equivalentRetries: [] as never,
+      conflictingRetries: [{ ...original, text: "changed" }],
+    })).rejects.toThrow("equivalentRetries must contain at least one fixture");
+
+    await expect(assertChannelCanonicalization(canonicalization(), {
+      applicationId: "app",
+      original,
+      equivalentRetries: [{ ...original, attempt: 2 }],
+      conflictingRetries: [] as never,
+    })).rejects.toThrow("conflictingRetries must contain at least one fixture");
   });
 
   it("rejects malformed canonical events and contract versions", async () => {

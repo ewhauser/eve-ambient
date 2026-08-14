@@ -6,9 +6,17 @@ import {
   createIdempotencyContext,
   defineChannelCanonicalization,
   deriveBatchKey,
+  deriveAttentionBatchKey,
+  deriveAttentionBranchKey,
+  deriveAttentionDirectDispatchKey,
+  deriveAttentionInstanceKey,
+  deriveAttentionRunKey,
+  deriveAttentionWakeKey,
   deriveBranchKey,
   deriveDirectDispatchKey,
   deriveEventKey,
+  deriveFanoutManifestHash,
+  deriveOccurrenceKey,
   deriveRunKey,
   deriveWakeKey,
   freezeMembership,
@@ -23,6 +31,80 @@ import {
 import { assertChannelCanonicalization } from "../src/testing.js";
 
 describe("idempotency identity", () => {
+  it("derives the RFC 0002 occurrence and attention lineage", async () => {
+    const eventKey = await deriveEventKey({
+      tenantId: "tenant",
+      applicationId: "app",
+      channelId: "slack",
+      installationId: "workspace",
+      sourceEventId: "event",
+    });
+    const sourceInputHash = await hashIdempotencyInput({ event: "complete" });
+    const occurrenceKey = await deriveOccurrenceKey({ eventKey, inputHash: sourceInputHash });
+    const directDispatchKey = await deriveAttentionDirectDispatchKey({
+      occurrenceKey,
+      bindingGeneration: "binding-v1",
+    });
+    const branchKey = await deriveAttentionBranchKey({
+      occurrenceKey,
+      monitorId: "monitor",
+      definitionVersion: "definition-v1",
+      phase: "observed",
+      correlationKey: "incident-1",
+    });
+    const branchInputHash = await hashIdempotencyInput({ branch: "complete" });
+    const secondBranchKey = await deriveAttentionBranchKey({
+      occurrenceKey,
+      monitorId: "monitor-2",
+      definitionVersion: "definition-v1",
+      phase: "observed",
+      correlationKey: "incident-1",
+    });
+    const instanceKey = await deriveAttentionInstanceKey({
+      applicationId: "app",
+      tenantId: "tenant",
+      monitorId: "monitor",
+      definitionVersion: "definition-v1",
+      correlationKey: "incident-1",
+    });
+    const batchKey = await deriveAttentionBatchKey({
+      instanceKey,
+      orderedBranchKeys: [branchKey],
+    });
+    const runKey = await deriveAttentionRunKey({ batchKey });
+    const wakeKey = await deriveAttentionWakeKey({ runKey, routeId: "eve-session" });
+    const manifestHash = await deriveFanoutManifestHash({
+      occurrenceKey,
+      orderedBranches: [{ branchKey, inputHash: branchInputHash }],
+    });
+    const emptyManifestHash = await deriveFanoutManifestHash({
+      occurrenceKey,
+      orderedBranches: [],
+    });
+
+    expect(occurrenceKey).toMatch(/^eve:occurrence:v1:[0-9a-f]{64}$/);
+    expect(directDispatchKey).toMatch(/^eve:direct-dispatch:v2:[0-9a-f]{64}$/);
+    expect(branchKey).toMatch(/^eve:branch:v2:[0-9a-f]{64}$/);
+    expect(instanceKey).toMatch(/^eve:instance:v2:[0-9a-f]{64}$/);
+    expect(batchKey).toMatch(/^eve:batch:v2:[0-9a-f]{64}$/);
+    expect(runKey).toMatch(/^eve:run:v2:[0-9a-f]{64}$/);
+    expect(wakeKey).toMatch(/^eve:wake:v2:[0-9a-f]{64}$/);
+    expect(manifestHash).toMatch(/^eve:fanout:v1:[0-9a-f]{64}$/);
+    expect(emptyManifestHash).toMatch(/^eve:fanout:v1:[0-9a-f]{64}$/);
+    expect(emptyManifestHash).not.toBe(manifestHash);
+    expect(parseIdempotencyKey("occurrence", occurrenceKey)).toBe(occurrenceKey);
+    expect(parseIdempotencyKey("instance", instanceKey)).toBe(instanceKey);
+    expect(parseIdempotencyKey("wake", wakeKey)).toBe(wakeKey);
+
+    const descendingBranches = [
+      { branchKey, inputHash: branchInputHash },
+      { branchKey: secondBranchKey, inputHash: branchInputHash },
+    ].sort((left, right) => (left.branchKey < right.branchKey ? 1 : -1));
+    await expect(
+      deriveFanoutManifestHash({ occurrenceKey, orderedBranches: descendingBranches }),
+    ).rejects.toThrow("orderedBranches must be ordered by branchKey");
+  });
+
   it("derives stable, domain-separated keys without delimiter ambiguity", async () => {
     const input = {
       tenantId: "tenant:a",

@@ -1,6 +1,9 @@
 # RFC: Durable Attention Engine
 
-- Status: Proposed
+- Status: Accepted
+- Implementation: Protocol, v2 lineage, fan-out validation, memory reference
+  engine, and shared conformance suite implemented; celld, PostgreSQL, direct
+  adapter split, and clean replacement pending
 - Scope: Replace the public store-and-runtime persistence model with one
   durable attention-engine command and two application callbacks
 - Preserves: RFC 0001 full-payload custody, idempotency lineage, membership
@@ -162,9 +165,11 @@ interface AcceptedFanout {
   /** Hash of the complete canonical source input. */
   readonly inputHash: string;
   /** Canonicalization contract used to compute inputHash. */
-  readonly canonicalizationVersion: string;
+  readonly canonicalizationVersion: number;
   /** Complete canonical source event, including for an empty fan-out. */
   readonly event: CanonicalChannelEvent;
+  /** Hash of the complete ordered branch manifest, including an empty one. */
+  readonly manifestHash: string;
   /** Complete ordered membership proposed by this attempt. */
   readonly branches: readonly FullBranch[];
 }
@@ -172,6 +177,8 @@ interface AcceptedFanout {
 interface FullBranch {
   readonly applicationId: string;
   readonly tenantId: string;
+  readonly eventKey: EventKey;
+  readonly occurrenceKey: OccurrenceKey;
   readonly branchKey: BranchKey;
   readonly inputHash: string;
   readonly monitorId: string;
@@ -180,6 +187,7 @@ interface FullBranch {
   readonly correlationKey: string;
   /** Stable source-defined order within a correlation stream. */
   readonly orderKey: string;
+  readonly mode: "active" | "shadow";
   /** Complete canonical channel event, never an Eve payload reference. */
   readonly event: CanonicalChannelEvent;
   /** Serializable lifecycle policy needed after the caller disappears. */
@@ -197,6 +205,7 @@ interface AcceptanceReceipt {
 }
 
 interface FrozenBatch {
+  readonly instanceKey: string;
   readonly batchKey: BatchKey;
   readonly runKey: RunKey;
   readonly applicationId: string;
@@ -204,6 +213,10 @@ interface FrozenBatch {
   readonly monitorId: string;
   readonly definitionVersion: string;
   readonly correlationKey: string;
+  readonly openedAt: string;
+  readonly frozenAt: string;
+  readonly closedBy: string;
+  readonly bytes: number;
   /** Complete frozen members in canonical order. */
   readonly branches: readonly FullBranch[];
 }
@@ -226,9 +239,16 @@ interface PreparedWake {
   readonly wakeKey: WakeKey;
   readonly runKey: RunKey;
   readonly batchKey: BatchKey;
+  readonly instanceKey: string;
+  readonly applicationId: string;
+  readonly tenantId: string;
+  readonly monitorId: string;
+  readonly definitionVersion: string;
+  readonly correlationKey: string;
   readonly rootEventKeys: readonly EventKey[];
   readonly routeId: string;
   readonly instruction: string;
+  readonly decision: JsonValue;
   readonly evidence: JsonValue;
   /** Hash of this complete delivery input. */
   readonly inputHash: string;

@@ -11,6 +11,13 @@ import type {
   SubscriptionStatus,
   UsageReservation,
 } from "./storage.js";
+export {
+  MemoryAttentionEngine,
+  type MemoryAttentionDiagnostics,
+  type MemoryAttentionEngineFaults,
+  type MemoryAttentionEngineOptions,
+  type MemoryAttentionRunResult,
+} from "./memory-engine.js";
 import { scopedKey } from "./storage.js";
 import {
   assertIdempotencyInput,

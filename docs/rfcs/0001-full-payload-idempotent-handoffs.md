@@ -1,8 +1,8 @@
 # RFC: Full-Payload, End-to-End Idempotent Event Handoffs
 
 - Status: Accepted
-- Implementation: Identity, both mailbox tiers, and central-ingress cleanup implemented; Kafka pending; SQS deferred
-- Scope: End-to-end protocol across Eve Ambient ingress, fan-out, mailboxes, evaluation, session delivery, and final actions
+- Implementation: Eve Ambient identity, both mailbox tiers, and central-ingress cleanup implemented; Eve session admission tracked by `vercel/eve#1842`; Kafka pending; SQS deferred
+- Scope: Eve Ambient implementation through `wakeKey` delivery, plus a conditional conformance profile through final actions
 - Related: `ewhauser/eve-ambient` issue #3
 
 ## Summary
@@ -20,11 +20,15 @@ Every stateful or side-effecting component MUST durably remember the result of p
 
 Eve will not define a central event repository. It will not pass event references, require later payload lookup, expose event retention as a system capability, or provide replay. Kafka, PostgreSQL, celld, and other backends may retain payloads internally according to their own operation, but Eve assigns no replay or historical-query semantics to that retention. SQS is a possible future transport realization, not part of the current implementation plan.
 
-The intended guarantee is:
+The intended guarantee for a conforming end-to-end deployment is:
 
 > Eve may execute internal work more than once, but one logical action key produces at most one externally durable effect within the configured idempotency horizon.
 
-This is effectively-once final action, not exactly-once execution.
+This is effectively-once final action, not exactly-once execution. Eve Ambient
+alone guarantees stable identity and complete payload custody through the
+`wakeKey` delivery request. The final-action guarantee additionally requires a
+session/action integration that implements the optional downstream portion of
+this protocol.
 
 ## Motivation
 
@@ -57,7 +61,7 @@ After a receiver has durably accepted the full payload, the sender may acknowled
 - Permit payload deletion as soon as a component has completed or durably handed off its work.
 - Keep the existing monitor lifecycle semantics: filtering, correlation, batching, cooldown, evaluation, and session delivery.
 - Preserve provider and transport independence.
-- Define where Eve Ambient's guarantee ends and where the Eve session/action runtime must continue the lineage contract.
+- Define where Eve Ambient's guarantee ends and the conditional requirements for integrations that continue lineage to final actions.
 
 ## Non-goals
 
@@ -69,6 +73,8 @@ After a receiver has durably accepted the full payload, the sender may acknowled
 - Exactly-once internal execution.
 - Infinite idempotency retention.
 - A total order across unrelated transport partitions or correlation instances.
+- Framework-owned ordering or coalescing of distinct Eve session deliveries.
+- Requiring Eve core to implement `turnKey` or `actionKey` as a condition for completing Eve Ambient.
 - Making a non-idempotent external service safe when it offers neither idempotency nor reconciliation.
 
 Automatic retry is not replay. Automatic retry uses the original idempotency key and attempts to complete the original operation. Eve defines no interface for intentionally reprocessing historical events under changed definitions. A new source submission is simply a new logical input and MUST have a new source key.
@@ -133,11 +139,15 @@ eventKey
         +-- batchKey
               +-- runKey
                     +-- wakeKey
-                          +-- turnKey
+                          +-- turnKey       optional downstream profile
                                 +-- actionKey per durable tool/action call
 ```
 
-The final action carries both its `actionKey` and its cause lineage. For a coalesced action, the lineage contains the stable set of contributing root event keys.
+Eve Ambient owns the lineage through `wakeKey`. An integration that advertises
+the stronger final-action guarantee continues it through `turnKey` and
+`actionKey`. Such a final action carries both its `actionKey` and cause lineage;
+for a coalesced action, the lineage contains the stable set of contributing root
+event keys.
 
 Transport coordinates, receipt handles, attempts, leases, timestamps, process IDs, and random retry IDs MUST NOT participate in logical key derivation.
 
@@ -162,7 +172,9 @@ An idempotency conflict MUST be fail-closed. It MUST NOT overwrite the original 
 
 ### 5. Membership freezes before derived work begins
 
-Fan-out manifests, evaluation batches, coalesced session turns, and multi-input actions MUST freeze their membership before derived work begins.
+Fan-out manifests and evaluation batches MUST freeze their membership before
+derived work begins. Any downstream integration that coalesces session turns or
+multi-input actions MUST apply the same membership-freeze rule.
 
 The membership list, derived operation key, and transition to claimed/running MUST commit atomically. Every append concurrent with a freeze must serialize either before it and be included, or after it and enter the next collection. A crash cannot produce two operation keys for the same frozen membership.
 
@@ -263,6 +275,7 @@ runKey    = H("eve:run:v1", batchKey, "primary")
 
 wakeKey   = H("eve:wake:v1", runKey, routeId)
 
+# Optional downstream conformance profile:
 turnKey   = H("eve:turn:v1", bindingGeneration, orderedDistinctIngressKeys)
 
 actionKey = H("eve:action:v1", turnKey, durableActionCallId)
@@ -310,16 +323,16 @@ Ordering is domain-specific but durable:
 
 - Fan-out uses a canonical ordering of `(monitorId, definitionVersion, phase, branchKey)`.
 - A monitor batch uses mailbox acceptance order with `branchKey` as a deterministic tie-breaker.
-- A session turn uses durable session-inbox order with the ingress key as a deterministic tie-breaker.
+- A coalescing session integration uses its durable inbox order with the ingress key as a deterministic tie-breaker.
 
 Applications of this protocol are:
 
 - Fan-out freezes the deployment revision and complete branch manifest before dispatching the first branch.
 - A monitor batch freezes when it is claimed for evaluation. Unclaimed sealed batches may still be consolidated and therefore have no `batchKey` or downstream receipt.
-- A session turn freezes immediately before durable turn execution begins.
-- An action freezes when its complete durable command and durable action-call identity are checkpointed.
+- A coalescing session integration freezes a turn immediately before durable turn execution begins.
+- A final-action integration freezes an action when its complete durable command and durable action-call identity are checkpointed.
 
-For a coalesced turn:
+For an integration that deliberately coalesces a turn:
 
 ```text
 W1 accepted                    provisional [W1]
@@ -490,17 +503,36 @@ Budget reservations, classifier/model calls, policy decisions, evidence construc
 
 If the decision is `ignore`, the run records a terminal receipt and no session wake occurs. If the decision is `wake`, the evaluator creates a complete session-delivery payload with `wakeKey`, `runKey`, and the full cause lineage.
 
-### 5. Durable session ingress
+### 5. Eve session admission and optional turn lineage
 
-The session inbox deduplicates `wakeKey` and durably accepts the complete monitor delivery. A lost response therefore causes the evaluator to resend the same wake, not create another turn.
+The only planned upstream Eve change required by this RFC is
+[`vercel/eve#1842`](https://github.com/vercel/eve/issues/1842). An Eve delivery
+adapter supplies `wakeKey` (or `directDispatchKey` for direct chat dispatch) as
+the channel `send()` idempotency key and sends the complete delivery payload.
+Eve durably admits that key with the turn or returns the previously recorded
+disposition. A lost response therefore causes the adapter to retry the same
+admission rather than create a second turn.
 
-If several durable inputs are deliberately coalesced into one turn, the session records their ordered distinct keys and derives one stable `turnKey`. Re-delivery of one member does not alter the turn or start a second one.
+That issue intentionally does not define ordering or coalescing between
+distinct delivery keys, and Eve Ambient does not require either behavior. An
+integration may submit each distinct wake independently or provide its own
+durable serialization policy.
 
-Turn membership freezes atomically immediately before durable turn execution. Wakes accepted before that transition are members of the turn; wakes accepted after it enter the next provisional turn. A running turn's key and membership are never recomputed to absorb newly arriving wakes.
+If an integration deliberately coalesces several durable inputs into one turn,
+it records their ordered distinct keys and derives one stable `turnKey`.
+Re-delivery of one member does not alter the turn or start a second one. Turn
+membership freezes atomically immediately before durable turn execution; wakes
+accepted after that transition enter the next provisional turn.
 
-The durable turn checkpoints model outputs and action calls before execution. A retry MUST NOT rerun an uncheckpointed model step and use the new model output to mint unrelated action keys after an earlier output may already have acted.
+An integration that continues lineage into final actions also checkpoints model
+outputs and action calls before execution. A retry MUST NOT rerun an
+uncheckpointed model step and use new output to mint unrelated action keys after
+an earlier output may already have acted.
 
 ### 6. Final actions
+
+This section is a conditional full-stack conformance profile. It is not an Eve
+Ambient feature or a requirement for additional upstream Eve work.
 
 Each durable action command contains:
 
@@ -540,10 +572,21 @@ Eve Ambient owns:
 - Batch membership freeze, `batchKey`, and `runKey`.
 - Complete self-contained monitor delivery with `wakeKey` and root lineage.
 
-The Eve session/workflow runtime owns:
+The only planned upstream Eve dependency is
+[`vercel/eve#1842`](https://github.com/vercel/eve/issues/1842). It owns the
+minimum session-admission contract needed by Eve Ambient:
 
-- Durable wake-inbox receipts.
-- Session-turn membership freeze and `turnKey`.
+- Accept `wakeKey` or `directDispatchKey` as the channel-delivery idempotency
+  key.
+- Atomically deduplicate admission and return the prior durable disposition for
+  a repeated key.
+- Make no ordering or coalescing promise between distinct delivery keys.
+
+An integration that advertises the stronger turn or final-action conformance
+profile owns:
+
+- Optional session-turn membership freeze and `turnKey` derivation when it
+  coalesces inputs.
 - Durable model-result and action-call checkpoints.
 - Propagation of cause lineage into action commands.
 
@@ -553,7 +596,12 @@ Action adapters and destinations own:
 - Provider idempotency-key propagation.
 - Reconciliation after unknown remote outcomes.
 
-Eve Ambient can guarantee idempotent delivery through the complete `wakeKey` handoff. The stronger effectively-once final-action guarantee exists only when the session runtime and selected action adapter implement their portions of this contract. Session/turn/action implementation requires a companion Eve-core RFC and must not be presented as functionality that `eve-ambient` can impose by itself.
+Eve Ambient guarantees stable identity and complete-payload custody through the
+`wakeKey` delivery request. With `vercel/eve#1842`, its Eve adapter can make
+session admission idempotent as well. The stronger effectively-once
+final-action guarantee exists only when an integration and the selected action
+adapter implement the conditional downstream profile. No companion Eve-core
+RFC or additional upstream Eve issue is required to complete Eve Ambient.
 
 ## Direct chat dispatch
 
@@ -569,6 +617,9 @@ The direct-dispatch component receives the complete event and records one durabl
 - `undispatched`, allowing creation of `undispatched` monitor branches;
 - `failed_retryable`, retaining the same key for retry; or
 - `failed_terminal`.
+
+The Eve direct-dispatch adapter passes `directDispatchKey` as the channel
+delivery idempotency key defined by `vercel/eve#1842`.
 
 `observed` branches and full-payload `undispatched` branch candidates commit with the ingress receipt. Candidate rows remain conditional and unavailable to workers until a durable `undispatched` outcome activates them. A `dispatched` or terminal failure outcome deletes them. A timeout or unknown result MUST NOT be guessed as undispatched.
 
@@ -773,7 +824,7 @@ Implemented conceptual changes:
 7. Change celld append requests and cell state to carry full events.
 8. Change evaluator callbacks to carry complete batches.
 9. Remove `#loadRunEvents`, evaluator calls to `MonitorStore.getEvent`, and payload-expiry failures.
-10. Propagate lineage through the complete monitor delivery; require the companion Eve-core work to continue it through session inboxes, turns, and action commands.
+10. Propagate lineage through the complete monitor delivery and pass `wakeKey` or `directDispatchKey` to Eve as the channel delivery idempotency key.
 11. Add local idempotency receipts and hash-conflict handling at every durable boundary.
 12. Remove event repository, pointer, payload-loading, replay, and central-retention contracts from issue #3 and its implementation.
 
@@ -841,15 +892,22 @@ worker harness cannot measure them.
 - Retain backend-native retention documentation only as operational guidance.
 - SQS support is explicitly deferred and is not required to complete this RFC.
 
-### Companion Eve-core RFC: Session and action lineage
+### Eve integration boundary
 
-This is a named dependency, not an `eve-ambient` implementation phase:
+The only planned upstream Eve change is
+[`vercel/eve#1842`](https://github.com/vercel/eve/issues/1842):
 
-- Add durable wake-inbox receipts.
-- Define session-turn membership freeze and stable coalesced `turnKey` behavior.
-- Checkpoint model outputs and durable action-call IDs.
-- Require action adapters to pass `actionKey` through to the destination or reconcile by it.
-- Add end-to-end failure injection from wake acceptance through destination receipt.
+- Pass `wakeKey` or `directDispatchKey` to channel `send()` as its idempotency
+  key.
+- Durably deduplicate session admission and return a stable disposition for a
+  retry.
+- Do not depend on ordering or coalescing between distinct delivery keys.
+- Do not require another upstream Eve issue or companion RFC to complete this
+  Eve Ambient design.
+
+An integration may additionally implement turn/action lineage and claim the
+conditional full-stack conformance profile. That extension does not change the
+Eve Ambient completion boundary.
 
 ## Conformance tests
 
@@ -872,22 +930,27 @@ Every backend and boundary must pass, where applicable:
 15. A mailbox can complete evaluation after the source transport deletes its copy.
 16. Evaluation uses only its delivered full batch and performs no event lookup.
 17. A lost evaluator response does not create a second run or spend budget twice.
-18. A turn freeze retains exactly the accepted pre-freeze wakes; later wakes enter the next turn and duplicates change neither turn.
-19. A lost session response does not create a second wake or turn.
-20. A retried model/tool stage reuses the checkpointed action identity.
-21. The same final action key produces one external effect and one stable receipt.
-22. Unknown final-action results reconcile without minting a replacement key.
+18. A coalescing integration's turn freeze retains exactly the accepted pre-freeze wakes; later wakes enter the next turn and duplicates change neither turn.
+19. A lost keyed Eve session-admission response does not create a second admitted delivery.
+20. An integration claiming final-action conformance reuses the checkpointed action identity when a model/tool stage is retried.
+21. An integration claiming final-action conformance produces one external effect and one stable receipt for the same action key.
+22. An integration claiming final-action conformance reconciles an unknown result without minting a replacement key.
 23. Oversized payloads and resident-byte overflow fail or backpressure before acknowledgement and never fall back to references.
 24. Backend-native payload deletion does not invalidate downstream accepted work.
 25. Receipt expiry behaves according to the declared idempotency horizon.
 
-End-to-end failure injection must cover a lost response at every arrow in:
+A deployment claiming the conditional final-action guarantee must cover a lost
+response at every arrow in:
 
 ```text
 ingress -> fan-out -> mailbox -> evaluator -> session -> action adapter -> destination
 ```
 
-Tests 1-17 and 23-25 are owned by Eve Ambient and its backends. Tests 18-22 are owned by the companion Eve-core/session/action work. The primary full-stack acceptance scenario is:
+Tests 1-17 and 23-25 are owned by Eve Ambient and its backends. Test 19 is also
+required of the Eve delivery adapter once `vercel/eve#1842` is available. Tests
+18 and 20-22 apply only to integrations advertising coalescing or final-action
+conformance. For such a full-stack deployment, the primary acceptance scenario
+is:
 
 > Deliver one provider event multiple times through different transport attempts and failure/retry paths. Eve may repeat internal computation, but every matched monitor append, durable wake, and final action has stable identity, and the destination observes one durable effect for each logical action.
 
@@ -921,9 +984,11 @@ Eve Ambient will use full-payload, idempotent handoffs.
 - No central event repository is required or exposed.
 - Replay and historical reprocessing are not requirements and no replay contract is provided.
 - Every stateful or side-effecting boundary durably deduplicates a stable key and binds it to an input hash.
-- Every multi-input operation performs one atomic membership freeze before receiving a derived operation key.
+- Every Eve Ambient multi-input operation performs one atomic membership freeze before receiving a derived operation key; optional downstream coalescing follows the same rule.
 - Every receiver gets complete custody before its sender acknowledges or discards the payload.
-- Stable lineage reaches the final action, where the action key is enforced by the destination or a reconcilable durable adapter.
+- Eve Ambient carries stable lineage through `wakeKey`; `vercel/eve#1842` is the sole planned upstream dependency for keyed Eve session admission.
+- Eve Ambient assumes no ordering or coalescing between distinct Eve delivery keys.
+- Integrations claiming the conditional final-action guarantee continue lineage through `turnKey` and `actionKey`, which the destination or a reconcilable durable adapter enforces.
 - Existing ref-based and replay code is replaced directly; no migration or compatibility path is required.
 
 Backend retention remains backend retention. Eve's correctness comes from self-contained custody and idempotency receipts, not from keeping events forever or being able to fetch them later.

@@ -1,24 +1,22 @@
-CREATE TABLE IF NOT EXISTS eve_ambient_events (
+CREATE TABLE IF NOT EXISTS eve_ambient_ingress_receipts (
   ref text PRIMARY KEY,
   dedupe_key text NOT NULL UNIQUE,
   tenant_id text NOT NULL,
   application_id text NOT NULL,
   channel_id text NOT NULL,
   ingress_sequence bigint NOT NULL,
-  payload_expires_at timestamptz NOT NULL,
   dedupe_expires_at timestamptz NOT NULL,
   record jsonb NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS eve_ambient_events_payload_expiry_idx
-  ON eve_ambient_events (payload_expires_at);
-CREATE INDEX IF NOT EXISTS eve_ambient_events_dedupe_expiry_idx
-  ON eve_ambient_events (dedupe_expires_at);
+CREATE INDEX IF NOT EXISTS eve_ambient_ingress_receipts_dedupe_expiry_idx
+  ON eve_ambient_ingress_receipts (dedupe_expires_at);
 
 CREATE TABLE IF NOT EXISTS eve_ambient_subscriptions (
   id text PRIMARY KEY,
   branch_key text NOT NULL UNIQUE,
   event_key text NOT NULL,
+  acceptance_id text NOT NULL,
   input_hash text NOT NULL,
   tenant_id text NOT NULL,
   application_id text NOT NULL,
@@ -42,7 +40,7 @@ CREATE INDEX IF NOT EXISTS eve_ambient_subscriptions_due_idx
     ingress_sequence
   );
 CREATE INDEX IF NOT EXISTS eve_ambient_subscriptions_event_idx
-  ON eve_ambient_subscriptions (event_key);
+  ON eve_ambient_subscriptions (event_key, acceptance_id);
 CREATE INDEX IF NOT EXISTS eve_ambient_subscriptions_ordering_idx
   ON eve_ambient_subscriptions (
     application_id,

@@ -238,7 +238,7 @@ describe("PostgresMonitorStore due queries", () => {
     expect(ordering).toContain("correlation_key_hash IS NULL OR correlation_key_hash = $5");
   });
 
-  it("does not couple branch-row retention to ingress dedupe retention", async () => {
+  it("only removes unresolved conditional branches with expired direct-dispatch receipts", async () => {
     const calls: string[] = [];
     const query = (async (text: string) => {
       calls.push(text);
@@ -252,7 +252,12 @@ describe("PostgresMonitorStore due queries", () => {
 
     await store.purgeExpired("2026-01-01T00:00:00.000Z");
 
-    expect(calls.some((text) => text.includes("eve_ambient_subscriptions"))).toBe(false);
+    const subscriptionDelete = calls.find(
+      (text) => text.includes('DELETE FROM "public".eve_ambient_subscriptions'),
+    );
+    expect(subscriptionDelete).toContain('USING "public".eve_ambient_ingress_receipts');
+    expect(subscriptionDelete).toContain("subscription.acceptance_id");
+    expect(subscriptionDelete).toContain("subscription.status = 'conditional'");
   });
 });
 

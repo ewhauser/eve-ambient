@@ -1,7 +1,7 @@
 # RFC: Full-Payload, End-to-End Idempotent Event Handoffs
 
 - Status: Accepted
-- Implementation: Phases 1 through 3 implemented; external transports and central-payload cleanup pending
+- Implementation: Identity, both mailbox tiers, and central-ingress cleanup implemented; Kafka pending; SQS deferred
 - Scope: End-to-end protocol across Eve Ambient ingress, fan-out, mailboxes, evaluation, session delivery, and final actions
 - Related: `ewhauser/eve-ambient` issue #3
 
@@ -18,7 +18,7 @@ Every handoff that represents durable work MUST include:
 
 Every stateful or side-effecting component MUST durably remember the result of processing an idempotency key. Receiving the same key and the same input returns the previously recorded result. Receiving the same key with different input is a conflict and MUST NOT be processed.
 
-Eve will not define a central event repository. It will not pass event references, require later payload lookup, expose event retention as a system capability, or provide replay. Kafka, SQS, PostgreSQL, celld, and other backends may retain payloads internally according to their own operation, but Eve assigns no replay or historical-query semantics to that retention.
+Eve will not define a central event repository. It will not pass event references, require later payload lookup, expose event retention as a system capability, or provide replay. Kafka, PostgreSQL, celld, and other backends may retain payloads internally according to their own operation, but Eve assigns no replay or historical-query semantics to that retention. SQS is a possible future transport realization, not part of the current implementation plan.
 
 The intended guarantee is:
 
@@ -53,7 +53,7 @@ After a receiver has durably accepted the full payload, the sender may acknowled
 - Make every durable handoff self-contained.
 - Tolerate duplicate delivery and lost responses at every boundary.
 - Detect accidental reuse of a key for different input.
-- Allow PostgreSQL, Kafka, SQS, celld, and future backends to own their internal persistence.
+- Allow PostgreSQL, Kafka, celld, and future backends to own their internal persistence.
 - Permit payload deletion as soon as a component has completed or durably handed off its work.
 - Keep the existing monitor lifecycle semantics: filtering, correlation, batching, cooldown, evaluation, and session delivery.
 - Preserve provider and transport independence.
@@ -253,6 +253,8 @@ Keys SHOULD use domain-separated SHA-256 over a versioned canonical encoding. Ex
 ```text
 eventKey  = H("eve:event:v1", tenant, application, channel, installation, sourceEventId)
 
+directDispatchKey = H("eve:direct-dispatch:v1", eventKey, acceptanceId, bindingGeneration)
+
 branchKey = H("eve:branch:v1", eventKey, acceptanceId, monitorId, definitionVersion, phase)
 
 batchKey  = H("eve:batch:v1", instanceId, orderedDistinctBranchKeys)
@@ -398,7 +400,7 @@ The external provider is acknowledged after that first durable custody transfer,
 
 ### 2. Deterministic fan-out
 
-Fan-out validates the envelope, pins the active deployment revision, applies phase rules, loop prevention, source matching, deterministic filters, and correlation. It derives one `branchKey` per matched `(event, monitor, definition version, phase)`.
+Fan-out validates the envelope, pins the active deployment revision, and applies phase and source matching. It derives one `branchKey` per matched `(event, monitor, definition version, phase)`. Each complete branch then independently applies loop prevention, deterministic filtering, correlation, and budgets before mailbox acceptance.
 
 Before dispatching the first branch, fan-out durably freezes the routing plan in the event receipt. For ordinary events, the plan contains the complete branch manifest. For direct chat dispatch, it contains unconditional `observed` branches, the stable direct-dispatch operation, and the predetermined `undispatched` branch candidates together with their activation condition:
 
@@ -558,7 +560,7 @@ Eve Ambient can guarantee idempotent delivery through the complete `wakeKey` han
 Chat direct dispatch is another idempotent branch, not a mutation of the source event.
 
 ```text
-directDispatchKey = H("eve:direct-dispatch:v1", eventKey, bindingGeneration)
+directDispatchKey = H("eve:direct-dispatch:v1", eventKey, acceptanceId, bindingGeneration)
 ```
 
 The direct-dispatch component receives the complete event and records one durable outcome:
@@ -568,7 +570,7 @@ The direct-dispatch component receives the complete event and records one durabl
 - `failed_retryable`, retaining the same key for retry; or
 - `failed_terminal`.
 
-`observed` branches may be planned independently. `undispatched` branches are created only from a durable `undispatched` outcome. A timeout or unknown result MUST NOT be guessed as undispatched.
+`observed` branches and full-payload `undispatched` branch candidates commit with the ingress receipt. Candidate rows remain conditional and unavailable to workers until a durable `undispatched` outcome activates them. A `dispatched` or terminal failure outcome deletes them. A timeout or unknown result MUST NOT be guessed as undispatched.
 
 The fan-out/event receipt pins both the direct-dispatch operation and resulting branch identities so a retry cannot create a different outcome path.
 
@@ -605,7 +607,10 @@ This intentionally duplicates an event when it matches multiple monitors. Indepe
 - Topic retention is a Kafka deployment concern. Eve neither depends on it for later payload lookup nor assigns it any historical-processing semantics.
 - Kafka offsets and producer sequence numbers never become Eve idempotency keys.
 
-### SQS
+### SQS (deferred)
+
+No SQS adapter is planned in the current implementation sequence. If one is
+added later, it must satisfy the same protocol:
 
 - Each SQS message carries a complete self-contained Eve envelope.
 - A consumer deletes the message only after the next durable boundary accepts the complete payload.
@@ -755,9 +760,9 @@ The following are removed from the core capability model:
 
 ## Changes to the current codebase
 
-The implementation originally stored accepted payloads in `StoredEvent`, placed `BufferedEventRef` values in celld state, and reloaded run events through `MonitorStore.getEvent(ref)`. Phases 2 and 3 replaced both mailbox tiers with full event envelopes and removed evaluator payload lookup. The remaining Phase 4 work is external transport integration and removal of the transitional central ingress-payload storage/API.
+The implementation originally stored accepted payloads in `StoredEvent`, placed `BufferedEventRef` values in celld state, and reloaded run events through `MonitorStore.getEvent(ref)`. The implementation now uses full event envelopes in both mailbox tiers, a payload-free `StoredIngressReceipt`, and complete branch-owned values. The store API and initial PostgreSQL schema contain no event repository or payload-loading contract. The remaining work in this RFC is optional external transport integration, beginning with Kafka.
 
-Required conceptual changes:
+Implemented conceptual changes:
 
 1. Replace the accepted-event payload record with an ingress/fan-out idempotency receipt. It stores branch identity and status but no event body after handoff.
 2. Make the subscription/branch record carry `eventKey`, `inputHash`, and the complete canonical event.
@@ -820,15 +825,21 @@ backlogs and all three limit outcomes. LTX/object-store bytes, operation counts,
 and throughput remain target-fleet production gates because the in-process
 worker harness cannot measure them.
 
-### Phase 4: External transports and cleanup
+### Phase 4: Central ingress cleanup
+
+- **Implemented.**
+- Replace `StoredEvent` with a payload-free ingress/fan-out receipt.
+- Atomically write the receipt and complete branch-owned payloads.
+- Freeze direct-dispatch identity and conditional `undispatched` branches before invoking handlers.
+- Require direct handlers to receive the complete event, stable `directDispatchKey`, and input hash.
+- Remove central event payload APIs, storage columns, retention settings, ref-resolution tests, and documentation.
+
+### Phase 5: External transports
 
 - Implement Kafka full-payload consume/fan-out/commit semantics.
-- Add SQS full-message consume/delete semantics.
-- Validate each adapter against the same idempotency and failure-injection suite.
-- Remove central event payload APIs and storage dependencies.
-- Remove remaining central event-retention capabilities.
-- Remove ref-resolution tests and documentation.
+- Validate the adapter against the same idempotency and failure-injection suite.
 - Retain backend-native retention documentation only as operational guidance.
+- SQS support is explicitly deferred and is not required to complete this RFC.
 
 ### Companion Eve-core RFC: Session and action lineage
 

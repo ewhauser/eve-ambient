@@ -4,7 +4,7 @@ import type {
   StoredDeadLetter,
   StoredDefinitionPin,
   StoredDeployment,
-  StoredEvent,
+  StoredIngressReceipt,
   StoredMonitorInstance,
   StoredMonitorRun,
   StoredSubscription,
@@ -240,7 +240,7 @@ export class PostgresMonitorStore implements MonitorStore {
       `SELECT 'subscription'::text AS kind, id, monitor_id AS "monitorId", definition_version AS "definitionVersion"
          FROM ${this.#table("eve_ambient_subscriptions")}
         WHERE application_id = $1
-          AND status = ANY(ARRAY['pending','processing','ready']::text[])
+          AND status = ANY(ARRAY['conditional','pending','processing','ready']::text[])
        UNION ALL
        SELECT 'instance'::text AS kind, id, monitor_id AS "monitorId", definition_version AS "definitionVersion"
          FROM ${this.#table("eve_ambient_instances")}
@@ -263,14 +263,6 @@ export class PostgresMonitorStore implements MonitorStore {
     );
   }
 
-  async getEvent(ref: string): Promise<StoredEvent | null> {
-    return selectRecord<StoredEvent>(
-      this.#pool,
-      `SELECT record FROM ${this.#table("eve_ambient_events")} WHERE ref = $1`,
-      [ref],
-    );
-  }
-
   async getInstance(id: string): Promise<StoredMonitorInstance | null> {
     return selectRecord<StoredMonitorInstance>(
       this.#pool,
@@ -280,7 +272,7 @@ export class PostgresMonitorStore implements MonitorStore {
   }
 
   async purgeExpired(now: string): Promise<{
-    readonly events: number;
+    readonly ingressReceipts: number;
     readonly runs: number;
     readonly instances: number;
     readonly usage: number;
@@ -292,36 +284,41 @@ export class PostgresMonitorStore implements MonitorStore {
         client,
         `INSERT INTO ${this.#table("eve_ambient_dead_letters")}
            (id, application_id, monitor_id, created_at, record)
-         SELECT 'purge:direct:' || event.ref,
-                event.application_id,
+         SELECT 'purge:direct:' || (receipt.record->'directDispatch'->>'directDispatchKey'),
+                receipt.application_id,
                 NULL,
                 $1::timestamptz,
                 jsonb_build_object(
-                  'id', 'purge:direct:' || event.ref,
-                  'tenantId', event.tenant_id,
-                  'applicationId', event.application_id,
-                  'eventRef', event.ref,
+                  'id', 'purge:direct:' || (receipt.record->'directDispatch'->>'directDispatchKey'),
+                  'tenantId', receipt.tenant_id,
+                  'applicationId', receipt.application_id,
+                  'eventKey', receipt.record->>'eventKey',
+                  'directDispatchKey', receipt.record->'directDispatch'->>'directDispatchKey',
                   'stage', 'direct-dispatch',
-                  'reason', 'source dedupe retention expired before direct dispatch completed',
+                  'reason', 'ingress receipt horizon expired before direct dispatch completed',
                   'createdAt', $1::timestamptz
                 )
-           FROM ${this.#table("eve_ambient_events")} AS event
-          WHERE event.dedupe_expires_at <= $1::timestamptz
-            AND event.record->'directDispatch'->>'status' = ANY(ARRAY['pending','processing']::text[])
+           FROM ${this.#table("eve_ambient_ingress_receipts")} AS receipt
+          WHERE receipt.dedupe_expires_at <= $1::timestamptz
+            AND receipt.record->'directDispatch'->>'status' = ANY(ARRAY['pending','processing']::text[])
          ON CONFLICT (id) DO NOTHING`,
         [now],
       );
-      const deletedEvents = await postgresQuery(
+      await postgresQuery(
         client,
-        `DELETE FROM ${this.#table("eve_ambient_events")} WHERE dedupe_expires_at <= $1::timestamptz`,
+        `DELETE FROM ${this.#table("eve_ambient_subscriptions")} AS subscription
+          USING ${this.#table("eve_ambient_ingress_receipts")} AS receipt
+          WHERE receipt.dedupe_expires_at <= $1::timestamptz
+            AND receipt.record->'directDispatch'->>'status' = ANY(ARRAY['pending','processing']::text[])
+            AND subscription.event_key = receipt.record->>'eventKey'
+            AND subscription.acceptance_id = receipt.record->>'acceptanceId'
+            AND subscription.status = 'conditional'`,
         [now],
       );
-      const redacted = await postgresQuery(
+      const deletedReceipts = await postgresQuery(
         client,
-        `UPDATE ${this.#table("eve_ambient_events")}
-            SET record = record - 'event'
-          WHERE payload_expires_at <= $1::timestamptz
-            AND record ? 'event'`,
+        `DELETE FROM ${this.#table("eve_ambient_ingress_receipts")}
+          WHERE dedupe_expires_at <= $1::timestamptz`,
         [now],
       );
       const deletedRuns = await postgresQuery(
@@ -347,7 +344,7 @@ export class PostgresMonitorStore implements MonitorStore {
       );
       await postgresQuery(client, "COMMIT");
       return {
-        events: (redacted.rowCount ?? 0) + (deletedEvents.rowCount ?? 0),
+        ingressReceipts: deletedReceipts.rowCount ?? 0,
         runs: deletedRuns.rowCount ?? 0,
         instances: deletedInstances.rowCount ?? 0,
         usage: deletedUsage.rowCount ?? 0,
@@ -378,29 +375,29 @@ class PostgresTransaction implements MonitorStoreTransaction {
     this.#schema = schema;
   }
 
-  getEventByDedupeKey(key: string): Promise<StoredEvent | null> {
+  getIngressReceiptByDedupeKey(key: string): Promise<StoredIngressReceipt | null> {
     return selectRecord(
       this.#client,
-      `SELECT record FROM ${this.#table("eve_ambient_events")} WHERE dedupe_key = $1 FOR UPDATE`,
+      `SELECT record FROM ${this.#table("eve_ambient_ingress_receipts")} WHERE dedupe_key = $1 FOR UPDATE`,
       [key],
     );
   }
 
-  getEvent(ref: string): Promise<StoredEvent | null> {
+  getIngressReceipt(ref: string): Promise<StoredIngressReceipt | null> {
     return selectRecord(
       this.#client,
-      `SELECT record FROM ${this.#table("eve_ambient_events")} WHERE ref = $1 FOR UPDATE`,
+      `SELECT record FROM ${this.#table("eve_ambient_ingress_receipts")} WHERE ref = $1 FOR UPDATE`,
       [ref],
     );
   }
 
-  async releaseEventDedupe(ref: string): Promise<void> {
-    const event = await this.getEvent(ref);
-    if (event === null) return;
-    const dedupeKey = scopedKey("expired", event.ref, event.dedupeKey);
+  async releaseIngressDedupe(ref: string): Promise<void> {
+    const receipt = await this.getIngressReceipt(ref);
+    if (receipt === null) return;
+    const dedupeKey = scopedKey("expired", receipt.ref, receipt.dedupeKey);
     await postgresQuery(
       this.#client,
-      `UPDATE ${this.#table("eve_ambient_events")}
+      `UPDATE ${this.#table("eve_ambient_ingress_receipts")}
           SET dedupe_key = $2,
               record = jsonb_set(record, '{dedupeKey}', to_jsonb($2::text))
         WHERE ref = $1`,
@@ -408,42 +405,45 @@ class PostgresTransaction implements MonitorStoreTransaction {
     );
   }
 
-  async putEvent(event: StoredEvent): Promise<void> {
-    parseIdempotencyKey("event", event.eventKey);
-    parseInputHash(event.inputHash);
-    const existing = await this.getEventByDedupeKey(event.dedupeKey);
+  async putIngressReceipt(receipt: StoredIngressReceipt): Promise<void> {
+    parseIdempotencyKey("event", receipt.eventKey);
+    parseInputHash(receipt.inputHash);
+    parseInputHash(receipt.deploymentRevision);
+    if (receipt.directDispatch !== undefined) {
+      parseIdempotencyKey("direct-dispatch", receipt.directDispatch.directDispatchKey);
+      parseInputHash(receipt.directDispatch.inputHash);
+    }
+    const existing = await this.getIngressReceiptByDedupeKey(receipt.dedupeKey);
     if (existing !== null) {
       assertIdempotencyInput({
         namespace: "postgres-ingress",
-        key: event.eventKey,
+        key: receipt.eventKey,
         existingInputHash: existing.inputHash,
-        receivedInputHash: event.inputHash,
+        receivedInputHash: receipt.inputHash,
       });
     }
     await postgresQuery(
       this.#client,
-      `INSERT INTO ${this.#table("eve_ambient_events")}
-         (ref, dedupe_key, tenant_id, application_id, channel_id, ingress_sequence, payload_expires_at, dedupe_expires_at, record)
-       VALUES ($1,$2,$3,$4,$5,$6::bigint,$7::timestamptz,$8::timestamptz,$9::jsonb)
+      `INSERT INTO ${this.#table("eve_ambient_ingress_receipts")}
+         (ref, dedupe_key, tenant_id, application_id, channel_id, ingress_sequence, dedupe_expires_at, record)
+       VALUES ($1,$2,$3,$4,$5,$6::bigint,$7::timestamptz,$8::jsonb)
        ON CONFLICT (dedupe_key) DO UPDATE SET
          ref = EXCLUDED.ref,
          tenant_id = EXCLUDED.tenant_id,
          application_id = EXCLUDED.application_id,
          channel_id = EXCLUDED.channel_id,
          ingress_sequence = EXCLUDED.ingress_sequence,
-         payload_expires_at = EXCLUDED.payload_expires_at,
          dedupe_expires_at = EXCLUDED.dedupe_expires_at,
          record = EXCLUDED.record`,
       [
-        event.ref,
-        event.dedupeKey,
-        event.tenantId,
-        event.applicationId,
-        event.channelId,
-        event.ingressSequence,
-        event.payloadExpiresAt,
-        event.dedupeExpiresAt,
-        JSON.stringify(event),
+        receipt.ref,
+        receipt.dedupeKey,
+        receipt.tenantId,
+        receipt.applicationId,
+        receipt.channelId,
+        receipt.ingressSequence,
+        receipt.dedupeExpiresAt,
+        JSON.stringify(receipt),
       ],
     );
   }
@@ -476,11 +476,12 @@ class PostgresTransaction implements MonitorStoreTransaction {
     await postgresQuery(
       this.#client,
       `INSERT INTO ${this.#table("eve_ambient_subscriptions")}
-         (id, branch_key, event_key, input_hash, tenant_id, application_id, monitor_id, definition_version, correlation_key_hash, ingress_sequence, status, available_at, lease_expires_at, record)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::bigint,$11,$12::timestamptz,$13::timestamptz,$14::jsonb)
+         (id, branch_key, event_key, acceptance_id, input_hash, tenant_id, application_id, monitor_id, definition_version, correlation_key_hash, ingress_sequence, status, available_at, lease_expires_at, record)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::bigint,$12,$13::timestamptz,$14::timestamptz,$15::jsonb)
        ON CONFLICT (id) DO UPDATE SET
          branch_key = EXCLUDED.branch_key,
          event_key = EXCLUDED.event_key,
+         acceptance_id = EXCLUDED.acceptance_id,
          input_hash = EXCLUDED.input_hash,
          monitor_id = EXCLUDED.monitor_id,
          definition_version = EXCLUDED.definition_version,
@@ -493,6 +494,7 @@ class PostgresTransaction implements MonitorStoreTransaction {
         subscription.id,
         subscription.branchKey,
         subscription.eventKey,
+        subscription.acceptanceId,
         subscription.inputHash,
         subscription.tenantId,
         subscription.applicationId,
@@ -514,6 +516,22 @@ class PostgresTransaction implements MonitorStoreTransaction {
       `DELETE FROM ${this.#table("eve_ambient_subscriptions")} WHERE id = $1`,
       [id],
     );
+  }
+
+  async hasActiveSubscriptionForAcceptance(input: {
+    readonly eventKey: StoredSubscription["eventKey"];
+    readonly acceptanceId: string;
+  }): Promise<boolean> {
+    const result = await postgresQuery<{ exists: boolean }>(
+      this.#client,
+      `SELECT EXISTS (
+         SELECT 1
+           FROM ${this.#table("eve_ambient_subscriptions")}
+          WHERE event_key = $1 AND acceptance_id = $2
+       ) AS exists`,
+      [input.eventKey, input.acceptanceId],
+    );
+    return result.rows[0]?.exists ?? false;
   }
 
   getInstance(id: string): Promise<StoredMonitorInstance | null> {

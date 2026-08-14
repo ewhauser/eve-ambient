@@ -12,6 +12,8 @@ import {
   TransientMonitorError,
   wake,
   type ChannelEvent,
+  type DirectDispatchOptions,
+  type DirectDispatchRequest,
   type MonitorModelInvoker,
 } from "../src/index.js";
 import { MemoryMonitorStore } from "../src/memory.js";
@@ -50,6 +52,13 @@ function eventInput(id: string, text = "please investigate") {
   };
 }
 
+function direct(
+  handlers: DirectDispatchOptions["handlers"] = [],
+  bindingGeneration = "test-binding-v1",
+): DirectDispatchOptions {
+  return { bindingGeneration, handlers };
+}
+
 describe("MonitorRuntime", () => {
   it("deduplicates ingress and creates no delivery for ignores", async () => {
     const clock = new VirtualMonitorClock();
@@ -74,8 +83,8 @@ describe("MonitorRuntime", () => {
     });
     await runtime.initialize();
 
-    const first = await runtime.publishChat(slack, "message", eventInput("1"), []);
-    const duplicate = await runtime.publishChat(slack, "message", eventInput("1"), []);
+    const first = await runtime.publishChat(slack, "message", eventInput("1"), direct());
+    const duplicate = await runtime.publishChat(slack, "message", eventInput("1"), direct());
     await runtime.drain();
 
     expect(first.status).toBe("accepted");
@@ -83,10 +92,95 @@ describe("MonitorRuntime", () => {
     expect(duplicate.status).toBe("duplicate");
     expect(duplicate.directDispatch).toBe("undispatched");
     await expect(
-      runtime.publishChat(slack, "message", eventInput("1", "different payload"), []),
+      runtime.publishChat(slack, "message", eventInput("1", "different payload"), direct()),
     ).rejects.toBeInstanceOf(IdempotencyConflictError);
     expect(delivery.deliveries).toHaveLength(0);
     expect((await runtime.listRuns())[0]?.status).toBe("ignored");
+  });
+
+  it("freezes full-payload conditional fan-out before direct dispatch settles", async () => {
+    const clock = new VirtualMonitorClock();
+    const monitor = defineMonitor<MessageEvent>({
+      id: "conditional-ambient",
+      sources: [slack.event("message", { phase: "undispatched" })],
+      decision: () => ignore({ reason: "not-useful" }),
+      task: { instructions: "Review.", evidence: () => ({}) },
+      route: () => null,
+      metadata: { owner: "test", useCase: "conditional-fanout" },
+    });
+    const store = new MemoryMonitorStore();
+    const runtime = new MonitorRuntime({
+      applicationId: "app-a",
+      deployment: { monitors: [compileMonitor(monitor, "v1")] },
+      channels: [slack],
+      store,
+      clock,
+    });
+    await runtime.initialize();
+
+    let presented!: DirectDispatchRequest;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let release!: (receipt: null) => void;
+    const completion = new Promise<null>((resolve) => { release = resolve; });
+    const handler = vi.fn((request: DirectDispatchRequest) => {
+      presented = request;
+      markStarted();
+      return completion;
+    });
+    const publishing = runtime.publishChat(
+      slack,
+      "message",
+      eventInput("conditional"),
+      direct([handler]),
+    );
+    await started;
+
+    const receipt = await store.transaction("inspect:conditional", (tx) =>
+      tx.getIngressReceiptByDedupeKey(presented.eventKey)
+    );
+    expect(receipt).not.toBeNull();
+    expect(receipt).not.toHaveProperty("event");
+    expect(receipt?.directDispatch).toMatchObject({
+      directDispatchKey: presented.idempotencyKey,
+      inputHash: presented.inputHash,
+      bindingGeneration: "test-binding-v1",
+      status: "processing",
+    });
+    const conditional = await store.listSubscriptions({
+      applicationId: "app-a",
+      statuses: ["conditional"],
+      availableBefore: clock.now().toISOString(),
+      limit: 10,
+    });
+    expect(conditional).toHaveLength(1);
+    expect(conditional[0]).toMatchObject({
+      branchKey: receipt?.branches[0]?.branchKey,
+      inputHash: receipt?.branches[0]?.inputHash,
+      event: { data: { text: "please investigate" } },
+    });
+
+    release(null);
+    const result = await publishing;
+    expect(result).toMatchObject({
+      status: "accepted",
+      directDispatchKey: presented.idempotencyKey,
+      directDispatch: "undispatched",
+    });
+    expect((await store.listSubscriptions({
+      applicationId: "app-a",
+      statuses: ["pending"],
+      availableBefore: clock.now().toISOString(),
+      limit: 10,
+    }))[0]?.branchKey).toBe(conditional[0]?.branchKey);
+    await expect(
+      runtime.publishChat(
+        slack,
+        "message",
+        eventInput("conditional"),
+        direct([], "test-binding-v2"),
+      ),
+    ).rejects.toBeInstanceOf(IdempotencyConflictError);
   });
 
   it("resumes transient direct dispatch from its durable duplicate state", async () => {
@@ -111,24 +205,80 @@ describe("MonitorRuntime", () => {
       .mockRejectedValueOnce(new TransientMonitorError("temporary dispatch outage"))
       .mockResolvedValueOnce({ turnId: "durable-turn" });
 
-    const first = await runtime.publishChat(slack, "message", eventInput("dispatch-retry"), [handler]);
+    const first = await runtime.publishChat(
+      slack,
+      "message",
+      eventInput("dispatch-retry"),
+      direct([handler]),
+    );
     const earlyDuplicate = await runtime.publishChat(
       slack,
       "message",
       eventInput("dispatch-retry"),
-      [handler],
+      direct([handler]),
     );
     clock.advance(1_000);
     const resumed = await runtime.publishChat(
       slack,
       "message",
       eventInput("dispatch-retry"),
-      [handler],
+      direct([handler]),
     );
 
     expect(first.directDispatch).toBe("pending");
     expect(earlyDuplicate.directDispatch).toBe("pending");
     expect(resumed).toMatchObject({ status: "duplicate", directDispatch: "dispatched" });
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(handler.mock.calls[0]?.[0]).toMatchObject({
+      idempotencyKey: first.directDispatchKey,
+      eventKey: expect.stringMatching(/^eve:event:v1:/),
+      event: { data: { text: "please investigate" } },
+    });
+    expect(handler.mock.calls[1]?.[0]).toEqual(handler.mock.calls[0]?.[0]);
+  });
+
+  it("assigns a new direct-dispatch key after the ingress dedupe horizon", async () => {
+    const clock = new VirtualMonitorClock();
+    const monitor = defineMonitor<MessageEvent>({
+      id: "direct-horizon",
+      sources: [slack.event("message", { phase: "observed" })],
+      decision: () => ignore({ reason: "not-useful" }),
+      task: { instructions: "Review.", evidence: () => ({}) },
+      route: () => null,
+      retention: { decisions: "1h", dedupe: "1s" },
+      metadata: { owner: "test", useCase: "direct-horizon" },
+    });
+    const runtime = new MonitorRuntime({
+      applicationId: "app-a",
+      deployment: { monitors: [compileMonitor(monitor, "v1")] },
+      channels: [slack],
+      store: new MemoryMonitorStore(),
+      clock,
+    });
+    await runtime.initialize();
+    const handler = vi.fn(async (request: DirectDispatchRequest) => ({
+      turnId: request.idempotencyKey,
+    }));
+
+    const first = await runtime.publishChat(
+      slack,
+      "message",
+      eventInput("reused-direct", "first"),
+      direct([handler]),
+    );
+    await runtime.drain();
+    clock.advance(1_000);
+    await runtime.purgeExpired();
+    const second = await runtime.publishChat(
+      slack,
+      "message",
+      eventInput("reused-direct", "second"),
+      direct([handler]),
+    );
+
+    expect(first.status).toBe("accepted");
+    expect(second.status).toBe("accepted");
+    expect(second.directDispatchKey).not.toBe(first.directDispatchKey);
     expect(handler).toHaveBeenCalledTimes(2);
   });
 
@@ -157,7 +307,12 @@ describe("MonitorRuntime", () => {
       markStarted();
       return new Promise<{ turnId: string } | null>((resolve) => { releaseStale = resolve; });
     });
-    const first = runtime.publishChat(slack, "message", eventInput("dispatch-lease"), [staleHandler]);
+    const first = runtime.publishChat(
+      slack,
+      "message",
+      eventInput("dispatch-lease"),
+      direct([staleHandler]),
+    );
     await started;
     clock.advance(30_000);
 
@@ -165,7 +320,7 @@ describe("MonitorRuntime", () => {
       slack,
       "message",
       eventInput("dispatch-lease"),
-      [async () => ({ turnId: "recovered-turn" })],
+      direct([async () => ({ turnId: "recovered-turn" })]),
     );
     releaseStale(null);
 
@@ -201,7 +356,7 @@ describe("MonitorRuntime", () => {
     });
     await appA.initialize();
     await appB.initialize();
-    await appB.publishChat(slack, "message", eventInput("owned-by-b"), []);
+    await appB.publishChat(slack, "message", eventInput("owned-by-b"), direct());
 
     await expect(appA.drain()).resolves.toMatchObject({
       subscriptions: 0,
@@ -241,7 +396,7 @@ describe("MonitorRuntime", () => {
         slack,
         "message",
         { ...eventInput("invalid-target"), replyTarget: { channel: "C1" } } as never,
-        [],
+        direct(),
       ),
     ).rejects.toThrow("channel replyTarget failed schema validation");
     expect(await runtime.listRuns()).toHaveLength(0);
@@ -270,7 +425,7 @@ describe("MonitorRuntime", () => {
     });
     await runtime.initialize();
     for (let index = 0; index < 6; index += 1) {
-      await runtime.publishChat(slack, "message", eventInput(String(index)), []);
+      await runtime.publishChat(slack, "message", eventInput(String(index)), direct());
       await runtime.drain();
       if (index < 5) clock.advance(1_000);
     }
@@ -323,7 +478,7 @@ describe("MonitorRuntime", () => {
       clock,
     });
     await runtime.initialize();
-    await runtime.publishChat(slack, "message", eventInput("1"), []);
+    await runtime.publishChat(slack, "message", eventInput("1"), direct());
     await runtime.drain();
 
     expect(invoker).toHaveBeenCalledTimes(2);
@@ -375,7 +530,7 @@ describe("MonitorRuntime", () => {
       clock,
     });
     await runtime.initialize();
-    await runtime.publishChat(slack, "message", eventInput(`repair-${_name}`), []);
+    await runtime.publishChat(slack, "message", eventInput(`repair-${_name}`), direct());
     await runtime.drain();
 
     expect(invoker).toHaveBeenCalledTimes(1);
@@ -418,7 +573,7 @@ describe("MonitorRuntime", () => {
       clock,
     });
     await runtime.initialize();
-    await runtime.publishChat(slack, "message", eventInput("provider-failure"), []);
+    await runtime.publishChat(slack, "message", eventInput("provider-failure"), direct());
     await runtime.drain();
 
     expect(invoker).toHaveBeenCalledOnce();
@@ -470,7 +625,7 @@ describe("MonitorRuntime", () => {
       observer: { emit: () => { throw new Error("telemetry unavailable"); } },
     });
     await runtime.initialize();
-    await runtime.publishChat(slack, "message", eventInput("telemetry"), []);
+    await runtime.publishChat(slack, "message", eventInput("telemetry"), direct());
     await runtime.drain();
     expect(delivery.deliveries).toHaveLength(1);
   });

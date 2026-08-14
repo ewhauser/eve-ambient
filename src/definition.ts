@@ -26,7 +26,6 @@ import {
 
 export const DEFAULT_EVENT_MAX_BYTES = 256_000;
 export const DEFAULT_RETENTION: MonitorRetention = {
-  payload: "24h",
   decisions: "30d",
   dedupe: "7d",
 };
@@ -347,10 +346,8 @@ function validateLimits(
 }
 
 function validateRetention(retention: MonitorRetention): void {
-  const payload = durationMs(retention.payload, "retention payload");
   durationMs(retention.decisions, "retention decisions");
-  const dedupe = durationMs(retention.dedupe, "retention dedupe");
-  if (dedupe < payload) throw new TypeError("retention dedupe must not be shorter than payload retention");
+  durationMs(retention.dedupe, "retention dedupe");
 }
 
 function validateLoopPrevention(loop: MonitorLoopPrevention): void {

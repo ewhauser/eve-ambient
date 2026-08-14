@@ -43,6 +43,12 @@ describe("idempotency identity", () => {
 
     const directDispatchKey = await deriveDirectDispatchKey({
       eventKey,
+      acceptanceId: "acceptance-1",
+      bindingGeneration: "generation-1",
+    });
+    const nextAcceptanceDirectDispatchKey = await deriveDirectDispatchKey({
+      eventKey,
+      acceptanceId: "acceptance-2",
       bindingGeneration: "generation-1",
     });
     const branchKey = await deriveBranchKey({
@@ -62,6 +68,7 @@ describe("idempotency identity", () => {
     expect(directDispatchKey).toMatch(/^eve:direct-dispatch:v1:[0-9a-f]{64}$/);
     expect(branchKey).toMatch(/^eve:branch:v1:[0-9a-f]{64}$/);
     expect(nextAcceptanceBranchKey).not.toBe(branchKey);
+    expect(nextAcceptanceDirectDispatchKey).not.toBe(directDispatchKey);
     expect(directDispatchKey).not.toBe(branchKey);
     expect(parseIdempotencyKey("event", eventKey)).toBe(eventKey);
     expect(() => parseIdempotencyKey("branch", eventKey)).toThrow(

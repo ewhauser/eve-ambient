@@ -136,7 +136,7 @@ export const ambientEngineering = defineMonitor({
     perKey: { maxWakesPerHour: 4 },
     overflow: "buffer",
   },
-  retention: { payload: "24h", decisions: "30d", dedupe: "7d" },
+  retention: { decisions: "30d", dedupe: "7d" },
   metadata: { owner: "engineering-productivity", useCase: "ambient-slack" },
 });
 
@@ -187,13 +187,15 @@ system selects events before they enter the runtime.
 ## Chat phases and direct dispatch
 
 Chat monitors can subscribe to `observed` events or to events that remain
-`undispatched` after direct handlers finish. `publishChat()` accepts observed
-subscriptions first and creates undispatched subscriptions only after every
-awaited direct handler succeeds and none returns a durable turn receipt.
+`undispatched` after direct handlers finish. `publishChat()` atomically accepts
+observed branches and full-payload conditional undispatched branches before it
+calls a handler. A durable `undispatched` outcome activates those frozen
+branches; a durable turn receipt cancels them.
 
 This prevents an ambient monitor from racing a normal direct agent response.
 Provider acknowledgement remains outside that completion path, and direct
-handlers must deduplicate their turn command by provider event ID.
+handlers receive the complete canonical event plus a stable
+`directDispatchKey`; they must deduplicate their turn command by that key.
 
 ## Delivery boundary
 

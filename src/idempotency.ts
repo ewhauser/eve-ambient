@@ -171,11 +171,14 @@ export async function deriveEventKey(input: EventKeyInput): Promise<EventKey> {
 
 export async function deriveDirectDispatchKey(input: {
   readonly eventKey: EventKey;
+  /** Durable ingress-receipt generation; matching retries reuse it. */
+  readonly acceptanceId: string;
   readonly bindingGeneration: string;
 }): Promise<DirectDispatchKey> {
   assertKeyKind(input.eventKey, "event");
   return domainHash("eve:direct-dispatch:v1", [
     input.eventKey,
+    nonEmpty(input.acceptanceId, "acceptanceId"),
     nonEmpty(input.bindingGeneration, "bindingGeneration"),
   ]) as Promise<DirectDispatchKey>;
 }

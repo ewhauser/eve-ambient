@@ -13,8 +13,9 @@ providers -> external durable pipeline -> selection -> Eve Ambient publish()
 ```
 
 The external pipeline owns everything before Eve Ambient accepts the event.
-The default Eve runtime stores accepted events and processes them through the
-same durable monitoring path as channel-originated events.
+The default Eve runtime atomically stores a payload-free ingress receipt and a
+complete branch value for every matching monitor, then processes those branches
+through the same durable path as channel-originated events.
 
 ## Describe the event source
 

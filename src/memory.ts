@@ -4,7 +4,7 @@ import type {
   StoredDeadLetter,
   StoredDefinitionPin,
   StoredDeployment,
-  StoredEvent,
+  StoredIngressReceipt,
   StoredMonitorInstance,
   StoredMonitorRun,
   StoredSubscription,
@@ -21,8 +21,8 @@ import { addMs, cloneJson, iso } from "./util.js";
 
 /** Durable-semantics in-memory store for local development and deterministic tests. */
 export class MemoryMonitorStore implements MonitorStore {
-  readonly #events = new Map<string, StoredEvent>();
-  readonly #eventDedupe = new Map<string, string>();
+  readonly #ingressReceipts = new Map<string, StoredIngressReceipt>();
+  readonly #ingressDedupe = new Map<string, string>();
   readonly #subscriptions = new Map<string, StoredSubscription>();
   readonly #instances = new Map<string, StoredMonitorInstance>();
   readonly #runs = new Map<string, StoredMonitorRun>();
@@ -188,7 +188,7 @@ export class MemoryMonitorStore implements MonitorStore {
         .filter(
           (value) =>
             value.applicationId === applicationId &&
-            ["pending", "processing", "ready"].includes(value.status),
+            ["conditional", "pending", "processing", "ready"].includes(value.status),
         )
         .map((value) => ({
           kind: "subscription" as const,
@@ -224,48 +224,50 @@ export class MemoryMonitorStore implements MonitorStore {
     return value === undefined ? null : clone(value);
   }
 
-  async getEvent(ref: string): Promise<StoredEvent | null> {
-    const value = this.#events.get(ref);
-    return value === undefined ? null : clone(value);
-  }
-
   async getInstance(id: string): Promise<StoredMonitorInstance | null> {
     const value = this.#instances.get(id);
     return value === undefined ? null : clone(value);
   }
 
   async purgeExpired(now: string): Promise<{
-    readonly events: number;
+    readonly ingressReceipts: number;
     readonly runs: number;
     readonly instances: number;
     readonly usage: number;
   }> {
-    let events = 0;
+    let ingressReceipts = 0;
     let runs = 0;
     let instances = 0;
     let usage = 0;
-    for (const [ref, event] of this.#events) {
-      if (event.dedupeExpiresAt <= now) {
+    for (const [ref, receipt] of this.#ingressReceipts) {
+      if (receipt.dedupeExpiresAt <= now) {
         if (
-          event.directDispatch !== undefined &&
-          ["pending", "processing"].includes(event.directDispatch.status)
+          receipt.directDispatch !== undefined &&
+          ["pending", "processing"].includes(receipt.directDispatch.status)
         ) {
-          this.#deadLetters.set(`purge:direct:${event.ref}`, {
-            id: `purge:direct:${event.ref}`,
-            tenantId: event.tenantId,
-            applicationId: event.applicationId,
-            eventRef: event.ref,
+          this.#deadLetters.set(`purge:direct:${receipt.directDispatch.directDispatchKey}`, {
+            id: `purge:direct:${receipt.directDispatch.directDispatchKey}`,
+            tenantId: receipt.tenantId,
+            applicationId: receipt.applicationId,
+            eventKey: receipt.eventKey,
+            directDispatchKey: receipt.directDispatch.directDispatchKey,
             stage: "direct-dispatch",
-            reason: "source dedupe retention expired before direct dispatch completed",
+            reason: "ingress receipt horizon expired before direct dispatch completed",
             createdAt: now,
           });
+          for (const [id, subscription] of this.#subscriptions) {
+            if (
+              subscription.eventKey === receipt.eventKey &&
+              subscription.acceptanceId === receipt.acceptanceId &&
+              subscription.status === "conditional"
+            ) {
+              this.#subscriptions.delete(id);
+            }
+          }
         }
-        this.#events.delete(ref);
-        this.#eventDedupe.delete(event.dedupeKey);
-        events += 1;
-      } else if (event.payloadExpiresAt <= now && event.event !== undefined) {
-        this.#events.set(ref, { ...event, event: undefined });
-        events += 1;
+        this.#ingressReceipts.delete(ref);
+        this.#ingressDedupe.delete(receipt.dedupeKey);
+        ingressReceipts += 1;
       }
     }
     for (const [id, run] of this.#runs) {
@@ -291,44 +293,53 @@ export class MemoryMonitorStore implements MonitorStore {
         usage += 1;
       }
     }
-    return { events, runs, instances, usage };
+    return { ingressReceipts, runs, instances, usage };
   }
 
   #transactionView(): MonitorStoreTransaction {
     return {
-      getEventByDedupeKey: async (key) => {
-        const ref = this.#eventDedupe.get(key);
-        const value = ref === undefined ? undefined : this.#events.get(ref);
+      getIngressReceiptByDedupeKey: async (key) => {
+        const ref = this.#ingressDedupe.get(key);
+        const value = ref === undefined ? undefined : this.#ingressReceipts.get(ref);
         return value === undefined ? null : clone(value);
       },
-      getEvent: async (ref) => {
-        const value = this.#events.get(ref);
+      getIngressReceipt: async (ref) => {
+        const value = this.#ingressReceipts.get(ref);
         return value === undefined ? null : clone(value);
       },
-      releaseEventDedupe: async (ref) => {
-        const event = this.#events.get(ref);
-        if (event === undefined) return;
-        this.#eventDedupe.delete(event.dedupeKey);
-        const dedupeKey = scopedKey("expired", event.ref, event.dedupeKey);
-        this.#events.set(ref, clone({ ...event, dedupeKey }));
-        this.#eventDedupe.set(dedupeKey, ref);
+      releaseIngressDedupe: async (ref) => {
+        const receipt = this.#ingressReceipts.get(ref);
+        if (receipt === undefined) return;
+        this.#ingressDedupe.delete(receipt.dedupeKey);
+        const dedupeKey = scopedKey("expired", receipt.ref, receipt.dedupeKey);
+        this.#ingressReceipts.set(ref, clone({ ...receipt, dedupeKey }));
+        this.#ingressDedupe.set(dedupeKey, ref);
       },
-      putEvent: async (event) => {
-        parseIdempotencyKey("event", event.eventKey);
-        parseInputHash(event.inputHash);
-        const previousRef = this.#eventDedupe.get(event.dedupeKey);
-        const previous = previousRef === undefined ? undefined : this.#events.get(previousRef);
+      putIngressReceipt: async (receipt) => {
+        parseIdempotencyKey("event", receipt.eventKey);
+        parseInputHash(receipt.inputHash);
+        parseInputHash(receipt.deploymentRevision);
+        if (receipt.directDispatch !== undefined) {
+          parseIdempotencyKey("direct-dispatch", receipt.directDispatch.directDispatchKey);
+          parseInputHash(receipt.directDispatch.inputHash);
+        }
+        const previousRef = this.#ingressDedupe.get(receipt.dedupeKey);
+        const previous = previousRef === undefined
+          ? undefined
+          : this.#ingressReceipts.get(previousRef);
         if (previous !== undefined) {
           assertIdempotencyInput({
             namespace: "memory-ingress",
-            key: event.eventKey,
+            key: receipt.eventKey,
             existingInputHash: previous.inputHash,
-            receivedInputHash: event.inputHash,
+            receivedInputHash: receipt.inputHash,
           });
         }
-        if (previousRef !== undefined && previousRef !== event.ref) this.#events.delete(previousRef);
-        this.#events.set(event.ref, clone(event));
-        this.#eventDedupe.set(event.dedupeKey, event.ref);
+        if (previousRef !== undefined && previousRef !== receipt.ref) {
+          this.#ingressReceipts.delete(previousRef);
+        }
+        this.#ingressReceipts.set(receipt.ref, clone(receipt));
+        this.#ingressDedupe.set(receipt.dedupeKey, receipt.ref);
       },
       getSubscription: async (id) => {
         const value = this.#subscriptions.get(id);
@@ -356,6 +367,12 @@ export class MemoryMonitorStore implements MonitorStore {
       deleteSubscription: async (id) => {
         this.#subscriptions.delete(id);
       },
+      hasActiveSubscriptionForAcceptance: async (input) =>
+        [...this.#subscriptions.values()].some(
+          (subscription) =>
+            subscription.eventKey === input.eventKey &&
+            subscription.acceptanceId === input.acceptanceId,
+        ),
       getInstance: async (id) => {
         const value = this.#instances.get(id);
         return value === undefined ? null : clone(value);
@@ -455,8 +472,8 @@ export class MemoryMonitorStore implements MonitorStore {
 
   #snapshot(): MemorySnapshot {
     return {
-      events: new Map(this.#events),
-      eventDedupe: new Map(this.#eventDedupe),
+      ingressReceipts: new Map(this.#ingressReceipts),
+      ingressDedupe: new Map(this.#ingressDedupe),
       subscriptions: new Map(this.#subscriptions),
       instances: new Map(this.#instances),
       runs: new Map(this.#runs),
@@ -468,8 +485,8 @@ export class MemoryMonitorStore implements MonitorStore {
   }
 
   #restore(snapshot: MemorySnapshot): void {
-    replaceMap(this.#events, snapshot.events);
-    replaceMap(this.#eventDedupe, snapshot.eventDedupe);
+    replaceMap(this.#ingressReceipts, snapshot.ingressReceipts);
+    replaceMap(this.#ingressDedupe, snapshot.ingressDedupe);
     replaceMap(this.#subscriptions, snapshot.subscriptions);
     replaceMap(this.#instances, snapshot.instances);
     replaceMap(this.#runs, snapshot.runs);
@@ -481,8 +498,8 @@ export class MemoryMonitorStore implements MonitorStore {
 }
 
 interface MemorySnapshot {
-  readonly events: Map<string, StoredEvent>;
-  readonly eventDedupe: Map<string, string>;
+  readonly ingressReceipts: Map<string, StoredIngressReceipt>;
+  readonly ingressDedupe: Map<string, string>;
   readonly subscriptions: Map<string, StoredSubscription>;
   readonly instances: Map<string, StoredMonitorInstance>;
   readonly runs: Map<string, StoredMonitorRun>;

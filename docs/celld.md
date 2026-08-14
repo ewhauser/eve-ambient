@@ -13,10 +13,11 @@ rows.
 One cell owns each correlation instance. It holds the same
 `StoredMonitorInstance` record with complete event envelopes and runs the same
 lifecycle statechart, with a durable cell alarm replacing the PostgreSQL
-`nextEvaluationAt` due scan. PostgreSQL remains the system of record for runs,
-decisions, dead letters, budgets, and audit. It may retain an ingress payload
-copy under its own local cleanup policy, but celld evaluation never depends on
-that copy.
+`nextEvaluationAt` due scan. PostgreSQL remains the system of record for
+payload-free ingress receipts, runs, decisions, dead letters, budgets, and
+audit. The accepted branch owns the complete event until celld returns its
+durable append receipt; celld evaluation never depends on a central payload
+copy.
 
 ## Architecture
 

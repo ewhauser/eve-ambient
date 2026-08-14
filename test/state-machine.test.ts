@@ -12,6 +12,7 @@ import {
   validateMonitorDefinition,
   wake,
   type ChannelEvent,
+  type DirectDispatchOptions,
   type MonitorDeliveryChannel,
   type MonitorDeliveryRequest,
   type MonitorDefinition,
@@ -44,6 +45,12 @@ function input(id: string, key = "one", text = "hello", tenantId = "tenant-a") {
   };
 }
 
+function direct(
+  handlers: DirectDispatchOptions["handlers"] = [],
+): DirectDispatchOptions {
+  return { bindingGeneration: "test-binding-v1", handlers };
+}
+
 describe("buffering, cooldown, quotas, and failures", () => {
   it("force-flushes before count overflow and preserves the overflowing event", async () => {
     const clock = new VirtualMonitorClock();
@@ -56,7 +63,7 @@ describe("buffering, cooldown, quotas, and failures", () => {
     const runtime = await createRuntime(clock, delivery, monitor);
 
     for (let index = 0; index < 3; index += 1) {
-      await runtime.publishChat(channel, "message", input(String(index)), []);
+      await runtime.publishChat(channel, "message", input(String(index)), direct());
     }
     await runtime.drain();
     expect(delivery.deliveries).toHaveLength(1);
@@ -79,8 +86,8 @@ describe("buffering, cooldown, quotas, and failures", () => {
       buffer: { mode: "debounce", quietPeriod: "1s", maxWait: "2s", maxEvents: 10, maxBytes: 30 },
     });
     const runtime = await createRuntime(clock, delivery, monitor, { observer });
-    await runtime.publishChat(channel, "message", input("large", "large", "x".repeat(100)), []);
-    await runtime.publishChat(channel, "message", input("small", "small", "x"), []);
+    await runtime.publishChat(channel, "message", input("large", "large", "x".repeat(100)), direct());
+    await runtime.publishChat(channel, "message", input("small", "small", "x"), direct());
     await runtime.drain();
     clock.advance(1_000);
     await runtime.drain();
@@ -102,10 +109,10 @@ describe("buffering, cooldown, quotas, and failures", () => {
     });
     const runtime = await createRuntime(clock, delivery, monitor);
 
-    await runtime.publishChat(channel, "message", input("one"), []);
+    await runtime.publishChat(channel, "message", input("one"), direct());
     await runtime.drain();
-    await runtime.publishChat(channel, "message", input("two"), []);
-    await runtime.publishChat(channel, "message", input("three"), []);
+    await runtime.publishChat(channel, "message", input("two"), direct());
+    await runtime.publishChat(channel, "message", input("three"), direct());
     await runtime.drain();
     expect(decision).toHaveBeenCalledTimes(1);
 
@@ -131,9 +138,9 @@ describe("buffering, cooldown, quotas, and failures", () => {
       limits: { perKey: { maxWakesPerHour: 1 }, overflow: "buffer" },
     });
     const runtime = await createRuntime(clock, delivery, monitor);
-    await runtime.publishChat(channel, "message", input("one"), []);
+    await runtime.publishChat(channel, "message", input("one"), direct());
     await runtime.drain();
-    await runtime.publishChat(channel, "message", input("two"), []);
+    await runtime.publishChat(channel, "message", input("two"), direct());
     await runtime.drain();
     expect(delivery.deliveries).toHaveLength(1);
     expect(decision).toHaveBeenCalledTimes(2);
@@ -160,7 +167,7 @@ describe("buffering, cooldown, quotas, and failures", () => {
     };
     const monitor = baseMonitor(flaky, { id: "retry" });
     const runtime = await createRuntime(clock, flaky, monitor);
-    await runtime.publishChat(channel, "message", input("one"), []);
+    await runtime.publishChat(channel, "message", input("one"), direct());
     await runtime.drain();
     expect(attempts).toBe(1);
     clock.advance(1_000);
@@ -182,7 +189,7 @@ describe("buffering, cooldown, quotas, and failures", () => {
       route,
     });
     const runtime = await createRuntime(clock, delivery, monitor);
-    await runtime.publishChat(channel, "message", input("one"), []);
+    await runtime.publishChat(channel, "message", input("one"), direct());
     await runtime.drain();
     expect(evidence).toHaveBeenCalledOnce();
     expect(route).toHaveBeenCalledOnce();
@@ -209,7 +216,7 @@ describe("buffering, cooldown, quotas, and failures", () => {
       clock,
     });
     await runtime.initialize();
-    await runtime.publishChat(channel, "message", input("one"), []);
+    await runtime.publishChat(channel, "message", input("one"), direct());
     await runtime.drain();
     expect(delivery.deliveries).toHaveLength(1);
     expect(new Set((await runtime.listRuns()).map((run) => run.status))).toEqual(
@@ -223,8 +230,8 @@ describe("buffering, cooldown, quotas, and failures", () => {
     const store = new MemoryMonitorStore();
     const monitor = baseMonitor(delivery, { id: "ordered", correlate: () => "same" });
     const runtime = await createRuntime(clock, delivery, monitor, { store });
-    await runtime.publishChat(channel, "message", input("first", "same", "first"), []);
-    await runtime.publishChat(channel, "message", input("second", "same", "second"), []);
+    await runtime.publishChat(channel, "message", input("first", "same", "first"), direct());
+    await runtime.publishChat(channel, "message", input("second", "same", "second"), direct());
     await runtime.drain();
     expect(delivery.deliveries.map((request) => request.evidence.projectedEvidence)).toEqual([
       { keys: ["same"] },
@@ -251,11 +258,11 @@ describe("buffering, cooldown, quotas, and failures", () => {
     const runtime = await createRuntime(clock, delivery, monitor, {
       limits: { maxActiveKeysPerTenant: 1 },
     });
-    await runtime.publishChat(channel, "message", input("existing-1", "existing"), []);
+    await runtime.publishChat(channel, "message", input("existing-1", "existing"), direct());
     await runtime.drain();
 
-    await runtime.publishChat(channel, "message", input("blocked", "new-key"), []);
-    await runtime.publishChat(channel, "message", input("existing-2", "existing"), []);
+    await runtime.publishChat(channel, "message", input("blocked", "new-key"), direct());
+    await runtime.publishChat(channel, "message", input("existing-2", "existing"), direct());
     await runtime.drain();
 
     expect(delivery.deliveries).toHaveLength(2);
@@ -271,7 +278,7 @@ describe("buffering, cooldown, quotas, and failures", () => {
     });
     const listInstances = vi.spyOn(store, "listInstances");
 
-    await runtime.publishChat(channel, "message", input("point-read"), []);
+    await runtime.publishChat(channel, "message", input("point-read"), direct());
     await runtime.drain();
 
     expect(delivery.deliveries).toHaveLength(1);
@@ -289,12 +296,12 @@ describe("buffering, cooldown, quotas, and failures", () => {
       },
     });
     const runtime = await createRuntime(clock, delivery, monitor);
-    await runtime.publishChat(channel, "message", input("bad", "bad"), []);
-    await runtime.publishChat(channel, "message", input("good", "good"), []);
+    await runtime.publishChat(channel, "message", input("bad", "bad"), direct());
+    await runtime.publishChat(channel, "message", input("good", "good"), direct());
     await runtime.publishChat(channel, "message", {
       ...input("loop", "loop"),
       origin: { kind: "agent", applicationId: "app-a", depth: 1 },
-    }, []);
+    }, direct());
     await runtime.drain();
     expect(delivery.deliveries).toHaveLength(1);
     expect(await runtime.listDeadLetters()).toHaveLength(1);
@@ -313,8 +320,8 @@ describe("buffering, cooldown, quotas, and failures", () => {
       },
     });
     const runtime = await createRuntime(clock, delivery, monitor, { maxEvidenceBytes: 100 });
-    await runtime.publishChat(channel, "message", input("bad", "bad"), []);
-    await runtime.publishChat(channel, "message", input("good", "good"), []);
+    await runtime.publishChat(channel, "message", input("bad", "bad"), direct());
+    await runtime.publishChat(channel, "message", input("good", "good"), direct());
     await runtime.drain();
 
     expect(delivery.deliveries).toHaveLength(1);
@@ -337,8 +344,8 @@ describe("buffering, cooldown, quotas, and failures", () => {
       },
       observer,
     });
-    await runtime.publishChat(channel, "message", input("one", "one"), []);
-    await runtime.publishChat(channel, "message", input("two", "two"), []);
+    await runtime.publishChat(channel, "message", input("one", "one"), direct());
+    await runtime.publishChat(channel, "message", input("two", "two"), direct());
     await runtime.drain();
     expect(delivery.deliveries).toHaveLength(1);
     expect(observer.named("monitor.wake.suppressed")[0]?.attributes?.scope).toBe("tenant");
@@ -359,9 +366,9 @@ describe("buffering, cooldown, quotas, and failures", () => {
       limits: { maxActiveKeysPerTenant: 1 },
       observer,
     });
-    await runtime.publishChat(channel, "message", input("one", "one"), []);
-    await runtime.publishChat(channel, "message", input("two", "two"), []);
-    await runtime.publishChat(channel, "message", input("other", "other", "hello", "tenant-b"), []);
+    await runtime.publishChat(channel, "message", input("one", "one"), direct());
+    await runtime.publishChat(channel, "message", input("two", "two"), direct());
+    await runtime.publishChat(channel, "message", input("other", "other", "hello", "tenant-b"), direct());
     await runtime.drain();
 
     expect(delivery.deliveries).toHaveLength(2);
@@ -373,9 +380,10 @@ describe("buffering, cooldown, quotas, and failures", () => {
 });
 
 describe("chat dispatch and binding conformance", () => {
-  it("emits undispatched only after all direct handlers finish with no receipt", async () => {
+  it("cancels frozen undispatched fan-out when a direct handler accepts the turn", async () => {
     const clock = new VirtualMonitorClock();
     const delivery = new MemoryConversationChannel({ id: "delivery", clock });
+    const store = new MemoryMonitorStore();
     const ambient = baseMonitor(delivery, { id: "undispatched" });
     const observed = defineMonitor<TestEvent>({
       ...baseMonitor(delivery, { id: "observed" }),
@@ -386,15 +394,30 @@ describe("chat dispatch and binding conformance", () => {
       deployment: { monitors: [compileMonitor(ambient, "v1"), compileMonitor(observed, "v1")] },
       channels: [channel],
       deliveryChannels: [delivery],
-      store: new MemoryMonitorStore(),
+      store,
       clock,
     });
     await runtime.initialize();
-    const result = await runtime.publishChat(channel, "message", input("one"), [
-      async () => ({ turnId: "direct-turn" }),
-    ]);
+    const result = await runtime.publishChat(
+      channel,
+      "message",
+      input("one"),
+      direct([async () => ({ turnId: "direct-turn" })]),
+    );
     await runtime.drain();
     expect(result.directDispatch).toBe("dispatched");
+    expect(await store.listSubscriptions({
+      applicationId: "app-a",
+      statuses: ["conditional", "pending", "processing", "ready"],
+      availableBefore: clock.now().toISOString(),
+      limit: 10,
+    })).toHaveLength(0);
+    const receipt = await store.transaction(`inspect:${result.eventId}`, (tx) =>
+      tx.getIngressReceipt(result.eventId)
+    );
+    expect(receipt?.branches.find((branch) => branch.condition === "direct-undispatched"))
+      .toMatchObject({ status: "terminal" });
+    expect(receipt?.directDispatch?.receipts).toEqual([{ turnId: "direct-turn" }]);
     expect(delivery.deliveries).toHaveLength(1);
     expect((await runtime.listRuns()).map((run) => run.monitorId)).toEqual(["observed"]);
   });

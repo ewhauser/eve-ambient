@@ -57,23 +57,29 @@ const result = await runtime.publish(datadogEvents, "alert.changed", {
 });
 ```
 
-`publish()` returns after the event and matching subscription snapshots commit.
+`publish()` returns after the payload-free ingress receipt and complete matching
+branch snapshots commit atomically.
 It does not wait for filtering, a model, or an agent turn. A pull consumer may
 commit its source offset after `accepted` or `duplicate`. Retry an ambiguous
 outcome with the same stable provider event ID.
 
 ## Chat direct dispatch
 
-Use `publishChat()` for chat events. Observed subscriptions are accepted first.
-Undispatched subscriptions are created only after every awaited direct handler
-succeeds and none returns a durable turn receipt.
+Use `publishChat()` for chat events. The acceptance transaction freezes the
+direct-dispatch operation and writes both observed branches and complete
+conditional undispatched branches. The conditional branches cannot be drained
+until all direct handlers return no durable turn receipt; a dispatched or failed
+outcome removes them.
 
 ```ts
 const result = await runtime.publishChat(
   slackEvents,
   "message",
   normalized,
-  directHandlers.map(handler => async () => handler(normalized)),
+  {
+    bindingGeneration: directRouter.generation,
+    handlers: directHandlers,
+  },
 );
 ```
 
@@ -82,11 +88,14 @@ according to the channel deadline, then let direct dispatch finish durably. A
 failed or unknown direct outcome is dead-lettered and never emits
 `undispatched`.
 
-Direct handlers must deduplicate their turn command by provider event ID.
-`publishChat()` durably leases the attempt, and a duplicate resumes it after a
-worker crash or `TransientMonitorError`. The result reports `pending` while a
-lease or retry backoff is active and otherwise returns the persisted
-`dispatched`, `undispatched`, or `failed` outcome.
+Each handler receives `{ idempotencyKey, inputHash, event, ... }`. It must
+deduplicate the full-payload turn command by `idempotencyKey`, which is the
+stable `directDispatchKey`. `bindingGeneration` identifies the handler/binding
+plan and must change when that plan changes. `publishChat()` durably leases an
+attempt, and a duplicate resumes it after a worker crash or
+`TransientMonitorError`. The result includes `directDispatchKey` and reports
+`pending` while a lease or retry backoff is active; otherwise it returns the
+persisted `dispatched`, `undispatched`, or `failed` outcome.
 
 ## Run workers
 

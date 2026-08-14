@@ -63,7 +63,7 @@ allowing those deployment boundaries to change.
 | Profile | What enters Eve Ambient | Payload custody | Mailbox and timers | Scale profile | Complexity | Maturity |
 |---|---|---|---|---|---|---|
 | **Postgres-first** | Normalized channel events | Full branch and batch values in PostgreSQL until terminal completion | PostgreSQL due scans and leased claims | Add workers horizontally and scale the database vertically first | Low | Supported; default |
-| **Bring your own signal pipeline** | Events already selected by an external rules, stream-processing, or detection system | The external system before acceptance; PostgreSQL after `publish()` | PostgreSQL by default | Eve work follows the selected-event rate instead of the raw firehose | Medium | Supported through the publishing API |
+| **Bring your own signal pipeline** | Events already selected by an external rules, stream-processing, or detection system | The external system before acceptance; full PostgreSQL branch values after `publish()` | PostgreSQL by default | Eve work follows the selected-event rate instead of the raw firehose | Medium | Supported through the publishing API |
 | **External log + distributed mailbox** | Channel or gateway events consumed from Kafka or another durable log | External log before Eve acceptance; PostgreSQL owns the branch until celld accepts a complete copy, then celld owns the mailbox payload | celld owns full-payload per-key buffers and alarms | Horizontally partitioned ingestion and correlation | High | Full-value celld is implemented but experimental; external-log bridges are application-owned |
 
 The celld tier does not run filters. Schema validation, dedupe, deterministic

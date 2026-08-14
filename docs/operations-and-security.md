@@ -25,9 +25,10 @@ monitor is running.
   rows are deleted atomically after mailbox acceptance. An actionable run keeps
   its frozen full batch through retries; terminal completion replaces it with
   lineage and completeness metadata so event payloads do not become history.
-- The ingress table may redact or delete its internal payload copy according to
-  backend retention without invalidating accepted branches or actionable runs.
-  A source-dedupe tombstone can remain through a longer dedupe window.
+- The ingress table is a payload-free acceptance receipt: it keeps the source
+  key/hash, frozen deployment and branch manifest, and direct-dispatch outcome.
+  Complete payloads live only in active branch, mailbox, or actionable-run
+  custody and disappear after the next durable handoff or terminal outcome.
 
 ## Operator APIs
 

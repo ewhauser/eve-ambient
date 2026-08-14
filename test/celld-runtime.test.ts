@@ -35,7 +35,11 @@ import {
   RecordingMonitorObserver,
   VirtualMonitorClock,
 } from "../src/testing.js";
-import { CELLD_DEFINITION_VERSION_MISMATCH } from "../src/mailbox.js";
+import {
+  CELLD_DEFINITION_VERSION_MISMATCH,
+  CELLD_EVENT_TOO_LARGE,
+  CELLD_RESIDENT_CAPACITY_EXCEEDED,
+} from "../src/mailbox.js";
 import type { EvaluationRequest } from "../src/mailbox.js";
 import { FakeCelldFleet, jsonResponse, type EvaluatorHandler } from "./celld-harness.js";
 import { compareCellState, type PublishedEvent } from "./celld-oracle.js";
@@ -166,38 +170,24 @@ async function cellState(world: World, cellName: string): Promise<Record<string,
 
 /**
  * Replays the cell's own observed timeline through `dispatchLifecycle` and
- * diffs the result against what the cell stored — the Phase 2 oracle, run
+ * diffs the result against what the cell stored — the full-payload oracle, run
  * against the shipped worker.
  */
 async function oracleVerdict(world: World) {
   const cellName = world.fleet.cellNames[0]!;
   const state = await cellState(world, cellName);
   const published = new Map<string, PublishedEvent>();
-  for (const entry of state.log as {
-    kind: string;
-    ref?: string;
-    branchKey?: PublishedEvent["branchKey"];
-    eventKey?: PublishedEvent["eventKey"];
-    inputHash?: PublishedEvent["inputHash"];
-    phase?: PublishedEvent["phase"] | null;
-  }[]) {
-    if (
-      entry.kind !== "append" ||
-      entry.ref === undefined ||
-      entry.branchKey === undefined ||
-      entry.eventKey === undefined ||
-      entry.inputHash === undefined
-    ) continue;
-    const record = (await world.store.getEvent(entry.ref))!;
-    published.set(entry.ref, {
-      branchKey: entry.branchKey,
-      eventKey: entry.eventKey,
-      inputHash: entry.inputHash,
-      ...(entry.phase === undefined || entry.phase === null ? {} : { phase: entry.phase }),
-      bytes: record.bytes,
-      acceptedAt: record.acceptedAt,
-      ingressSequence: record.ingressSequence,
-    });
+  for (const append of world.fleet.appends) {
+    const entry = append as unknown as {
+      branchKey: PublishedEvent["branchKey"];
+      eventKey: PublishedEvent["eventKey"];
+      inputHash: PublishedEvent["inputHash"];
+      event: PublishedEvent["event"];
+      bytes: number;
+      acceptedAt: string;
+      ingressSequence: string;
+    };
+    published.set(entry.branchKey, entry);
   }
   return compareCellState(state as never, { ...state.pin, cellName, published });
 }
@@ -256,7 +246,7 @@ describe("MonitorRuntime with the celld mailbox", () => {
     await retried.runtime.drain();
 
     const state = await cellState(retried, retried.fleet.cellNames[0]!);
-    expect(state.instance.openBatch.events.map((event: any) => event.ref)).toHaveLength(1);
+    expect(state.instance.openBatch.events.map((event: any) => event.event.ref)).toHaveLength(1);
     expect(state.log.filter((entry: any) => entry.kind === "append")).toHaveLength(1);
     expect(state.log.filter((entry: any) => entry.kind === "append-duplicate")).toHaveLength(1);
     expect(
@@ -337,6 +327,30 @@ describe("MonitorRuntime with the celld mailbox", () => {
     expect(state.instance.binding).toBeDefined();
   });
 
+  it("evaluates from cell custody after the ingress payload is deleted", async () => {
+    const accepted = await world.runtime.publish(
+      slack,
+      "message",
+      publishInput("1", "please wake me"),
+    );
+    await world.runtime.drain();
+    await world.store.transaction(`redact:${accepted.eventId}`, async (tx) => {
+      const record = await tx.getEvent(accepted.eventId);
+      if (record === null) throw new Error("accepted event disappeared before test redaction");
+      await tx.putEvent({ ...record, event: undefined });
+    });
+
+    world.clock.advance(1_000);
+    const fired = await world.fleet.fireDueAlarms();
+
+    expect(fired[0]!.error).toBeNull();
+    expect(world.delivery.deliveries).toHaveLength(1);
+    expect(world.delivery.deliveries[0]!.evidence.projectedEvidence).toEqual({
+      texts: ["please wake me"],
+    });
+    expect((await world.runtime.listRuns())[0]!.status).toBe("delivered");
+  });
+
   it("stays conformant with the lifecycle machine across a cooldown cycle", async () => {
     await world.runtime.publish(slack, "message", publishInput("1", "please wake me"));
     await world.runtime.drain();
@@ -381,6 +395,18 @@ describe("MonitorRuntime with the celld mailbox", () => {
     expect(await world.runtime.listRuns()).toHaveLength(1);
 
     const member = (sent as any).batch.events[0];
+    await expect(world.runtime.handleEvaluation({
+      ...sent,
+      secret: SECRET,
+      batch: {
+        ...(sent as any).batch,
+        events: [{
+          ...member,
+          event: { ...member.event, data: { ...member.event.data, text: "changed payload" } },
+        }],
+      },
+    } as EvaluationRequest)).rejects.toMatchObject({ code: "run-conflict" });
+
     const changedHash = `${member.inputHash.slice(0, -1)}${member.inputHash.endsWith("0") ? "1" : "0"}`;
     await expect(world.runtime.handleEvaluation({
       ...sent,
@@ -459,13 +485,6 @@ describe("MonitorRuntime with the celld mailbox", () => {
         seeded = true;
         const now = world.clock.now().toISOString();
         const eventKeys = body.batch.events.map((event: any) => event.eventKey);
-        const fullEvents = await Promise.all(
-          body.batch.events.map(async (member: any) => {
-            const stored = await world.store.getEvent(member.ref);
-            if (stored?.event === undefined) throw new Error(`missing test event ${member.ref}`);
-            return { ...member, event: stored.event };
-          }),
-        );
         const membership = await freezeMembership({
           namespace: `monitor-batch:${body.instanceId}`,
           orderedMembers: body.batch.events.map((event: any) => ({
@@ -489,6 +508,7 @@ describe("MonitorRuntime with the celld mailbox", () => {
           openedAt: body.batch.openedAt,
           closedAt: body.batch.closedAt,
           closedBy: body.batch.closedBy,
+          events: body.batch.events,
           eventCount: body.batch.events.length,
           bytes: body.batch.bytes,
         });
@@ -518,7 +538,6 @@ describe("MonitorRuntime with the celld mailbox", () => {
               inputHash: batchInputHash,
               eventKeys,
               frozenAt: membership.frozenAt,
-              events: fullEvents,
             },
             mode: "active",
             instanceView: body.instanceView,
@@ -618,6 +637,91 @@ describe("MonitorRuntime with the celld mailbox", () => {
     expect(pending).toHaveLength(1);
     expect(pending[0]!.outcome).toContain("ECONNREFUSED");
     expect(pending[0]!.availableAt > stubbed.clock.now().toISOString()).toBe(true);
+  });
+
+  it("returns resident-cell backpressure to the subscription retry ladder", async () => {
+    const stubbed = await createWorldWithFetch(vi.fn(async () =>
+      jsonResponse(
+        {
+          ok: false,
+          code: CELLD_RESIDENT_CAPACITY_EXCEEDED,
+          error: "resident payload limit reached",
+        },
+        429,
+      ),
+    ) as never);
+
+    await stubbed.runtime.publish(slack, "message", publishInput("1", "please wake me"));
+    await stubbed.runtime.drain();
+
+    expect(await stubbed.runtime.listDeadLetters()).toHaveLength(0);
+    const pending = await stubbed.store.listSubscriptions({
+      applicationId: "app-a",
+      statuses: ["pending"],
+      availableBefore: "9999-01-01T00:00:00.000Z",
+      limit: 10,
+    });
+    expect(pending).toHaveLength(1);
+    expect(pending[0]!.outcome).toContain("resident payload limit reached");
+  });
+
+  it("keeps the branch payload when a successful response lacks a valid receipt", async () => {
+    const stubbed = await createWorldWithFetch(vi.fn(async () =>
+      jsonResponse({ ok: true, outcome: "opened", flushed: false }, 200),
+    ) as never);
+
+    await stubbed.runtime.publish(slack, "message", publishInput("1", "please wake me"));
+    await stubbed.runtime.drain();
+
+    const pending = await stubbed.store.listSubscriptions({
+      applicationId: "app-a",
+      statuses: ["pending"],
+      availableBefore: "9999-01-01T00:00:00.000Z",
+      limit: 10,
+    });
+    expect(pending).toHaveLength(1);
+    expect(pending[0]!.event.data).toMatchObject({ text: "please wake me" });
+    expect(pending[0]!.outcome).toContain("malformed append receipt");
+  });
+
+  it("keeps the branch payload when a successful response is not JSON", async () => {
+    const stubbed = await createWorldWithFetch(vi.fn(async () =>
+      new Response("not json", { status: 200 }),
+    ) as never);
+
+    await stubbed.runtime.publish(slack, "message", publishInput("1", "please wake me"));
+    await stubbed.runtime.drain();
+
+    const pending = await stubbed.store.listSubscriptions({
+      applicationId: "app-a",
+      statuses: ["pending"],
+      availableBefore: "9999-01-01T00:00:00.000Z",
+      limit: 10,
+    });
+    expect(pending).toHaveLength(1);
+    expect(pending[0]!.event.data).toMatchObject({ text: "please wake me" });
+    expect(pending[0]!.outcome).toContain("malformed append receipt");
+  });
+
+  it("dead-letters an event envelope that can never fit the fleet", async () => {
+    const stubbed = await createWorldWithFetch(vi.fn(async () =>
+      jsonResponse(
+        {
+          ok: false,
+          code: CELLD_EVENT_TOO_LARGE,
+          error: "event envelope exceeds the fleet limit",
+        },
+        413,
+      ),
+    ) as never);
+
+    await stubbed.runtime.publish(slack, "message", publishInput("1", "please wake me"));
+    await stubbed.runtime.drain();
+
+    const deadLetters = await stubbed.runtime.listDeadLetters();
+    expect(deadLetters).toHaveLength(1);
+    expect(deadLetters[0]!.stage).toBe("buffer");
+    expect(deadLetters[0]!.reason).toContain("event envelope exceeds the fleet limit");
   });
 });
 

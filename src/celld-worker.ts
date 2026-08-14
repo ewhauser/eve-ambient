@@ -38,8 +38,14 @@ import {
   lifecycleConfig,
 } from "./instance-machine.js";
 import {
+  CELLD_APPEND_CONFLICT,
+  CELLD_BATCH_TOO_LARGE,
+  CELLD_CELL_IDENTITY_MISMATCH,
   CELLD_DEFINITION_VERSION_MISMATCH,
+  CELLD_EVENT_TOO_LARGE,
+  CELLD_INVALID_CAPACITY_CONFIG,
   CELLD_MALFORMED_APPEND,
+  CELLD_RESIDENT_CAPACITY_EXCEEDED,
   CELLD_UNPINNED_CELL,
   projectInstanceView,
   secretsMatch,
@@ -54,9 +60,16 @@ import type {
   EvaluationTerminalResponse,
 } from "./mailbox.js";
 import { scopedKey } from "./storage.js";
-import { parseIdempotencyKey, parseInputHash } from "./idempotency.js";
+import {
+  deriveBranchKey,
+  deriveEventKey,
+  hashIdempotencyInput,
+  parseIdempotencyKey,
+  parseInputHash,
+} from "./idempotency.js";
 import type {
-  BufferedEventRef,
+  BufferedEvent,
+  OpenMonitorBatch,
   StoredMonitorBatch,
   StoredMonitorInstance,
 } from "./storage.js";
@@ -67,13 +80,16 @@ import type {
   MonitorInstanceView,
 } from "./types.js";
 
-/** Backwards-compatible fallbacks for cells pinned by a pre-retention worker. */
-const DEFAULT_DECISION_RETENTION_MS = durationMs("30d");
-const DEFAULT_DEDUPE_RETENTION_MS = durationMs("7d");
 const LOG_LIMIT = 60;
 
-type CelldMonitorInstance = StoredMonitorInstance<BufferedEventRef>;
-type CelldMonitorBatch = StoredMonitorBatch<BufferedEventRef>;
+type CelldMonitorInstance = StoredMonitorInstance<BufferedEvent>;
+type CelldMonitorBatch = StoredMonitorBatch<BufferedEvent>;
+
+interface CelldCapacityLimits {
+  readonly maxEventBytes: number;
+  readonly maxBatchBytes: number;
+  readonly maxResidentBytes: number;
+}
 
 /** What the first append pins into the cell, and nothing else ever changes. */
 interface CellPin {
@@ -105,11 +121,11 @@ interface RunCheckpoint {
 }
 
 interface AppendReceipt {
-  readonly subscriptionId: string;
-  readonly ref: string;
-  readonly branchKey: BufferedEventRef["branchKey"];
-  readonly eventKey: BufferedEventRef["eventKey"];
-  readonly inputHash: BufferedEventRef["inputHash"];
+  readonly branchKey: BufferedEvent["branchKey"];
+  readonly eventKey: BufferedEvent["eventKey"];
+  readonly inputHash: BufferedEvent["inputHash"];
+  /** Hash of the complete mailbox envelope, including runtime-only event fields. */
+  readonly envelopeHash: BufferedEvent["inputHash"];
   readonly outcome: CelldAppendOutcome;
   readonly flushed: boolean;
   readonly recordedAt: string;
@@ -129,6 +145,46 @@ function json(body: unknown, status = 200): Response {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+const encoder = new TextEncoder();
+
+function jsonBytes(value: unknown): number {
+  return encoder.encode(JSON.stringify(value)).byteLength;
+}
+
+function parseCapacityLimit(value: unknown, name: string): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new TypeError(`${name} must be a positive safe integer`);
+  }
+  return parsed;
+}
+
+function phaseOf(event: ChannelEvent): "observed" | "undispatched" | undefined {
+  const phase = event.source.phase;
+  return phase === "observed" || phase === "undispatched" ? phase : undefined;
+}
+
+/** Reconstructs the value used by ingress before runtime-only fields were added. */
+function canonicalIngressEvent(event: ChannelEvent): Record<string, unknown> {
+  const {
+    ref: _ref,
+    receivedAt: _receivedAt,
+    trace: _trace,
+    source,
+    ...canonical
+  } = event;
+  const { phase: _phase, ...canonicalSource } = source;
+  return { ...canonical, source: canonicalSource };
+}
+
+function prospectiveBatch(open: OpenMonitorBatch<BufferedEvent>): CelldMonitorBatch {
+  return {
+    ...open,
+    closedAt: "9999-12-31T23:59:59.999Z",
+    closedBy: "cooldown-expired",
+  };
 }
 
 /**
@@ -181,6 +237,200 @@ export class MonitorInstance {
       : fetch(input, init);
   }
 
+  #capacity(): CelldCapacityLimits {
+    const maxEventBytes = parseCapacityLimit(
+      this.env?.MAILBOX_MAX_EVENT_BYTES,
+      "MAILBOX_MAX_EVENT_BYTES",
+    );
+    const maxBatchBytes = parseCapacityLimit(
+      this.env?.MAILBOX_MAX_BATCH_BYTES,
+      "MAILBOX_MAX_BATCH_BYTES",
+    );
+    const maxResidentBytes = parseCapacityLimit(
+      this.env?.MAILBOX_MAX_RESIDENT_BYTES,
+      "MAILBOX_MAX_RESIDENT_BYTES",
+    );
+    if (maxEventBytes > maxBatchBytes) {
+      throw new TypeError("MAILBOX_MAX_EVENT_BYTES must not exceed MAILBOX_MAX_BATCH_BYTES");
+    }
+    if (maxBatchBytes > maxResidentBytes) {
+      throw new TypeError("MAILBOX_MAX_BATCH_BYTES must not exceed MAILBOX_MAX_RESIDENT_BYTES");
+    }
+    return { maxEventBytes, maxBatchBytes, maxResidentBytes };
+  }
+
+  async #validatedEnvelope(body: CelldAppendRequest): Promise<{
+    readonly event: BufferedEvent;
+    readonly envelopeHash: BufferedEvent["inputHash"];
+  }> {
+    for (const [name, value] of [
+      ["monitorId", body.monitorId],
+      ["definitionVersion", body.definitionVersion],
+      ["evaluatorUrl", body.evaluatorUrl],
+      ["tenantId", body.tenantId],
+      ["applicationId", body.applicationId],
+      ["correlationKey", body.correlationKey],
+      ["correlationKeyHash", body.correlationKeyHash],
+    ] as const) {
+      if (typeof value !== "string" || value.trim().length === 0) {
+        throw new TypeError(`${name} must be a non-empty string`);
+      }
+    }
+    parseIdempotencyKey("branch", body.branchKey);
+    parseIdempotencyKey("event", body.eventKey);
+    parseInputHash(body.eventInputHash);
+    parseInputHash(body.inputHash);
+    if (typeof body.acceptanceId !== "string" || body.acceptanceId.length === 0) {
+      throw new TypeError("acceptanceId must be a non-empty string");
+    }
+    if (body.event === null || typeof body.event !== "object") {
+      throw new TypeError("event must be a complete channel event object");
+    }
+    if (
+      typeof body.acceptedAt !== "string" ||
+      !Number.isFinite(Date.parse(body.acceptedAt)) ||
+      typeof body.ingressSequence !== "string" ||
+      body.ingressSequence.length === 0 ||
+      !Number.isSafeInteger(body.bytes) ||
+      body.bytes <= 0
+    ) {
+      throw new TypeError("acceptedAt, ingressSequence, and bytes must be valid envelope metadata");
+    }
+    if (
+      body.event.source?.tenantId !== body.tenantId ||
+      typeof body.event.source?.channelId !== "string" ||
+      body.event.source.channelId.length === 0 ||
+      typeof body.event.source?.installationId !== "string" ||
+      body.event.source.installationId.length === 0 ||
+      (body.event.source.phase !== undefined && phaseOf(body.event) === undefined) ||
+      typeof body.event.ref !== "string" ||
+      body.event.ref.length === 0 ||
+      typeof body.event.id !== "string" ||
+      body.event.id.length === 0 ||
+      typeof body.event.type !== "string" ||
+      body.event.type.length === 0 ||
+      !Number.isSafeInteger(body.event.version) ||
+      body.event.version <= 0 ||
+      body.event.receivedAt !== body.acceptedAt ||
+      typeof body.event.trace?.traceId !== "string" ||
+      body.event.trace.traceId.length === 0 ||
+      body.event.origin === null ||
+      typeof body.event.origin !== "object" ||
+      !["external", "agent", "monitor", "schedule"].includes(body.event.origin.kind) ||
+      !Number.isSafeInteger(body.event.origin.depth) ||
+      body.event.origin.depth < 0
+    ) {
+      throw new TypeError("event is incomplete or its source identity does not match the append address");
+    }
+    if (jsonBytes(body.event.data) !== body.bytes) {
+      throw new TypeError("bytes must equal the UTF-8 JSON size of event.data");
+    }
+
+    const expectedEventKey = await deriveEventKey({
+      tenantId: body.tenantId,
+      applicationId: body.applicationId,
+      channelId: body.event.source.channelId,
+      installationId: body.event.source.installationId,
+      sourceEventId: body.event.id,
+    });
+    if (expectedEventKey !== body.eventKey) {
+      throw new TypeError("eventKey does not match the complete event identity");
+    }
+    const expectedEventInputHash = await hashIdempotencyInput({
+      applicationId: body.applicationId,
+      canonicalizationVersion: 1,
+      event: canonicalIngressEvent(body.event),
+    });
+    if (expectedEventInputHash !== body.eventInputHash) {
+      throw new TypeError("eventInputHash does not match the complete canonical event");
+    }
+    const phase = phaseOf(body.event);
+    const expectedBranchKey = await deriveBranchKey({
+      eventKey: body.eventKey,
+      acceptanceId: body.acceptanceId,
+      monitorId: body.monitorId,
+      definitionVersion: body.definitionVersion,
+      ...(phase === undefined ? {} : { phase }),
+    });
+    if (expectedBranchKey !== body.branchKey) {
+      throw new TypeError("branchKey does not match the append lineage");
+    }
+    const expectedInputHash = await hashIdempotencyInput({
+      parentInputHash: body.eventInputHash,
+      eventKey: body.eventKey,
+      acceptanceId: body.acceptanceId,
+      branchKey: body.branchKey,
+      tenantId: body.tenantId,
+      applicationId: body.applicationId,
+      monitorId: body.monitorId,
+      definitionVersion: body.definitionVersion,
+      phase: phase ?? null,
+      acceptedAt: body.acceptedAt,
+      orderingKey: body.ingressSequence,
+    });
+    if (expectedInputHash !== body.inputHash) {
+      throw new TypeError("inputHash does not match the complete branch input");
+    }
+
+    const event: BufferedEvent = {
+      branchKey: body.branchKey,
+      eventKey: body.eventKey,
+      inputHash: body.inputHash,
+      event: structuredClone(body.event),
+      bytes: body.bytes,
+      acceptedAt: body.acceptedAt,
+      ingressSequence: body.ingressSequence,
+    };
+    return { event, envelopeHash: await hashIdempotencyInput(event) };
+  }
+
+  #assertBatchCapacity(instance: CelldMonitorInstance, limits: CelldCapacityLimits): void {
+    const batches: CelldMonitorBatch[] = [
+      ...instance.sealedBatches,
+      ...(instance.openBatch === undefined ? [] : [prospectiveBatch(instance.openBatch)]),
+    ];
+    for (const batch of batches) {
+      const bytes = jsonBytes(batch);
+      if (bytes > limits.maxBatchBytes) {
+        throw new CelldCapacityError(
+          CELLD_BATCH_TOO_LARGE,
+          `mailbox batch is ${bytes} bytes and exceeds ${limits.maxBatchBytes}`,
+          413,
+        );
+      }
+    }
+  }
+
+  async #residentBytes(
+    instance: CelldMonitorInstance | undefined,
+    pendingReceipt?: AppendReceipt,
+  ): Promise<number> {
+    let bytes =
+      instance?.sealedBatches.reduce((sum, batch) => sum + jsonBytes(batch), 0) ?? 0;
+    if (instance?.openBatch !== undefined) bytes += jsonBytes(prospectiveBatch(instance.openBatch));
+    const run = await this.#readJson<RunCheckpoint>("run");
+    if (run !== undefined) bytes += jsonBytes(run.batch);
+    for (const prefix of ["append:", "append-recovery:"]) {
+      const receipts = await this.#storage.list({ prefix });
+      for (const [key, raw] of receipts) {
+        if (
+          pendingReceipt !== undefined &&
+          (key === `append:${pendingReceipt.branchKey}` ||
+            key === `append-recovery:${pendingReceipt.branchKey}`)
+        ) {
+          continue;
+        }
+        bytes += encoder.encode(String(raw)).byteLength;
+      }
+    }
+    if (pendingReceipt !== undefined) {
+      // The append protocol briefly holds a recovery copy until the durable
+      // instance and stable receipt have both committed.
+      bytes += jsonBytes(pendingReceipt) * 2;
+    }
+    return bytes;
+  }
+
   // --- durable accessors -------------------------------------------------
   //
   // Everything is stored as a JSON *string*, not as a structured-cloned
@@ -213,15 +463,10 @@ export class MonitorInstance {
   }
 
   #decisionRetentionMs(config: CelldCellConfig): number {
-    return config.retention === undefined
-      ? DEFAULT_DECISION_RETENTION_MS
-      : durationMs(config.retention.decisions);
+    return durationMs(config.retention.decisions);
   }
 
   #dedupeRetentionMs(config: CelldCellConfig): number {
-    if (config.retention === undefined) {
-      return Math.max(DEFAULT_DEDUPE_RETENTION_MS, DEFAULT_DECISION_RETENTION_MS);
-    }
     return Math.max(
       durationMs(config.retention.dedupe),
       durationMs(config.retention.decisions),
@@ -282,27 +527,45 @@ export class MonitorInstance {
   }
 
   async #cleanupExpiredReceipts(now: string): Promise<void> {
-    const receipts = await this.#storage.list({ prefix: "append:" });
     let nextExpiry: number | null = null;
-    for (const [key, raw] of receipts) {
-      let receipt: AppendReceipt | undefined;
-      try {
-        receipt = JSON.parse(String(raw)) as AppendReceipt;
-      } catch {
-        await this.#storage.delete(key);
-        continue;
-      }
-      if (typeof receipt.expiresAt !== "string" || receipt.expiresAt <= now) {
-        await this.#storage.delete(key);
-        continue;
-      }
-      const expiresAt = Date.parse(receipt.expiresAt);
-      if (Number.isFinite(expiresAt)) {
-        nextExpiry = nextExpiry === null ? expiresAt : Math.min(nextExpiry, expiresAt);
+    for (const prefix of ["append:", "append-recovery:"]) {
+      const receipts = await this.#storage.list({ prefix });
+      for (const [key, raw] of receipts) {
+        let receipt: AppendReceipt | undefined;
+        try {
+          receipt = JSON.parse(String(raw)) as AppendReceipt;
+        } catch {
+          await this.#storage.delete(key);
+          continue;
+        }
+        if (typeof receipt.expiresAt !== "string" || receipt.expiresAt <= now) {
+          await this.#storage.delete(key);
+          continue;
+        }
+        const expiresAt = Date.parse(receipt.expiresAt);
+        if (Number.isFinite(expiresAt)) {
+          nextExpiry = nextExpiry === null ? expiresAt : Math.min(nextExpiry, expiresAt);
+        }
       }
     }
     if (nextExpiry === null) await this.#storage.deleteAlarm();
     else await this.#storage.setAlarm(Math.max(nextExpiry, this.#nowMs()));
+  }
+
+  /** Hot cells may never reach idle cleanup, so expiry is also enforced on append. */
+  async #purgeExpiredReceipts(now: string): Promise<void> {
+    for (const prefix of ["append:", "append-recovery:"]) {
+      const receipts = await this.#storage.list({ prefix });
+      for (const [key, raw] of receipts) {
+        try {
+          const receipt = JSON.parse(String(raw)) as AppendReceipt;
+          if (typeof receipt.expiresAt === "string" && receipt.expiresAt > now) continue;
+        } catch {
+          // Malformed receipt state is not a valid idempotency tombstone.
+        }
+        await this.#storage.delete(key);
+      }
+    }
   }
 
   async #cellName(request?: Request): Promise<string> {
@@ -337,11 +600,13 @@ export class MonitorInstance {
     if (
       typeof body?.monitorId !== "string" ||
       typeof body?.definitionVersion !== "string" ||
-      typeof body?.subscriptionId !== "string" ||
       typeof body?.branchKey !== "string" ||
       typeof body?.eventKey !== "string" ||
+      typeof body?.acceptanceId !== "string" ||
+      typeof body?.eventInputHash !== "string" ||
       typeof body?.inputHash !== "string" ||
-      typeof body?.ref !== "string" ||
+      typeof body?.event !== "object" ||
+      body.event === null ||
       typeof body?.config !== "object" ||
       body.config === null ||
       typeof body.config.retention !== "object" ||
@@ -352,32 +617,35 @@ export class MonitorInstance {
           ok: false,
           code: CELLD_MALFORMED_APPEND,
           error:
-            "append requires monitorId, definitionVersion, subscriptionId, identity, ref, and config.retention",
+            "append requires monitorId, definitionVersion, lineage, a complete event, and config.retention",
         },
         400,
       );
     }
+    let limits: CelldCapacityLimits;
     try {
-      parseIdempotencyKey("branch", body.branchKey);
-      parseIdempotencyKey("event", body.eventKey);
-      parseInputHash(body.inputHash);
-      if (body.subscriptionId !== body.branchKey) {
-        throw new TypeError("subscriptionId must equal branchKey");
-      }
+      limits = this.#capacity();
     } catch (error) {
       return json(
-        { ok: false, code: CELLD_MALFORMED_APPEND, error: String(error) },
-        400,
+        { ok: false, code: CELLD_INVALID_CAPACITY_CONFIG, error: String(error) },
+        503,
       );
+    }
+    let buffered: BufferedEvent;
+    let envelopeHash: BufferedEvent["inputHash"];
+    try {
+      ({ event: buffered, envelopeHash } = await this.#validatedEnvelope(body));
+    } catch (error) {
+      return json({ ok: false, code: CELLD_MALFORMED_APPEND, error: String(error) }, 400);
     }
     const now = this.#now();
     const name = await this.#cellName(request);
-    await this.#storage.put("cellName", name);
+    await this.#purgeExpiredReceipts(now);
 
-    let pin = await this.#readJson<CellPin>("cell");
-    if (pin === undefined) {
-      // A cell learns its monitor, version, and configuration from the first
-      // append and keeps them for its lifetime.
+    const storedPin = await this.#readJson<CellPin>("cell");
+    const newPin = storedPin === undefined;
+    let pin: CellPin;
+    if (storedPin === undefined) {
       pin = {
         cellName: name,
         monitorId: body.monitorId,
@@ -390,10 +658,13 @@ export class MonitorInstance {
         correlationKeyHash: body.correlationKeyHash,
         pinnedAt: now,
       };
-      await this.#writeJson("cell", pin);
-    } else if (
-      pin.monitorId !== body.monitorId ||
-      pin.definitionVersion !== body.definitionVersion
+    } else {
+      pin = storedPin;
+    }
+    if (
+      !newPin &&
+      (pin.monitorId !== body.monitorId ||
+        pin.definitionVersion !== body.definitionVersion)
     ) {
       // The instance key already carries both, so a mismatch means durable
       // state was moved across versions without the fleet following. Running
@@ -410,6 +681,22 @@ export class MonitorInstance {
         409,
       );
     }
+    if (
+      !newPin &&
+      (pin.tenantId !== body.tenantId ||
+        pin.applicationId !== body.applicationId ||
+        pin.correlationKey !== body.correlationKey ||
+        pin.correlationKeyHash !== body.correlationKeyHash)
+    ) {
+      return json(
+        {
+          ok: false,
+          code: CELLD_CELL_IDENTITY_MISMATCH,
+          error: `cell ${name} received an append addressed to a different correlation instance`,
+        },
+        409,
+      );
+    }
     const definition = this.#definition(pin.config);
 
     const existing = await this.#readJson<CelldMonitorInstance>("instance");
@@ -419,15 +706,10 @@ export class MonitorInstance {
       this.#isIdle(existing);
     if (expiredIdle) {
       await this.#storage.delete("run");
-      const events = await this.#storage.list({ prefix: "evt:" });
-      for (const key of events.keys()) await this.#storage.delete(key);
     }
     let instance = existing === undefined || expiredIdle ? this.#newInstance(pin, now) : existing;
 
-    const bytes = typeof body.bytes === "number" ? body.bytes : 0;
-    const acceptedAt = body.acceptedAt ?? now;
-
-    const receiptKey = `append:${body.subscriptionId}`;
+    const receiptKey = `append:${body.branchKey}`;
     let receipt = await this.#readJson<AppendReceipt>(receiptKey);
     if (receipt !== undefined && receipt.expiresAt <= now) {
       await this.#storage.delete(receiptKey);
@@ -435,101 +717,99 @@ export class MonitorInstance {
     }
     if (
       receipt !== undefined &&
-      (receipt.ref !== body.ref ||
-        receipt.branchKey !== body.branchKey ||
+      (receipt.branchKey !== body.branchKey ||
         receipt.eventKey !== body.eventKey ||
-        receipt.inputHash !== body.inputHash)
+        receipt.inputHash !== body.inputHash ||
+        receipt.envelopeHash !== envelopeHash)
     ) {
       return json(
         {
           ok: false,
-          code: "append-conflict",
+          code: CELLD_APPEND_CONFLICT,
           error:
-            `subscription ${body.subscriptionId} was already appended with different identity`,
+            `branch ${body.branchKey} was already appended with different input`,
         },
         409,
       );
     }
     if (receipt !== undefined) {
-      if ((await this.#findBranch(instance, body.branchKey)) !== undefined) {
-        await this.#ensureEventMarker(body, bytes, acceptedAt, now);
-      }
+      await this.#storage.delete(`append-recovery:${body.branchKey}`);
       const alarmAt = await this.#arm(instance);
       await this.#log({
         at: now,
         kind: "append-duplicate",
-        subscriptionId: body.subscriptionId,
-        ref: body.ref,
+        branchKey: body.branchKey,
+        eventRef: body.event.ref,
         outcome: receipt.outcome,
       });
       return json(
-        this.#appendResponse(name, pin, instance, receipt.outcome, receipt.flushed, alarmAt, now),
+        this.#appendResponse(name, pin, instance, receipt, alarmAt, now),
       );
     }
-    // Heals the only commit gap in the receipt protocol: the instance is
-    // written before the receipt. A retry that lands in that window can see
-    // the branch in either the buffered instance or the active run checkpoint,
-    // record the missing receipt, and must not dispatch APPEND again.
+    // Heals the only commit gap in the receipt protocol: a recovery copy is
+    // written before the instance and promoted after the instance commits. A
+    // retry in that window sees the branch in the instance or active run and
+    // must not dispatch APPEND again.
     const storedBranch = await this.#findBranch(instance, body.branchKey);
     if (storedBranch !== undefined) {
+      const storedEnvelopeHash = await hashIdempotencyInput(storedBranch);
       if (
-        storedBranch.ref !== body.ref ||
         storedBranch.eventKey !== body.eventKey ||
         storedBranch.inputHash !== body.inputHash ||
-        storedBranch.phase !== body.phase ||
-        storedBranch.bytes !== bytes ||
-        storedBranch.acceptedAt !== acceptedAt ||
-        storedBranch.ingressSequence !== body.ingressSequence
+        storedEnvelopeHash !== envelopeHash
       ) {
         return json(
           {
             ok: false,
-            code: "append-conflict",
+            code: CELLD_APPEND_CONFLICT,
             error:
-              `subscription ${body.subscriptionId} was already appended with different identity`,
+              `branch ${body.branchKey} was already appended with different input`,
           },
           409,
         );
       }
+      const prior = await this.#recordedAppendOutcome(body.branchKey);
       const recovered: AppendReceipt = {
-        subscriptionId: body.subscriptionId,
-        ref: body.ref,
         branchKey: body.branchKey,
         eventKey: body.eventKey,
         inputHash: body.inputHash,
-        outcome: "updated",
-        flushed: false,
-        recordedAt: now,
-        expiresAt: addMs(now, this.#dedupeRetentionMs(pin.config)),
+        envelopeHash,
+        outcome: prior?.outcome ?? "updated",
+        flushed: prior?.flushed ?? false,
+        recordedAt: prior?.recordedAt ?? now,
+        expiresAt: prior?.expiresAt ?? addMs(now, this.#dedupeRetentionMs(pin.config)),
       };
       await this.#writeJson(receiptKey, recovered);
-      await this.#ensureEventMarker(body, bytes, acceptedAt, now);
+      await this.#storage.delete(`append-recovery:${body.branchKey}`);
       const alarmAt = await this.#arm(instance);
       await this.#log({
         at: now,
         kind: "append-duplicate",
-        subscriptionId: body.subscriptionId,
-        ref: body.ref,
+        branchKey: body.branchKey,
+        eventRef: body.event.ref,
         outcome: recovered.outcome,
         recovered: true,
       });
       return json(
-        this.#appendResponse(name, pin, instance, recovered.outcome, false, alarmAt, now),
+        this.#appendResponse(name, pin, instance, recovered, alarmAt, now),
+      );
+    }
+
+    const eventEnvelopeBytes = jsonBytes(buffered);
+    if (eventEnvelopeBytes > limits.maxEventBytes) {
+      return json(
+        {
+          ok: false,
+          code: CELLD_EVENT_TOO_LARGE,
+          error: `mailbox event envelope is ${eventEnvelopeBytes} bytes and exceeds ${limits.maxEventBytes}`,
+        },
+        413,
       );
     }
 
     const result = dispatchLifecycle(instance, definition, {
       type: "APPEND",
-      event: {
-        ref: body.ref,
-        branchKey: body.branchKey,
-        eventKey: body.eventKey,
-        inputHash: body.inputHash,
-        ...(body.phase === undefined ? {} : { phase: body.phase }),
-        bytes,
-        acceptedAt,
-        ingressSequence: body.ingressSequence,
-      },
+      event: buffered,
       now,
     });
     instance = {
@@ -537,34 +817,52 @@ export class MonitorInstance {
       expiresAt: addMs(now, this.#decisionRetentionMs(pin.config)),
       updatedAt: now,
     };
-    await this.#writeJson("instance", instance);
 
     const outcome: CelldAppendOutcome =
       existing === undefined || expiredIdle ? "opened" : result.flushed ? "flushed" : "updated";
-    await this.#writeJson(receiptKey, {
-      subscriptionId: body.subscriptionId,
-      ref: body.ref,
+    const nextReceipt: AppendReceipt = {
       branchKey: body.branchKey,
       eventKey: body.eventKey,
       inputHash: body.inputHash,
+      envelopeHash,
       outcome,
       flushed: result.flushed,
       recordedAt: now,
       expiresAt: addMs(now, this.#dedupeRetentionMs(pin.config)),
-    } satisfies AppendReceipt);
-    // Metadata only. Authoritative payloads remain solely in the event store,
-    // where payload retention and redaction are already enforced.
-    await this.#ensureEventMarker(body, bytes, acceptedAt, now);
+    };
+    try {
+      this.#assertBatchCapacity(instance, limits);
+      const residentBytes = await this.#residentBytes(instance, nextReceipt);
+      if (residentBytes > limits.maxResidentBytes) {
+        throw new CelldCapacityError(
+          CELLD_RESIDENT_CAPACITY_EXCEEDED,
+          `mailbox resident payload is ${residentBytes} bytes and exceeds ${limits.maxResidentBytes}`,
+          429,
+        );
+      }
+    } catch (error) {
+      if (error instanceof CelldCapacityError) {
+        return json({ ok: false, code: error.code, error: error.message }, error.status);
+      }
+      throw error;
+    }
+    if (newPin) {
+      await this.#storage.put("cellName", name);
+      await this.#writeJson("cell", pin);
+    }
+    await this.#writeJson(`append-recovery:${body.branchKey}`, nextReceipt);
+    await this.#writeJson("instance", instance);
+    await this.#writeJson(receiptKey, nextReceipt);
+    await this.#storage.delete(`append-recovery:${body.branchKey}`);
     const alarmAt = await this.#arm(instance);
     await this.#log({
       at: now,
       kind: "append",
-      subscriptionId: body.subscriptionId,
-      ref: body.ref,
       branchKey: body.branchKey,
+      eventRef: body.event.ref,
       eventKey: body.eventKey,
       inputHash: body.inputHash,
-      phase: body.phase ?? null,
+      phase: phaseOf(body.event) ?? null,
       flushed: result.flushed,
       outcome,
       state: deriveLifecycleValue(instance, now),
@@ -572,13 +870,13 @@ export class MonitorInstance {
       alarmAt,
     });
 
-    return json(this.#appendResponse(name, pin, instance, outcome, result.flushed, alarmAt, now));
+    return json(this.#appendResponse(name, pin, instance, nextReceipt, alarmAt, now));
   }
 
   async #findBranch(
     instance: CelldMonitorInstance,
-    branchKey: BufferedEventRef["branchKey"],
-  ): Promise<BufferedEventRef | undefined> {
+    branchKey: BufferedEvent["branchKey"],
+  ): Promise<BufferedEvent | undefined> {
     const open = instance.openBatch?.events.find((event) => event.branchKey === branchKey);
     if (open !== undefined) return open;
     for (const batch of instance.sealedBatches) {
@@ -589,32 +887,46 @@ export class MonitorInstance {
     return run?.batch.events.find((event) => event.branchKey === branchKey);
   }
 
-  async #ensureEventMarker(
-    body: CelldAppendRequest,
-    bytes: number,
-    acceptedAt: string,
-    now: string,
-  ): Promise<void> {
-    const key = `evt:${body.ref}`;
-    if ((await this.#storage.get(key)) !== undefined) return;
-    await this.#writeJson(key, {
-      ref: body.ref,
-      branchKey: body.branchKey,
-      eventKey: body.eventKey,
-      inputHash: body.inputHash,
-      bytes,
-      acceptedAt,
-      ingressSequence: body.ingressSequence,
-      storedAt: now,
-    });
+  async #recordedAppendOutcome(
+    branchKey: BufferedEvent["branchKey"],
+  ): Promise<
+    | (Pick<AppendReceipt, "outcome" | "flushed" | "recordedAt"> & {
+        readonly expiresAt?: string;
+      })
+    | undefined
+  > {
+    const recovery = await this.#readJson<AppendReceipt>(`append-recovery:${branchKey}`);
+    if (recovery?.branchKey === branchKey) {
+      return {
+        outcome: recovery.outcome,
+        flushed: recovery.flushed,
+        recordedAt: recovery.recordedAt,
+        expiresAt: recovery.expiresAt,
+      };
+    }
+    const log = (await this.#readJson<LogEntry[]>("log")) ?? [];
+    for (let index = log.length - 1; index >= 0; index -= 1) {
+      const entry = log[index]!;
+      if (entry.kind !== "append" || entry.branchKey !== branchKey) continue;
+      if (
+        (entry.outcome === "opened" || entry.outcome === "updated" || entry.outcome === "flushed") &&
+        typeof entry.flushed === "boolean"
+      ) {
+        return {
+          outcome: entry.outcome,
+          flushed: entry.flushed,
+          recordedAt: typeof entry.at === "string" ? entry.at : this.#now(),
+        };
+      }
+    }
+    return undefined;
   }
 
   #appendResponse(
     name: string,
     pin: CellPin,
     instance: CelldMonitorInstance,
-    outcome: CelldAppendOutcome,
-    flushed: boolean,
+    receipt: AppendReceipt,
     alarmAt: number | null,
     now: string,
   ): CelldAppendResponse & Record<string, unknown> {
@@ -623,8 +935,15 @@ export class MonitorInstance {
       cellName: name,
       monitorId: pin.monitorId,
       definitionVersion: pin.definitionVersion,
-      outcome,
-      flushed,
+      outcome: receipt.outcome,
+      flushed: receipt.flushed,
+      receipt: {
+        branchKey: receipt.branchKey,
+        inputHash: receipt.inputHash,
+        outcome: receipt.outcome,
+        flushed: receipt.flushed,
+        recordedAt: receipt.recordedAt,
+      },
       state: deriveLifecycleValue(instance, now),
       openBatchSize: instance.openBatch?.events.length ?? 0,
       sealedBatches: instance.sealedBatches.length,
@@ -639,9 +958,12 @@ export class MonitorInstance {
   async #state(request: Request): Promise<Response> {
     const now = this.#now();
     const instance = await this.#readJson<CelldMonitorInstance>("instance");
-    const buffered: string[] = [];
-    const listed = await this.#storage.list({ prefix: "evt:" });
-    for (const key of listed.keys()) buffered.push(String(key).slice(4));
+    const run = await this.#readJson<RunCheckpoint>("run");
+    const branchKeys = [
+      ...(instance?.sealedBatches.flatMap((batch) => batch.events) ?? []),
+      ...(instance?.openBatch?.events ?? []),
+      ...(run?.batch.events ?? []),
+    ].map((event) => event.branchKey);
     return json({
       ok: true,
       cellName: await this.#cellName(request),
@@ -650,8 +972,9 @@ export class MonitorInstance {
       instance: instance ?? null,
       state: instance === undefined ? null : deriveLifecycleValue(instance, now),
       pendingAlarm: (await this.#storage.getAlarm()) ?? null,
-      activeRun: (await this.#readJson<RunCheckpoint>("run")) ?? null,
-      bufferedEventRefs: buffered.sort(),
+      activeRun: run ?? null,
+      bufferedBranchKeys: [...new Set(branchKeys)].sort(),
+      residentBytes: await this.#residentBytes(instance),
       log: (await this.#readJson<LogEntry[]>("log")) ?? [],
       now,
     });
@@ -782,8 +1105,6 @@ export class MonitorInstance {
     if (instance.expiresAt <= now && this.#isIdle(instance)) {
       await this.#storage.delete("instance");
       await this.#storage.delete("run");
-      const events = await this.#storage.list({ prefix: "evt:" });
-      for (const key of events.keys()) await this.#storage.delete(key);
       await this.#log({ at: now, kind: "instance-expired" });
       await this.#cleanupExpiredReceipts(now);
       return;
@@ -855,7 +1176,7 @@ export class MonitorInstance {
         kind: "claim",
         runId,
         closedBy: claim.claimedBatch.closedBy,
-        refs: claim.claimedBatch.events.map((event) => event.ref),
+        branchKeys: claim.claimedBatch.events.map((event) => event.branchKey),
         retryCount,
       });
     }
@@ -901,9 +1222,6 @@ export class MonitorInstance {
       expiresAt: addMs(now, this.#decisionRetentionMs(pin.config)),
       updatedAt: now,
     };
-    for (const reference of claimed.batch.events) {
-      await this.#storage.delete(`evt:${reference.ref}`);
-    }
     // Instance before checkpoint delete: a crash between the two leaves a
     // stale checkpoint with activeRunId already cleared, which the next claim
     // harmlessly overwrites. The reverse order left activeRunId pointing at a
@@ -924,7 +1242,7 @@ export class MonitorInstance {
       decision: outcome.decision ?? null,
       binding: outcome.binding ?? null,
       closedBy: claimed.batch.closedBy,
-      refs: claimed.batch.events.map((event) => event.ref),
+      branchKeys: claimed.batch.events.map((event) => event.branchKey),
       state: deriveLifecycleValue(instance, now),
       cooldownUntil: instance.cooldownUntil ?? null,
       nextEvaluationAt: instance.nextEvaluationAt ?? null,
@@ -934,9 +1252,9 @@ export class MonitorInstance {
   }
 
   /**
-   * Hands the claimed batch to the runtime's evaluator. Refs, never payloads:
-   * the events were persisted at ingress and the evaluator reads the
-   * authoritative copies from the event store.
+   * Hands the complete claimed batch to the runtime's evaluator. The cell is
+   * the payload custodian for this hop; evaluation never reads an event
+   * repository to reconstruct the batch.
    *
    * A throw here rides celld's alarm-retry ladder, and the run is idempotent
    * by `runId`, so a retry after a lost response returns the recorded outcome
@@ -1000,6 +1318,18 @@ export class MonitorInstance {
       throw new Error(`evaluation of ${run.runId} returned ${response.status}`);
     }
     return validateEvaluationResponse(await response.json(), run.runId);
+  }
+}
+
+class CelldCapacityError extends Error {
+  readonly code: string;
+  readonly status: number;
+
+  constructor(code: string, message: string, status: number) {
+    super(message);
+    this.name = "CelldCapacityError";
+    this.code = code;
+    this.status = status;
   }
 }
 

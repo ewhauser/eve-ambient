@@ -24,6 +24,7 @@ export {
  */
 export type {
   CelldAppendRequest,
+  CelldAppendReceipt,
   CelldAppendResponse,
   CelldCellConfig,
   CelldMailboxOptions,

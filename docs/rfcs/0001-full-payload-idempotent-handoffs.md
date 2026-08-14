@@ -1,7 +1,7 @@
 # RFC: Full-Payload, End-to-End Idempotent Event Handoffs
 
 - Status: Accepted
-- Implementation: Phases 1 and 2 implemented; later transport phases pending
+- Implementation: Phases 1 through 3 implemented; external transports and central-payload cleanup pending
 - Scope: End-to-end protocol across Eve Ambient ingress, fan-out, mailboxes, evaluation, session delivery, and final actions
 - Related: `ewhauser/eve-ambient` issue #3
 
@@ -755,7 +755,7 @@ The following are removed from the core capability model:
 
 ## Changes to the current codebase
 
-The current implementation stores accepted payloads in `StoredEvent`, places `BufferedEventRef` values in monitor state, sends references to celld, and reloads run events through `MonitorStore.getEvent(ref)`. This RFC reverses those choices.
+The implementation originally stored accepted payloads in `StoredEvent`, placed `BufferedEventRef` values in celld state, and reloaded run events through `MonitorStore.getEvent(ref)`. Phases 2 and 3 replaced both mailbox tiers with full event envelopes and removed evaluator payload lookup. The remaining Phase 4 work is external transport integration and removal of the transitional central ingress-payload storage/API.
 
 Required conceptual changes:
 
@@ -808,11 +808,17 @@ Obsolete types, methods, schema objects, tests, and documentation are removed di
 
 ### Phase 3: Celld by value
 
+- **Implemented.**
 - Change the append wire contract to full payloads.
 - Store full envelopes in cell state and evaluation callbacks.
 - Harden append receipts with key/hash conflict detection.
 - Enforce individual payload, batch, and total resident cell-size limits with explicit backpressure.
 - Rerun the celld capacity spike using full payloads and evaluator-outage backlogs.
+
+The repository regression suite now exercises full-payload evaluator-outage
+backlogs and all three limit outcomes. LTX/object-store bytes, operation counts,
+and throughput remain target-fleet production gates because the in-process
+worker harness cannot measure them.
 
 ### Phase 4: External transports and cleanup
 

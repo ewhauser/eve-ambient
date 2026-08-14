@@ -28,7 +28,7 @@ not a runtime toggle.
 |---|---|---|---|---|---|---|
 | **Postgres-first** | Eve channels normalize events; Eve Ambient filters after durable acceptance | Full branch and batch values in PostgreSQL until their next handoff or terminal completion | PostgreSQL instance rows, due scans, and leased claims | Add workers and scale PostgreSQL vertically; validate the actual workload before introducing another stateful tier | One durable system plus workers | Supported; default |
 | **Bring your own signal pipeline** | An external system selects events and calls `publish()` | External system before Eve acceptance; PostgreSQL for accepted events | PostgreSQL unless celld is selected separately | Raw-stream work scales outside Eve; Eve scales with the selected-event rate | External pipeline plus Eve and PostgreSQL | Supported through the publishing API |
-| **External log + distributed mailbox** | A channel gateway writes a durable log; partitioned consumers normalize and may perform coarse selection before publishing | Kafka or a similar log owns the raw stream; PostgreSQL holds events accepted through `publish()`, runs, decisions, dead letters, and audit | celld cells hold references, per-key lifecycle state, and alarms | Partition consumers by the upstream log and add celld nodes for mailbox concurrency | Multiple stateful systems and explicit handoff recovery | Supported as a custom `publish()` bridge with experimental celld; a first-class Kafka/EventLog adapter is not shipped |
+| **External log + distributed mailbox** | A channel gateway writes a durable log; partitioned consumers normalize and may perform coarse selection before publishing | Kafka or a similar log owns the raw stream; PostgreSQL owns accepted branch work until the cell receipt, then celld owns the complete mailbox payload; PostgreSQL keeps runs, decisions, dead letters, and audit | celld cells hold full events, per-key lifecycle state, and alarms | Partition consumers by the upstream log and add celld nodes for mailbox concurrency | Multiple stateful systems and explicit handoff recovery | Supported as a custom `publish()` bridge with experimental celld; a first-class Kafka adapter is not shipped |
 
 No generic events-per-second claim applies to the Postgres-first profile.
 Throughput depends on payload size, subscription fan-out, correlation-key
@@ -91,16 +91,17 @@ and consumer offsets. A consumer normalizes the record and calls `publish()`;
 it may perform coarse selection first when PostgreSQL should not receive the
 entire raw firehose. Eve Ambient then retains schema validation, phase handling,
 dedupe, deterministic monitor filtering, correlation, and loop prevention.
-Only filter-surviving event references are appended to celld. PostgreSQL remains
-the authoritative accepted-payload, run, decision, dead-letter, budget, and
-audit store. This is the current transitional implementation, not the target
-system interface: RFC 0001 Phase 3 moves complete envelopes into celld and its
-evaluator callback.
+Only filter-surviving complete event envelopes are appended to celld. A durable
+append receipt transfers mailbox custody to the cell, after which the branch
+row can be deleted. The cell sends the complete claimed batch to the evaluator;
+evaluation does not read an event repository. PostgreSQL remains the run,
+decision, dead-letter, budget, and audit store and may retain its ingress copy
+according to its own local cleanup policy.
 
 With today's public API, the upstream consumer may commit its offset after
-`publish()` returns `accepted` or `duplicate`. The event and subscription are
-then durable in PostgreSQL, and the store-to-cell handoff retries under a stable
-subscription ID if a process crashes or a response is lost.
+`publish()` returns `accepted` or `duplicate`. The complete event and branch are
+then durable in PostgreSQL, and the store-to-cell handoff retries under the
+stable `branchKey` if a process crashes or a response is lost.
 
 The package intentionally does not expose a generic event repository or
 reference-loading interface. Applications can build this topology around the

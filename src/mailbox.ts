@@ -19,7 +19,7 @@
  */
 
 import type {
-  BufferedEventRef,
+  BufferedEvent,
   BufferedEventValue,
   StoredMonitorBatch,
   StoredMonitorInstance,
@@ -27,6 +27,7 @@ import type {
 import type { BranchKey, EventKey, InputHash } from "./idempotency.js";
 import type {
   ChannelEvent,
+  JsonValue,
   MonitorBindingView,
   MonitorDefinition,
   MonitorDeliveryReceipt,
@@ -74,18 +75,29 @@ export interface CelldAppendRequest {
   readonly correlationKey: string;
   readonly correlationKeyHash: string;
   /** Durable idempotency key for the store-to-cell append handoff. */
-  readonly subscriptionId: string;
   readonly branchKey: BranchKey;
   readonly eventKey: EventKey;
+  /** Durable generation of the ingress receipt that produced this branch. */
+  readonly acceptanceId: string;
+  /** Hash of the canonical source event before runtime-only fields were added. */
+  readonly eventInputHash: InputHash;
   readonly inputHash: InputHash;
-  readonly phase?: "observed" | "undispatched" | undefined;
-  readonly ref: string;
+  /** Complete branch-owned event. The cell never resolves this through a repository. */
+  readonly event: ChannelEvent<string, JsonValue, JsonValue>;
   readonly bytes: number;
   readonly ingressSequence: string;
   readonly acceptedAt: string;
 }
 
 export type CelldAppendOutcome = "opened" | "updated" | "flushed";
+
+export interface CelldAppendReceipt {
+  readonly branchKey: BranchKey;
+  readonly inputHash: InputHash;
+  readonly outcome: CelldAppendOutcome;
+  readonly flushed: boolean;
+  readonly recordedAt: string;
+}
 
 export interface CelldAppendResponse {
   readonly ok: true;
@@ -94,6 +106,8 @@ export interface CelldAppendResponse {
   readonly definitionVersion: string;
   readonly outcome: CelldAppendOutcome;
   readonly flushed: boolean;
+  /** Stable across matching retries even when the cell's current state advances. */
+  readonly receipt: CelldAppendReceipt;
   readonly state: string;
   readonly nextEvaluationAt: string | null;
   readonly alarmAt: number | null;
@@ -117,6 +131,12 @@ export interface CelldErrorResponse {
 export const CELLD_DEFINITION_VERSION_MISMATCH = "definition-version-mismatch";
 export const CELLD_MALFORMED_APPEND = "malformed-append";
 export const CELLD_UNPINNED_CELL = "unpinned-cell";
+export const CELLD_APPEND_CONFLICT = "append-conflict";
+export const CELLD_CELL_IDENTITY_MISMATCH = "cell-identity-mismatch";
+export const CELLD_EVENT_TOO_LARGE = "event-too-large";
+export const CELLD_BATCH_TOO_LARGE = "batch-too-large";
+export const CELLD_RESIDENT_CAPACITY_EXCEEDED = "resident-capacity-exceeded";
+export const CELLD_INVALID_CAPACITY_CONFIG = "invalid-capacity-config";
 
 /** Terminal run outcomes an evaluation can report back to a cell. */
 export type EvaluationTerminalStatus =
@@ -168,7 +188,7 @@ export interface EvaluationRequest {
   readonly definitionVersion: string;
   readonly correlationKey: string;
   readonly correlationKeyHash: string;
-  readonly batch: StoredMonitorBatch<BufferedEventRef>;
+  readonly batch: StoredMonitorBatch<BufferedEvent>;
   readonly instanceView: MonitorInstanceView;
   readonly claimedAt: string;
 }

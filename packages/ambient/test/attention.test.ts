@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   AttentionCapacityError,
+  deriveFanoutManifestHash,
   compileAcceptedFanout,
   defineChannelCanonicalization,
   canonicalizeChannelDelivery,
+  hashIdempotencyInput,
   validateAcceptedFanout,
   type AcceptedFanout,
   type AttentionBranchPlan,
@@ -102,6 +104,44 @@ describe("attention fan-out protocol", () => {
         ],
       }),
     ).rejects.toBeInstanceOf(AttentionCapacityError);
+  });
+
+  it("rechecks branch size after validating an independently hashed fan-out", async () => {
+    const compiled = await compileAcceptedFanout({
+      source: await acceptedSource(),
+      branches: [
+        branch({
+          policy: {
+            buffer: {
+              mode: "debounce",
+              quietPeriodMs: 1,
+              maxWaitMs: 2,
+              maxEvents: 10,
+              maxBytes: 100_000,
+            },
+          },
+        }),
+      ],
+    });
+    const independentlyHashed = clone(compiled);
+    const value = independentlyHashed.branches[0]!;
+    if (value.policy.buffer.mode !== "debounce") throw new Error("expected debounce policy");
+    value.policy = {
+      ...value.policy,
+      buffer: { ...value.policy.buffer, maxBytes: 1 },
+    };
+    const logicalInput = structuredClone(value) as Record<string, unknown>;
+    delete logicalInput.branchKey;
+    delete logicalInput.inputHash;
+    value.inputHash = await hashIdempotencyInput(logicalInput);
+    independentlyHashed.manifestHash = await deriveFanoutManifestHash({
+      occurrenceKey: independentlyHashed.occurrenceKey,
+      orderedBranches: [{ branchKey: value.branchKey, inputHash: value.inputHash }],
+    });
+
+    await expect(validateAcceptedFanout(independentlyHashed)).rejects.toBeInstanceOf(
+      AttentionCapacityError,
+    );
   });
 
   it("rejects unsupported wire fields instead of leaving them unhashed", async () => {

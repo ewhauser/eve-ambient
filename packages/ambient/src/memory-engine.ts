@@ -273,7 +273,7 @@ export class MemoryAttentionEngine implements AttentionEngine {
       for (const branch of frozen.branches) {
         if (record.acceptedBranches.has(branch.branchKey)) continue;
         await this.#faults.beforeBranchAppend?.(clone(branch));
-        await this.#appendBranch(branch, now);
+        await this.#appendBranch(branch);
         await this.#faults.afterBranchAppend?.(clone(branch));
         record.acceptedBranches.add(branch.branchKey);
       }
@@ -365,7 +365,7 @@ export class MemoryAttentionEngine implements AttentionEngine {
     };
   }
 
-  async #appendBranch(branch: FullAttentionBranch, now: string): Promise<void> {
+  async #appendBranch(branch: FullAttentionBranch): Promise<void> {
     const instanceKey = await deriveAttentionInstanceKey({
       applicationId: branch.applicationId,
       tenantId: branch.tenantId,
@@ -373,11 +373,12 @@ export class MemoryAttentionEngine implements AttentionEngine {
       definitionVersion: branch.definitionVersion,
       correlationKey: branch.correlationKey,
     });
+    const policyHash = await hashIdempotencyInput({
+      mode: branch.mode,
+      policy: branch.policy,
+    });
     await this.#withLock(`workflow:${instanceKey}`, async () => {
-      const policyHash = await hashIdempotencyInput({
-        mode: branch.mode,
-        policy: branch.policy,
-      });
+      const now = this.#now();
       let workflow = this.#workflows.get(instanceKey);
       if (workflow === undefined) {
         workflow = {
@@ -487,8 +488,11 @@ export class MemoryAttentionEngine implements AttentionEngine {
       const active = workflow?.active;
       if (workflow === undefined || active === undefined) return "none";
       if (active.stage === "preparing") {
-        const prepared = validatePreparedOutcome(
-          await this.#callbacks.prepare(deepFreeze(clone(active.batch))),
+        const callbackOutput = await this.#callbacks.prepare(
+          deepFreeze(clone(active.batch)),
+        );
+        const prepared = validateCallbackOutput(
+          () => validatePreparedOutcome(callbackOutput),
         );
         const preparedAt = this.#now();
         const preparedResult = await this.#withLock(`workflow:${instanceKey}`, async () => {
@@ -517,9 +521,9 @@ export class MemoryAttentionEngine implements AttentionEngine {
       if (current.wake === undefined) throw new Error("delivery stage has no prepared wake");
       const expectedWake = current.wake;
       const wake = deepFreeze(clone(expectedWake));
-      const receipt = validateDeliveryReceipt(
-        await this.#callbacks.deliver(wake),
-        expectedWake,
+      const callbackReceipt = await this.#callbacks.deliver(wake);
+      const receipt = validateCallbackOutput(
+        () => validateDeliveryReceipt(callbackReceipt, expectedWake),
       );
       const completedAt = this.#now();
       await this.#withLock(`workflow:${instanceKey}`, async () => {
@@ -541,7 +545,7 @@ export class MemoryAttentionEngine implements AttentionEngine {
         if (
           error instanceof AttentionCapacityError ||
           error instanceof IdempotencyConflictError ||
-          error instanceof TypeError ||
+          error instanceof AttentionCallbackValidationError ||
           workflow.active.failures >= this.#maxAttempts
         ) {
           const runKey = workflow.active.batch.runKey;
@@ -617,6 +621,7 @@ export class MemoryAttentionEngine implements AttentionEngine {
     delete workflow.active;
     if (woke && workflow.policy.cooldownAfterWakeMs !== undefined) {
       workflow.cooldownUntil = addMs(now, workflow.policy.cooldownAfterWakeMs);
+      if (workflow.policy.buffer.mode !== "immediate") return;
       const buffered = [
         ...workflow.sealed.flatMap((batch) => batch.branches),
         ...(workflow.open?.branches ?? []),
@@ -699,6 +704,23 @@ export class MemoryAttentionEngine implements AttentionEngine {
       release();
       if (this.#locks.get(key) === queued) this.#locks.delete(key);
     }
+  }
+}
+
+class AttentionCallbackValidationError extends Error {
+  constructor(cause: TypeError) {
+    super(cause.message, { cause });
+    this.name = "AttentionCallbackValidationError";
+  }
+}
+
+function validateCallbackOutput<T>(validate: () => T): T {
+  try {
+    return validate();
+  } catch (error) {
+    if (error instanceof IdempotencyConflictError) throw error;
+    if (error instanceof TypeError) throw new AttentionCallbackValidationError(error);
+    throw error;
   }
 }
 

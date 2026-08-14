@@ -373,6 +373,7 @@ export async function validateAcceptedFanout(
       existingInputHash: expectedHash,
       receivedInputHash: parseInputHash(branch.inputHash),
     });
+    assertBranchFitsPolicy(branch);
   }
   const manifestHash = await deriveFanoutManifestHash({
     occurrenceKey: detached.occurrenceKey,

@@ -252,6 +252,37 @@ export function defineAttentionEngineConformance(
       expect(harness.diagnostics().acceptanceReceipts).toBe(1);
     });
 
+    it("timestamps each serialized branch append when it commits", async () => {
+      const clock = new VirtualMonitorClock();
+      const callbacks = new ControlledAttentionCallbacks(clock);
+      let appendResponses = 0;
+      const harness = await createHarness({
+        callbacks,
+        clock,
+        faults: {
+          afterBranchAppend: () => {
+            appendResponses += 1;
+            if (appendResponses === 1) clock.advance(50);
+          },
+        },
+      });
+      const policy = debouncePolicy();
+      await harness.engine.accept(
+        await fanout({
+          branches: [
+            plan({ monitorId: "monitor-a", correlationKey: "a", policy }),
+            plan({ monitorId: "monitor-b", correlationKey: "b", policy }),
+          ],
+        }),
+      );
+
+      await expect(harness.runDue()).resolves.toMatchObject({ delivered: 1 });
+      expect(callbacks.prepareCalls).toHaveLength(1);
+      clock.advance(10);
+      await expect(harness.runDue()).resolves.toMatchObject({ delivered: 1 });
+      expect(callbacks.prepareCalls).toHaveLength(2);
+    });
+
     it("hands prepare the complete batch in canonical source order", async () => {
       const clock = new VirtualMonitorClock();
       const callbacks = new ControlledAttentionCallbacks(clock);
@@ -311,6 +342,42 @@ export function defineAttentionEngineConformance(
       expect(harness.diagnostics().bufferedBranchPayloads).toBe(1);
     });
 
+    it("preserves bounded debounce partitions when a wake starts cooldown", async () => {
+      const clock = new VirtualMonitorClock();
+      const callbacks = new ControlledAttentionCallbacks(clock);
+      const harness = await createHarness({ callbacks, clock });
+      const policy = {
+        buffer: {
+          mode: "debounce" as const,
+          quietPeriodMs: 1,
+          maxWaitMs: 1_000,
+          maxEvents: 2,
+          maxBytes: 100_000,
+        },
+        cooldownAfterWakeMs: 100,
+      };
+      await harness.engine.accept(
+        await fanout({ eventId: "event-1", branches: [plan({ policy })] }),
+      );
+      clock.advance(1);
+      const prepareStarted = callbacks.holdPrepare();
+      const firstRun = harness.runDue();
+      await prepareStarted;
+      for (const eventId of ["event-2", "event-3", "event-4"]) {
+        await harness.engine.accept(
+          await fanout({ eventId, branches: [plan({ orderKey: eventId, policy })] }),
+        );
+      }
+      callbacks.releasePrepare();
+      await expect(firstRun).resolves.toMatchObject({ delivered: 1 });
+
+      clock.advance(100);
+      await expect(harness.runDue()).resolves.toMatchObject({ delivered: 1 });
+      expect(callbacks.prepareCalls[1]).toMatchObject({ closedBy: "max-events" });
+      expect(callbacks.prepareCalls[1]!.branches).toHaveLength(2);
+      expect(harness.diagnostics().bufferedBranchPayloads).toBe(1);
+    });
+
     it("serializes an append concurrent with freeze into the next batch", async () => {
       const clock = new VirtualMonitorClock();
       const callbacks = new ControlledAttentionCallbacks(clock);
@@ -349,6 +416,41 @@ export function defineAttentionEngineConformance(
       await expect(harness.runDue()).resolves.toMatchObject({ delivered: 1 });
       expect(callbacks.prepareCalls).toHaveLength(2);
       expect(callbacks.deliveryCalls).toHaveLength(1);
+    });
+
+    it.each(["prepare", "deliver"] as const)(
+      "retries a transient TypeError from %s",
+      async (stage) => {
+        const clock = new VirtualMonitorClock();
+        const callbacks = new ControlledAttentionCallbacks(clock);
+        callbacks[`${stage}Errors`].push(new TypeError("simulated fetch failure"));
+        const harness = await createHarness({
+          callbacks,
+          clock,
+          maxAttempts: 2,
+          retryDelayMs: 5,
+        });
+        await harness.engine.accept(await fanout({ branches: [plan()] }));
+
+        await expect(harness.runDue()).resolves.toMatchObject({ failed: 1 });
+        expect(harness.diagnostics().activeBatchPayloads).toBe(1);
+        clock.advance(5);
+        await expect(harness.runDue()).resolves.toMatchObject({ delivered: 1 });
+      },
+    );
+
+    it("makes a malformed callback output terminal", async () => {
+      const clock = new VirtualMonitorClock();
+      const callbacks = new ControlledAttentionCallbacks(clock);
+      callbacks.outcome = { kind: "invalid" } as unknown as PreparedAttentionOutcome;
+      const harness = await createHarness({ callbacks, clock, maxAttempts: 2 });
+      await harness.engine.accept(await fanout({ branches: [plan()] }));
+
+      await expect(harness.runDue()).resolves.toMatchObject({ terminalFailures: 1 });
+      expect(harness.diagnostics()).toMatchObject({
+        activeBatchPayloads: 0,
+        terminalFailures: 1,
+      });
     });
 
     it("retries exact prepared bytes after a lost delivery response", async () => {
@@ -567,6 +669,8 @@ class ControlledAttentionCallbacks implements AttentionCallbacks {
   losePrepareResponses = 0;
   loseDeliveryResponses = 0;
   advanceOnPrepareMs = 0;
+  readonly prepareErrors: Error[] = [];
+  readonly deliverErrors: Error[] = [];
   readonly prepareCalls: FrozenAttentionBatch[] = [];
   readonly deliveryCalls: PreparedAttentionWake[] = [];
   readonly prepareInputsFrozen: boolean[] = [];
@@ -606,6 +710,8 @@ class ControlledAttentionCallbacks implements AttentionCallbacks {
     this.#prepareStarted?.();
     this.#prepareStarted = undefined;
     if (this.#prepareGate !== undefined) await this.#prepareGate;
+    const error = this.prepareErrors.shift();
+    if (error !== undefined) throw error;
     const outcome = structuredClone(this.outcome);
     if (this.advanceOnPrepareMs > 0) this.#clock.advance(this.advanceOnPrepareMs);
     if (this.losePrepareResponses > 0) {
@@ -618,6 +724,8 @@ class ControlledAttentionCallbacks implements AttentionCallbacks {
   async deliver(wake: PreparedAttentionWake): Promise<AttentionDeliveryReceipt> {
     this.deliveryInputsFrozen.push(Object.isFrozen(wake) && Object.isFrozen(wake.evidence));
     this.deliveryCalls.push(structuredClone(wake));
+    const error = this.deliverErrors.shift();
+    if (error !== undefined) throw error;
     const prior = this.effects.get(wake.wakeKey);
     if (prior !== undefined && prior.inputHash !== wake.inputHash) {
       throw new IdempotencyConflictError({

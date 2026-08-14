@@ -19,7 +19,10 @@ import {
 } from "./idempotency.js";
 import { addMs, cloneJson, iso } from "./util.js";
 
-/** Durable-semantics in-memory store for local development and deterministic tests. */
+/**
+ * Co-located implementation of every `MonitorStore` responsibility for local
+ * development and deterministic tests, with durable-equivalent semantics.
+ */
 export class MemoryMonitorStore implements MonitorStore {
   readonly #ingressReceipts = new Map<string, StoredIngressReceipt>();
   readonly #ingressDedupe = new Map<string, string>();

@@ -285,12 +285,33 @@ export interface UsageReservation {
   readonly expiresAt: string;
 }
 
-export interface MonitorStoreTransaction {
+/**
+ * Payload-free source acceptance and direct-dispatch coordination.
+ *
+ * System position: provider/channel ingress, before any monitor branch runs.
+ * The receipt proves one accepted source identity and freezes its fan-out, but
+ * never becomes an event repository. `nextIngressSequence` orders newly
+ * accepted work within one tenant/application acceptance domain.
+ */
+export interface MonitorIngressTransaction {
   getIngressReceiptByDedupeKey(key: string): Promise<StoredIngressReceipt | null>;
   getIngressReceipt(ref: string): Promise<StoredIngressReceipt | null>;
   releaseIngressDedupe(ref: string): Promise<void>;
   putIngressReceipt(receipt: StoredIngressReceipt): Promise<void>;
 
+  nextIngressSequence(scope: string): Promise<string>;
+}
+
+/**
+ * Complete per-monitor branch work between ingress and mailbox custody.
+ *
+ * System position: after schema validation and fan-out, through filtering and
+ * correlation, but before the selected mailbox durably accepts the branch. A
+ * subscription owns the complete event payload until either the store mailbox
+ * commits its copy or celld returns an idempotent append receipt; it is then
+ * deleted.
+ */
+export interface MonitorSubscriptionTransaction {
   getSubscription(id: string): Promise<StoredSubscription | null>;
   putSubscription(subscription: StoredSubscription): Promise<void>;
   deleteSubscription(id: string): Promise<void>;
@@ -299,23 +320,6 @@ export interface MonitorStoreTransaction {
     readonly acceptanceId: string;
   }): Promise<boolean>;
 
-  getInstance(id: string): Promise<StoredMonitorInstance | null>;
-  countInstances(input: {
-    readonly tenantId: string;
-    readonly applicationId: string;
-  }): Promise<number>;
-  putInstance(instance: StoredMonitorInstance): Promise<void>;
-  deleteInstance(id: string): Promise<void>;
-
-  getRun(id: string): Promise<StoredMonitorRun | null>;
-  putRun(run: StoredMonitorRun): Promise<void>;
-
-  putDeadLetter(deadLetter: StoredDeadLetter): Promise<void>;
-
-  getDeployment(applicationId: string): Promise<StoredDeployment | null>;
-  putDeployment(deployment: StoredDeployment): Promise<void>;
-
-  nextIngressSequence(scope: string): Promise<string>;
   hasEarlierOpenSubscription(input: {
     readonly tenantId: string;
     readonly applicationId: string;
@@ -324,8 +328,71 @@ export interface MonitorStoreTransaction {
     readonly correlationKeyHash: string;
     readonly ingressSequence: string;
   }): Promise<boolean>;
+}
 
-  /** Atomically reserves a rolling-window budget and returns its next opening. */
+/**
+ * Store-mode correlation mailbox state.
+ *
+ * System position: per correlation key, after preprocessing and before a run
+ * is frozen. These methods own complete buffered events, debounce/cooldown
+ * state, and due times only when `mailbox.mode === "store"`. In celld mode the
+ * cell owns this state and the runtime must not use this facet for live work.
+ */
+export interface MonitorMailboxTransaction {
+  getInstance(id: string): Promise<StoredMonitorInstance | null>;
+  countInstances(input: {
+    readonly tenantId: string;
+    readonly applicationId: string;
+  }): Promise<number>;
+  putInstance(instance: StoredMonitorInstance): Promise<void>;
+  deleteInstance(id: string): Promise<void>;
+}
+
+/**
+ * Durable evaluation checkpoints.
+ *
+ * System position: after a mailbox freezes membership and before/through
+ * decision, evidence, routing, and delivery. Active runs own their complete
+ * frozen batch. Terminal runs replace source events with lineage and
+ * completeness while retaining bounded decision, evidence, and receipt data.
+ */
+export interface MonitorRunTransaction {
+  getRun(id: string): Promise<StoredMonitorRun | null>;
+  putRun(run: StoredMonitorRun): Promise<void>;
+}
+
+/**
+ * Durable failure receipts from any pipeline stage.
+ *
+ * System position: cross-cutting operator record for terminal ingress,
+ * subscription, mailbox, evaluation, binding, or delivery failure. A dead
+ * letter contains lineage and a bounded reason, never an event payload.
+ */
+export interface MonitorDeadLetterTransaction {
+  putDeadLetter(deadLetter: StoredDeadLetter): Promise<void>;
+}
+
+/**
+ * Deployed monitor versions and durable mailbox-ownership declarations.
+ *
+ * System position: runtime initialization and explicit migrations, not the hot
+ * event path. Pins prevent a definition or mailbox backend from being removed
+ * while durable work still depends on it.
+ */
+export interface MonitorDeploymentTransaction {
+  getDeployment(applicationId: string): Promise<StoredDeployment | null>;
+  putDeployment(deployment: StoredDeployment): Promise<void>;
+}
+
+/**
+ * Rolling-window capacity and cost reservations.
+ *
+ * System position: policy gates around model calls, tokens, events, and wakes.
+ * Multiple scope reservations may share one transaction so a denied operation
+ * consumes none of its platform, tenant, application, or monitor allowances.
+ */
+export interface MonitorBudgetTransaction {
+  /** Atomically reserves one scope and returns its next opening when denied. */
   reserveUsage(input: {
     readonly id: string;
     readonly scope: string;
@@ -337,10 +404,32 @@ export interface MonitorStoreTransaction {
   }): Promise<{ readonly allowed: true } | { readonly allowed: false; readonly retryAt: string }>;
 }
 
-export interface MonitorStore {
-  /** The callback runs in a transaction protected by a stable cross-process lock key. */
-  transaction<T>(lockKey: string, callback: (tx: MonitorStoreTransaction) => Promise<T>): Promise<T>;
+/**
+ * The capabilities currently co-located inside one atomic unit of work.
+ *
+ * Current transitions cross facets at ingress receipt + frozen fan-out,
+ * direct-dispatch receipt + conditional branches/failures, store-mailbox append
+ * + branch deletion, store-mode instance + run transitions, and terminal run +
+ * dead-letter recording. The split interfaces identify those crossings so
+ * future stores can replace the generic callback with semantic atomic commands
+ * rather than assuming every record belongs in one database.
+ */
+export interface MonitorStoreTransaction
+  extends MonitorIngressTransaction,
+    MonitorSubscriptionTransaction,
+    MonitorMailboxTransaction,
+    MonitorRunTransaction,
+    MonitorDeadLetterTransaction,
+    MonitorDeploymentTransaction,
+    MonitorBudgetTransaction {}
 
+/** Serializes atomic state transitions under a stable cross-process key. */
+export interface MonitorTransactionCoordinator {
+  transaction<T>(lockKey: string, callback: (tx: MonitorStoreTransaction) => Promise<T>): Promise<T>;
+}
+
+/** Discovers and drains complete branch work after ingress fan-out. */
+export interface MonitorSubscriptionStore {
   listSubscriptions(input: {
     readonly applicationId: string;
     readonly statuses: readonly SubscriptionStatus[];
@@ -351,40 +440,92 @@ export interface MonitorStore {
     readonly applicationId: string;
     readonly monitorId: string;
   }): Promise<readonly StoredSubscription[]>;
+}
+
+/**
+ * Reads and schedules the store-backed correlation mailbox.
+ *
+ * This entire facet is replaced by celld for live mailbox ownership. It remains
+ * in the composite store today for store-mode operation, migrations, retention,
+ * and compatibility with the existing runtime constructor.
+ */
+export interface MonitorMailboxStore {
   listDueInstances(input: {
     readonly applicationId: string;
     readonly availableBefore: string;
     readonly limit: number;
   }): Promise<readonly StoredMonitorInstance[]>;
+  listInstances(input: {
+    readonly applicationId: string;
+    readonly monitorId?: string | undefined;
+  }): Promise<readonly StoredMonitorInstance[]>;
+  getInstance(id: string): Promise<StoredMonitorInstance | null>;
+}
+
+/** Queries durable evaluation checkpoints. */
+export interface MonitorRunStore {
   listDueRuns(input: {
     readonly applicationId: string;
     readonly availableBefore: string;
     readonly limit: number;
   }): Promise<readonly StoredMonitorRun[]>;
-  listInstances(input: {
-    readonly applicationId: string;
-    readonly monitorId?: string | undefined;
-  }): Promise<readonly StoredMonitorInstance[]>;
   listRuns(input: {
     readonly applicationId: string;
     readonly monitorId?: string | undefined;
     readonly limit?: number | undefined;
   }): Promise<readonly StoredMonitorRun[]>;
+  getRun(id: string): Promise<StoredMonitorRun | null>;
+}
+
+/** Queries payload-free terminal failure receipts from every pipeline stage. */
+export interface MonitorDeadLetterStore {
   listDeadLetters(input: {
     readonly applicationId: string;
     readonly monitorId?: string | undefined;
     readonly limit?: number | undefined;
   }): Promise<readonly StoredDeadLetter[]>;
-  listDefinitionPins(applicationId: string): Promise<readonly StoredDefinitionPin[]>;
-  getRun(id: string): Promise<StoredMonitorRun | null>;
-  getInstance(id: string): Promise<StoredMonitorInstance | null>;
-  purgeExpired(now: string): Promise<{
-    readonly ingressReceipts: number;
-    readonly runs: number;
-    readonly instances: number;
-    readonly usage: number;
-  }>;
 }
+
+/** Finds durable work that pins monitor definitions during deployment changes. */
+export interface MonitorDeploymentStore {
+  listDefinitionPins(applicationId: string): Promise<readonly StoredDefinitionPin[]>;
+}
+
+export interface MonitorPurgeResult {
+  readonly ingressReceipts: number;
+  readonly runs: number;
+  readonly instances: number;
+  readonly usage: number;
+}
+
+/**
+ * Applies operational retention across all persistence responsibilities.
+ *
+ * Purging is deliberately a composite concern today: an expired direct-dispatch
+ * receipt may atomically dead-letter and remove conditional branches, while
+ * unrelated terminal runs, idle store-mailbox instances, and usage reservations
+ * are independently eligible for deletion.
+ */
+export interface MonitorRetentionStore {
+  purgeExpired(now: string): Promise<MonitorPurgeResult>;
+}
+
+/**
+ * Compatibility composition consumed by `MonitorRuntime` today.
+ *
+ * This is a capability composition, not a claim that every responsibility must
+ * remain in PostgreSQL. `PostgresMonitorStore` and `MemoryMonitorStore` provide
+ * all facets in one object; the next simplification can narrow runtime paths to
+ * only the facets required by the selected mailbox topology.
+ */
+export interface MonitorStore
+  extends MonitorTransactionCoordinator,
+    MonitorSubscriptionStore,
+    MonitorMailboxStore,
+    MonitorRunStore,
+    MonitorDeadLetterStore,
+    MonitorDeploymentStore,
+    MonitorRetentionStore {}
 
 export function instanceStoreKey(input: {
   readonly tenantId: string;

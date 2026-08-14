@@ -29,8 +29,12 @@ import type {
   BufferedEvent,
   FrozenMonitorBatch,
   FrozenMonitorBatchSummary,
+  MonitorDeadLetterTransaction,
+  MonitorMailboxTransaction,
+  MonitorRetentionStore,
+  MonitorRunTransaction,
   MonitorStore,
-  MonitorStoreTransaction,
+  MonitorSubscriptionTransaction,
   StoredFanoutBranchReceipt,
   StoredIngressReceipt,
   StoredMonitorBatch,
@@ -132,6 +136,11 @@ export interface MonitorRuntimeOptions {
   readonly deployment: MonitorDeployment;
   readonly channels: readonly DeclaredInboundChannel[];
   readonly deliveryChannels?: readonly MonitorDeliveryChannel[] | undefined;
+  /**
+   * Compatibility composition of ingress, branch, mailbox, run, deployment,
+   * budget, failure, and retention persistence responsibilities. See
+   * `docs/storage-responsibilities.md` in the repository.
+   */
   readonly store: MonitorStore;
   readonly modelInvoker?: MonitorModelInvoker | undefined;
   readonly clock?: MonitorClock | undefined;
@@ -143,8 +152,9 @@ export interface MonitorRuntimeOptions {
   readonly idGenerator?: ((prefix: string) => string) | undefined;
   /**
    * Where the correlation mailbox lives. Defaults to `{ mode: "store" }`, the
-   * store-backed buffer swept by `drain()`. See `./mailbox.js` and the celld
-   * section of the README for the experimental cell-backed tier.
+   * `MonitorMailboxStore` buffer swept by `drain()`. In celld mode the cell
+   * replaces that live facet while the other store responsibilities remain.
+   * See `./mailbox.js` and the celld documentation.
    */
   readonly mailbox?: MailboxOptions | undefined;
 }
@@ -529,7 +539,7 @@ export class MonitorRuntime {
     return this.#store.listDeadLetters({ applicationId: this.#applicationId, monitorId });
   }
 
-  async purgeExpired(): Promise<Awaited<ReturnType<MonitorStore["purgeExpired"]>>> {
+  async purgeExpired(): Promise<Awaited<ReturnType<MonitorRetentionStore["purgeExpired"]>>> {
     return this.#store.purgeExpired(this.#now());
   }
 
@@ -1012,7 +1022,7 @@ export class MonitorRuntime {
   }
 
   async #resolveConditionalBranches(
-    tx: MonitorStoreTransaction,
+    tx: MonitorSubscriptionTransaction,
     receipt: StoredIngressReceipt,
     activate: boolean,
     now: string,
@@ -2659,7 +2669,7 @@ export class MonitorRuntime {
    * applies the matching `RUN_FAILED` transition when it sees the outcome.
    */
   async #deadLetterRunInTransaction(
-    tx: MonitorStoreTransaction,
+    tx: MonitorRunTransaction & MonitorMailboxTransaction & MonitorDeadLetterTransaction,
     run: StoredMonitorRun,
     instance: StoredMonitorInstance | null,
     stage: string,

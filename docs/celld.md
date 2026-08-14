@@ -17,7 +17,8 @@ lifecycle statechart, with a durable cell alarm replacing the PostgreSQL
 payload-free ingress receipts, runs, decisions, dead letters, budgets, and
 audit. The accepted branch owns the complete event until celld returns its
 durable append receipt; celld evaluation never depends on a central payload
-copy.
+copy. See [Persistence responsibilities](storage-responsibilities.md) for the
+interface and atomicity boundaries on each side of that handoff.
 
 ## Architecture
 

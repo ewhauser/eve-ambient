@@ -135,6 +135,7 @@ for the experimental distributed mailbox.
 - [Full-payload idempotent handoffs RFC](docs/rfcs/0001-full-payload-idempotent-handoffs.md)
 - [Deployment options](docs/deployment-options.md)
 - [Monitoring model](docs/monitoring-model.md)
+- [Persistence responsibilities](docs/storage-responsibilities.md)
 - [Postgres-first deployment](docs/postgres.md)
 - [Prefiltered ingress](docs/prefiltered-ingress.md)
 - [celld mailbox](docs/celld.md)

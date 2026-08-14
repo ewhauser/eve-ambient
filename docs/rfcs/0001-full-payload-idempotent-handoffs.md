@@ -1,7 +1,9 @@
 # RFC: Full-Payload, End-to-End Idempotent Event Handoffs
 
 - Status: Accepted
-- Implementation: Eve Ambient identity, both mailbox tiers, central-ingress cleanup, and the official Eve adapter with a carried `eve@0.38.1` patch are implemented; Kafka pending; SQS deferred
+- Implementation: Complete for Eve Ambient's memory, PostgreSQL, and celld
+  engines and the official Eve adapter; external Kafka and SQS adapters are not
+  planned requirements
 - Scope: Eve Ambient implementation through `wakeKey` delivery, plus a conditional conformance profile through final actions
 - Related: `ewhauser/eve-ambient` issue #3
 
@@ -18,7 +20,7 @@ Every handoff that represents durable work MUST include:
 
 Every stateful or side-effecting component MUST durably remember the result of processing an idempotency key. Receiving the same key and the same input returns the previously recorded result. Receiving the same key with different input is a conflict and MUST NOT be processed.
 
-Eve will not define a central event repository. It will not pass event references, require later payload lookup, expose event retention as a system capability, or provide replay. Kafka, PostgreSQL, celld, and other backends may retain payloads internally according to their own operation, but Eve assigns no replay or historical-query semantics to that retention. SQS is a possible future transport realization, not part of the current implementation plan.
+Eve will not define a central event repository. It will not pass event references, require later payload lookup, expose event retention as a system capability, or provide replay. Kafka, PostgreSQL, celld, and other backends may retain payloads internally according to their own operation, but Eve assigns no replay or historical-query semantics to that retention. Kafka and SQS may be integrated externally but are not part of the current implementation plan.
 
 The intended guarantee for a conforming end-to-end deployment is:
 
@@ -823,26 +825,23 @@ The following are removed from the core capability model:
 - Payload repository identifiers
 - Cleanup of shared event references
 
-## Changes to the current codebase
+## Changes to the codebase
 
-The implementation originally stored accepted payloads in `StoredEvent`, placed `BufferedEventRef` values in celld state, and reloaded run events through `MonitorStore.getEvent(ref)`. The implementation now uses full event envelopes in both mailbox tiers, a payload-free `StoredIngressReceipt`, and complete branch-owned values. The store API and initial PostgreSQL schema contain no event repository or payload-loading contract. The remaining work in this RFC is optional external transport integration, beginning with Kafka.
+An earlier implementation stored accepted payloads in `StoredEvent`, placed `BufferedEventRef` values in celld state, and reloaded run events through `MonitorStore.getEvent(ref)`. RFC 0002 subsequently removed that entire public store/runtime architecture. The final implementation compiles a complete `AcceptedFanout`, hands full `FullAttentionBranch` values to backend-private correlation workflows, and exposes no payload-loading contract.
 
 Implemented conceptual changes:
 
-1. Replace the accepted-event payload record with an ingress/fan-out idempotency receipt. It stores branch identity and status but no event body after handoff.
-2. Make the subscription/branch record carry `eventKey`, `inputHash`, and the complete canonical event.
-3. Rename subscription identity to the semantic `branchKey` or `appendKey` and derive it deterministically.
-4. Replace `BufferedEventRef` with a full buffered-event envelope.
-5. Store full event envelopes in open and sealed monitor batches.
-6. Add a stable `batchKey` at the batch membership freeze and derive run identity from it.
-7. Change celld append requests and cell state to carry full events.
-8. Change evaluator callbacks to carry complete batches.
-9. Remove `#loadRunEvents`, evaluator calls to `MonitorStore.getEvent`, and payload-expiry failures.
-10. Propagate lineage through the complete monitor delivery and pass `wakeKey` or `directDispatchKey` to Eve as the channel delivery idempotency key.
-11. Add local idempotency receipts and hash-conflict handling at every durable boundary.
-12. Remove event repository, pointer, payload-loading, replay, and central-retention contracts from issue #3 and its implementation.
+1. Compile canonical source identity and the complete branch membership before durable admission.
+2. Carry `eventKey`, `occurrenceKey`, `branchKey`, input hashes, and the complete canonical event in every admitted branch.
+3. Store full event envelopes in open, sealed, and active batches.
+4. Assign stable `batchKey`, `runKey`, and `wakeKey` values only after their memberships or inputs freeze.
+5. Make celld cell handoffs and application callbacks carry complete values.
+6. Record prepared results before final delivery and retry the exact wake bytes.
+7. Pass `wakeKey` or `directDispatchKey` to Eve as the channel delivery idempotency key.
+8. Retain only bounded, payload-free receipts after terminal completion.
+9. Remove event repository, pointer, payload-loading, replay, generic store, and central-retention contracts.
 
-The pure XState lifecycle can remain structurally unchanged. Its event value changes from a reference record to a complete immutable event envelope; idempotency reservations and receipts remain outside the statechart.
+The memory, PostgreSQL, and celld implementations share one pure workflow reducer and one failure-oriented conformance suite.
 
 ### Clean replacement; no migration
 
@@ -867,14 +866,16 @@ Obsolete types, methods, schema objects, tests, and documentation are removed di
 - Implement the generic membership-freeze primitive and its concurrency invariants.
 - Add conformance helpers for duplicate, concurrent, lost-response, and conflict cases.
 
-### Phase 2: Store mailbox by value
+### Phase 2: Backend workflow by value
+
+- **Implemented and superseded by the clean RFC 0002 engine boundary.**
 
 - Copy full events into deterministic branch rows.
 - Replace buffered references with full event envelopes.
 - Make batches and runs self-contained and assign `batchKey` only at membership freeze/claim.
 - Remove evaluator payload lookup.
 - Remove the replay API and reduce terminal batches to lineage/completeness metadata.
-- Preserve existing filtering, correlation, ordering, batching, cooldown, and deployment pinning behavior.
+- Preserve filtering, correlation, ordering, batching, and cooldown behavior.
 
 ### Phase 3: Celld by value
 
@@ -890,21 +891,25 @@ backlogs and all three limit outcomes. LTX/object-store bytes, operation counts,
 and throughput remain target-fleet production gates because the in-process
 worker harness cannot measure them.
 
-### Phase 4: Central ingress cleanup
+### Phase 4: Clean engine replacement
 
 - **Implemented.**
-- Replace `StoredEvent` with a payload-free ingress/fan-out receipt.
-- Atomically write the receipt and complete branch-owned payloads.
-- Freeze direct-dispatch identity and conditional `undispatched` branches before invoking handlers.
+- Replace the generic ingress/store/runtime architecture with
+  `AttentionEngine.accept()` and a backend-private event coordinator.
+- Freeze the complete manifest and hand every branch to its workflow before
+  returning the payload-free acceptance receipt.
+- Split direct dispatch into an independent adapter-owned idempotent boundary.
 - Require direct handlers to receive the complete event, stable `directDispatchKey`, and input hash.
 - Remove central event payload APIs, storage columns, retention settings, ref-resolution tests, and documentation.
 
 ### Phase 5: External transports
 
-- Implement Kafka full-payload consume/fan-out/commit semantics.
-- Validate the adapter against the same idempotency and failure-injection suite.
-- Retain backend-native retention documentation only as operational guidance.
-- SQS support is explicitly deferred and is not required to complete this RFC.
+- **Not required or currently planned.**
+- Applications may bridge Kafka, SQS, or another source into
+  `ambient.publish()` while preserving full-payload custody and stable source
+  identity.
+- Backend-native retention remains operational detail and provides no replay
+  semantics.
 
 ### Eve integration boundary
 
@@ -943,14 +948,14 @@ Every backend and boundary must pass, where applicable:
 7. Concurrent matching deliveries cannot create concurrent side effects.
 8. Partial fan-out resumes the originally frozen branch manifest.
 9. A deployment change during retry does not change the branch set.
-10. A provider webhook can be acknowledged after the selected first durable ingress backend accepts the full event; it does not wait for celld fan-out.
-11. The durable-ingress consumer does not acknowledge or commit until all frozen branches are terminal or accepted.
+10. A provider webhook can be acknowledged only after `accept()` returns its receipt, which means every frozen branch has reached durable correlation-workflow custody.
+11. An upstream consumer does not acknowledge or commit an ambiguous or failed acceptance result.
 12. Duplicate mailbox append does not change batch timing, counts, or bytes.
 13. Concurrent append and membership freeze places the append in exactly the current or next batch.
 14. Immediate-mode cooldown consolidation gives no identity to provisional batches and derives one new `batchKey` from the frozen union at claim.
 15. A mailbox can complete evaluation after the source transport deletes its copy.
 16. Evaluation uses only its delivered full batch and performs no event lookup.
-17. A lost evaluator response does not create a second run or spend budget twice.
+17. A lost preparation response may repeat bounded computation but does not deliver an unrecorded result or mint a second run.
 18. A coalescing integration's turn freeze retains exactly the accepted pre-freeze wakes; later wakes enter the next turn and duplicates change neither turn.
 19. A lost keyed Eve session-admission response does not create a second admitted delivery.
 20. An integration claiming final-action conformance reuses the checkpointed action identity when a model/tool stage is retried.

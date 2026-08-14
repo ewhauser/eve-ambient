@@ -21,7 +21,7 @@ import {
 export interface AttentionConformanceHarness {
   readonly engine: AttentionEngine;
   runDue(): Promise<AttentionConformanceRunResult>;
-  diagnostics(): AttentionConformanceDiagnostics;
+  diagnostics(): AttentionConformanceDiagnostics | Promise<AttentionConformanceDiagnostics>;
 }
 
 export interface AttentionConformanceRunResult {
@@ -51,6 +51,7 @@ export interface AttentionConformanceFactoryOptions {
   readonly clock: VirtualMonitorClock;
   readonly dedupeMs?: number | undefined;
   readonly retryDelayMs?: number | undefined;
+  readonly claimLeaseMs?: number | undefined;
   readonly maxAttempts?: number | undefined;
   readonly maxBranches?: number | undefined;
   readonly maxFanoutBytes?: number | undefined;
@@ -85,7 +86,7 @@ export function defineAttentionEngineConformance(
 
       expect(accepted.branchKeys).toEqual([]);
       expect(retry).toEqual(accepted);
-      expect(harness.diagnostics()).toMatchObject({
+      expect(await harness.diagnostics()).toMatchObject({
         pendingFanoutPayloads: 0,
         acceptanceReceipts: 1,
         bufferedBranchPayloads: 0,
@@ -106,7 +107,7 @@ export function defineAttentionEngineConformance(
       });
 
       await expect(harness.engine.accept(changed)).resolves.toEqual(accepted);
-      expect(harness.diagnostics().bufferedBranchPayloads).toBe(1);
+      expect((await harness.diagnostics()).bufferedBranchPayloads).toBe(1);
     });
 
     it("fails closed on source conflicts and overlapping branch-input conflicts", async () => {
@@ -148,7 +149,7 @@ export function defineAttentionEngineConformance(
       await expect(harness.engine.accept(input)).rejects.toBeInstanceOf(
         AttentionCapacityError,
       );
-      expect(harness.diagnostics()).toMatchObject({
+      expect(await harness.diagnostics()).toMatchObject({
         eventCoordinators: 0,
         pendingFanoutPayloads: 0,
       });
@@ -166,7 +167,7 @@ export function defineAttentionEngineConformance(
       await expect(
         harness.engine.accept(await fanout({ branches: [] })),
       ).rejects.toBeInstanceOf(AttentionCapacityError);
-      expect(harness.diagnostics()).toMatchObject({
+      expect(await harness.diagnostics()).toMatchObject({
         eventCoordinators: 0,
         pendingFanoutPayloads: 0,
       });
@@ -194,7 +195,7 @@ export function defineAttentionEngineConformance(
       });
 
       await expect(harness.engine.accept(input)).rejects.toThrow("injected append outage");
-      expect(harness.diagnostics()).toMatchObject({
+      expect(await harness.diagnostics()).toMatchObject({
         pendingFanoutPayloads: 1,
         bufferedBranchPayloads: 1,
       });
@@ -202,7 +203,7 @@ export function defineAttentionEngineConformance(
         branchKeys: input.branches.map((branch) => branch.branchKey),
       });
       expect(appendAttempts).toBe(3);
-      expect(harness.diagnostics()).toMatchObject({
+      expect(await harness.diagnostics()).toMatchObject({
         pendingFanoutPayloads: 0,
         bufferedBranchPayloads: 2,
       });
@@ -230,7 +231,7 @@ export function defineAttentionEngineConformance(
       await expect(harness.engine.accept(input)).resolves.toMatchObject({
         branchKeys: [input.branches[0]!.branchKey],
       });
-      expect(harness.diagnostics().bufferedBranchPayloads).toBe(1);
+      expect((await harness.diagnostics()).bufferedBranchPayloads).toBe(1);
     });
 
     it("starts the admission receipt horizon after branch handoff completes", async () => {
@@ -249,7 +250,7 @@ export function defineAttentionEngineConformance(
 
       expect(receipt.acceptedAt).toBe("2026-01-01T00:00:00.000Z");
       expect(receipt.dedupeExpiresAt).toBe("2026-01-01T00:00:00.070Z");
-      expect(harness.diagnostics().acceptanceReceipts).toBe(1);
+      expect((await harness.diagnostics()).acceptanceReceipts).toBe(1);
     });
 
     it("timestamps each serialized branch append when it commits", async () => {
@@ -339,7 +340,7 @@ export function defineAttentionEngineConformance(
       await expect(harness.runDue()).resolves.toMatchObject({ delivered: 1 });
       expect(callbacks.prepareCalls[0]).toMatchObject({ closedBy: "max-events" });
       expect(callbacks.prepareCalls[0]!.branches).toHaveLength(2);
-      expect(harness.diagnostics().bufferedBranchPayloads).toBe(1);
+      expect((await harness.diagnostics()).bufferedBranchPayloads).toBe(1);
     });
 
     it("preserves bounded debounce partitions when a wake starts cooldown", async () => {
@@ -375,7 +376,7 @@ export function defineAttentionEngineConformance(
       await expect(harness.runDue()).resolves.toMatchObject({ delivered: 1 });
       expect(callbacks.prepareCalls[1]).toMatchObject({ closedBy: "max-events" });
       expect(callbacks.prepareCalls[1]!.branches).toHaveLength(2);
-      expect(harness.diagnostics().bufferedBranchPayloads).toBe(1);
+      expect((await harness.diagnostics()).bufferedBranchPayloads).toBe(1);
     });
 
     it("serializes an append concurrent with freeze into the next batch", async () => {
@@ -400,6 +401,48 @@ export function defineAttentionEngineConformance(
           batch.branches.map((branch) => branch.event.id),
         ),
       ).toEqual([["event-1"], ["event-2"]]);
+    });
+
+    it("ignores a stale prepare completion after another worker reclaims the lease", async () => {
+      const clock = new VirtualMonitorClock();
+      const callbacks = new ControlledAttentionCallbacks(clock);
+      const harness = await createHarness({ callbacks, clock, claimLeaseMs: 5 });
+      await harness.engine.accept(await fanout({ branches: [plan()] }));
+
+      callbacks.holdPrepare();
+      const staleRun = harness.runDue();
+      await callbacks.waitForPrepareCalls(1);
+      clock.advance(5);
+      const currentRun = harness.runDue();
+      await callbacks.waitForPrepareCalls(2);
+      callbacks.releasePrepare();
+
+      const outcomes = await Promise.all([staleRun, currentRun]);
+      expect(outcomes.reduce((sum, outcome) => sum + outcome.delivered, 0)).toBe(1);
+      expect(callbacks.prepareCalls).toHaveLength(2);
+      expect(callbacks.deliveryCalls).toHaveLength(1);
+      expect(callbacks.effects.size).toBe(1);
+    });
+
+    it("ignores a stale delivery receipt after another worker reclaims the lease", async () => {
+      const clock = new VirtualMonitorClock();
+      const callbacks = new ControlledAttentionCallbacks(clock);
+      const harness = await createHarness({ callbacks, clock, claimLeaseMs: 5 });
+      await harness.engine.accept(await fanout({ branches: [plan()] }));
+
+      callbacks.holdDelivery();
+      const staleRun = harness.runDue();
+      await callbacks.waitForDeliveryCalls(1);
+      clock.advance(5);
+      const currentRun = harness.runDue();
+      await callbacks.waitForDeliveryCalls(2);
+      callbacks.releaseDelivery();
+
+      const outcomes = await Promise.all([staleRun, currentRun]);
+      expect(outcomes.reduce((sum, outcome) => sum + outcome.delivered, 0)).toBe(1);
+      expect(callbacks.prepareCalls).toHaveLength(1);
+      expect(callbacks.deliveryCalls).toHaveLength(2);
+      expect(callbacks.effects.size).toBe(1);
     });
 
     it("may repeat prepare but never delivers an unrecorded result", async () => {
@@ -433,7 +476,7 @@ export function defineAttentionEngineConformance(
         await harness.engine.accept(await fanout({ branches: [plan()] }));
 
         await expect(harness.runDue()).resolves.toMatchObject({ failed: 1 });
-        expect(harness.diagnostics().activeBatchPayloads).toBe(1);
+        expect((await harness.diagnostics()).activeBatchPayloads).toBe(1);
         clock.advance(5);
         await expect(harness.runDue()).resolves.toMatchObject({ delivered: 1 });
       },
@@ -447,7 +490,7 @@ export function defineAttentionEngineConformance(
       await harness.engine.accept(await fanout({ branches: [plan()] }));
 
       await expect(harness.runDue()).resolves.toMatchObject({ terminalFailures: 1 });
-      expect(harness.diagnostics()).toMatchObject({
+      expect(await harness.diagnostics()).toMatchObject({
         activeBatchPayloads: 0,
         terminalFailures: 1,
       });
@@ -485,7 +528,7 @@ export function defineAttentionEngineConformance(
       await harness.engine.accept(await fanout({ branches: [plan()] }));
       await harness.runDue();
 
-      expect(harness.diagnostics()).toMatchObject({
+      expect(await harness.diagnostics()).toMatchObject({
         pendingFanoutPayloads: 0,
         bufferedBranchPayloads: 0,
         activeBatchPayloads: 0,
@@ -505,7 +548,7 @@ export function defineAttentionEngineConformance(
 
       await expect(harness.runDue()).resolves.toMatchObject({ ignored: 1 });
       expect(callbacks.deliveryCalls).toHaveLength(0);
-      expect(harness.diagnostics()).toMatchObject({
+      expect(await harness.diagnostics()).toMatchObject({
         bufferedBranchPayloads: 0,
         activeBatchPayloads: 0,
         preparedWakePayloads: 0,
@@ -528,7 +571,7 @@ export function defineAttentionEngineConformance(
       clock.advance(5);
       await expect(harness.runDue()).resolves.toMatchObject({ terminalFailures: 1 });
       expect(callbacks.deliveryCalls).toHaveLength(0);
-      expect(harness.diagnostics()).toMatchObject({
+      expect(await harness.diagnostics()).toMatchObject({
         activeBatchPayloads: 0,
         preparedWakePayloads: 0,
         terminalFailures: 1,
@@ -547,7 +590,7 @@ export function defineAttentionEngineConformance(
 
       await expect(harness.runDue()).resolves.toMatchObject({ terminalFailures: 1 });
       expect(callbacks.deliveryCalls).toHaveLength(0);
-      expect(harness.diagnostics()).toMatchObject({
+      expect(await harness.diagnostics()).toMatchObject({
         activeBatchPayloads: 0,
         preparedWakePayloads: 0,
         terminalFailures: 1,
@@ -564,7 +607,7 @@ export function defineAttentionEngineConformance(
 
       await expect(harness.runDue()).resolves.toMatchObject({ shadowed: 1 });
       expect(callbacks.deliveryCalls).toHaveLength(0);
-      expect(harness.diagnostics()).toMatchObject({
+      expect(await harness.diagnostics()).toMatchObject({
         bufferedBranchPayloads: 0,
         activeBatchPayloads: 0,
       });
@@ -623,10 +666,10 @@ export function defineAttentionEngineConformance(
       const harness = await createHarness({ callbacks, clock, dedupeMs: 20 });
       await harness.engine.accept(await fanout({ branches: [plan()] }));
       await harness.runDue();
-      expect(harness.diagnostics().acceptanceReceipts).toBe(1);
+      expect((await harness.diagnostics()).acceptanceReceipts).toBe(1);
 
       clock.advance(20);
-      expect(harness.diagnostics()).toMatchObject({
+      expect(await harness.diagnostics()).toMatchObject({
         eventCoordinators: 0,
         correlationWorkflows: 0,
         branchReceipts: 0,
@@ -642,14 +685,14 @@ export function defineAttentionEngineConformance(
       await harness.engine.accept(await fanout({ branches: [plan()] }));
 
       await expect(harness.runDue()).resolves.toMatchObject({ delivered: 1 });
-      expect(harness.diagnostics()).toMatchObject({
+      expect(await harness.diagnostics()).toMatchObject({
         acceptanceReceipts: 0,
         branchReceipts: 1,
         deliveryReceipts: 1,
       });
 
       clock.advance(20);
-      expect(harness.diagnostics()).toMatchObject({
+      expect(await harness.diagnostics()).toMatchObject({
         correlationWorkflows: 0,
         branchReceipts: 0,
         deliveryReceipts: 0,
@@ -680,6 +723,10 @@ class ControlledAttentionCallbacks implements AttentionCallbacks {
   #prepareGate?: Promise<void> | undefined;
   #releasePrepare?: (() => void) | undefined;
   #prepareStarted?: (() => void) | undefined;
+  readonly #prepareWaiters: Array<{ count: number; resolve: () => void }> = [];
+  #deliveryGate?: Promise<void> | undefined;
+  #releaseDelivery?: (() => void) | undefined;
+  readonly #deliveryWaiters: Array<{ count: number; resolve: () => void }> = [];
 
   constructor(clock: VirtualMonitorClock) {
     this.#clock = clock;
@@ -700,6 +747,28 @@ class ControlledAttentionCallbacks implements AttentionCallbacks {
     this.#prepareGate = undefined;
   }
 
+  waitForPrepareCalls(count: number): Promise<void> {
+    if (this.prepareCalls.length >= count) return Promise.resolve();
+    return new Promise<void>((resolve) => this.#prepareWaiters.push({ count, resolve }));
+  }
+
+  holdDelivery(): void {
+    this.#deliveryGate = new Promise<void>((resolve) => {
+      this.#releaseDelivery = resolve;
+    });
+  }
+
+  releaseDelivery(): void {
+    this.#releaseDelivery?.();
+    this.#releaseDelivery = undefined;
+    this.#deliveryGate = undefined;
+  }
+
+  waitForDeliveryCalls(count: number): Promise<void> {
+    if (this.deliveryCalls.length >= count) return Promise.resolve();
+    return new Promise<void>((resolve) => this.#deliveryWaiters.push({ count, resolve }));
+  }
+
   async prepare(batch: FrozenAttentionBatch): Promise<PreparedAttentionOutcome> {
     this.prepareInputsFrozen.push(
       Object.isFrozen(batch) &&
@@ -707,6 +776,11 @@ class ControlledAttentionCallbacks implements AttentionCallbacks {
         batch.branches.every((branch) => Object.isFrozen(branch.event)),
     );
     this.prepareCalls.push(structuredClone(batch));
+    for (const waiter of [...this.#prepareWaiters]) {
+      if (this.prepareCalls.length < waiter.count) continue;
+      this.#prepareWaiters.splice(this.#prepareWaiters.indexOf(waiter), 1);
+      waiter.resolve();
+    }
     this.#prepareStarted?.();
     this.#prepareStarted = undefined;
     if (this.#prepareGate !== undefined) await this.#prepareGate;
@@ -724,6 +798,12 @@ class ControlledAttentionCallbacks implements AttentionCallbacks {
   async deliver(wake: PreparedAttentionWake): Promise<AttentionDeliveryReceipt> {
     this.deliveryInputsFrozen.push(Object.isFrozen(wake) && Object.isFrozen(wake.evidence));
     this.deliveryCalls.push(structuredClone(wake));
+    for (const waiter of [...this.#deliveryWaiters]) {
+      if (this.deliveryCalls.length < waiter.count) continue;
+      this.#deliveryWaiters.splice(this.#deliveryWaiters.indexOf(waiter), 1);
+      waiter.resolve();
+    }
+    if (this.#deliveryGate !== undefined) await this.#deliveryGate;
     const error = this.deliverErrors.shift();
     if (error !== undefined) throw error;
     const prior = this.effects.get(wake.wakeKey);

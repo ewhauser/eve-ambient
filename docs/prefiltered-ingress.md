@@ -1,102 +1,64 @@
 # Prefiltered ingress
 
-Eve Ambient does not require ownership of the raw event firehose. An existing
-rules engine, stream processor, SIEM, alerting system, or domain-specific
-detector can select events first and publish only the signals that may deserve
-agent attention.
-
-## Topology
+Eve Ambient does not need to own the raw event firehose. A rules engine, stream
+processor, SIEM, queue consumer, or domain detector may select events first and
+publish only signals that may deserve attention.
 
 ```text
-providers -> external durable pipeline -> selection -> Eve Ambient publish()
-                                                    -> mailbox -> decision -> delivery
+provider -> external pipeline -> selection -> ambient.publish()
+                                            -> attention backend
 ```
 
-The external pipeline owns everything before Eve Ambient accepts the event.
-The default Eve runtime atomically stores a payload-free ingress receipt and a
-complete branch value for every matching monitor, then processes those branches
-through the same durable path as channel-originated events.
+## Boundary
 
-## Describe the event source
+Before `publish()`, the external pipeline owns provider acknowledgement,
+retention, offsets, ordering, normalization inputs, and any selection audit.
+After a successful `publish()`, the selected attention backend owns the
+complete frozen fan-out, correlation, buffering, preparation, delivery, and
+payload cleanup.
 
-The publisher still defines an inbound channel and typed event. The channel
-definition is the schema and source identity; it does not require Eve Ambient
-to own the provider webhook or queue consumer.
+The channel canonicalization contract still defines stable source identity and
+the complete typed event:
 
 ```ts
-import { z } from "zod";
-import {
-  defineChannelEvent,
-  defineInboundChannel,
-} from "@ewhauser/eve-ambient";
-
-export const selectedSignals = defineInboundChannel({
-  id: "selected-signals",
-  replyTarget: z.object({ targetId: z.string() }),
-  inbound: {
-    detected: defineChannelEvent({
-      schema: z.object({
-        kind: z.string(),
-        summary: z.string(),
-        sourceRef: z.string(),
-      }),
-      maxBytes: 64_000,
-    }),
+const selectedSignals = defineChannelCanonicalization({
+  version: 1,
+  canonicalize(record) {
+    return {
+      id: record.sourceId,
+      type: "selected-signal",
+      source: {
+        tenantId: record.tenantId,
+        provider: "signal-pipeline",
+        stream: record.topic,
+      },
+      occurredAt: record.occurredAt,
+      actor: record.actor,
+      origin: { kind: "external" },
+      data: record.signal,
+    };
   },
 });
+
+await ambient.publish(selectedSignals, record);
 ```
 
-Publish after the external pipeline has durably selected and normalized the
-signal:
+## Consumer rules
 
-```ts
-const result = await runtime.publish(selectedSignals, "detected", {
-  tenantId,
-  installationId,
-  id: stableSourceEventId,
-  occurredAt,
-  data: signal,
-  replyTarget: { targetId },
-  origin: { kind: "external" },
-});
-```
+An upstream pull consumer should:
 
-`publish()` returns `accepted` after the event and matching subscription
-snapshots commit, or `duplicate` when the same scoped source ID was accepted
-previously. A pull consumer may commit its source offset after either result.
-It should retry any unknown or failed outcome with the same source ID.
+1. derive a stable source identity from the provider delivery or log record;
+2. retry an ambiguous result with the same identity and complete payload;
+3. commit its offset only after `publish()` succeeds;
+4. preserve the payload until the attention backend accepts custody; and
+5. describe its own ordering and delivery guarantees without relying on an
+   Eve Ambient replay mechanism.
 
-## Responsibility boundary
+Intermediate transports may keep their own retention or duplicate ledger.
+Those records do not become a central Eve Ambient system interface. Keys are
+lineage and idempotency values, never references that the attention workflow
+must dereference later.
 
-| Responsibility | External pipeline | Eve Ambient after `publish()` |
-|---|---:|---:|
-| Provider acknowledgement and raw source retention | Yes | No |
-| Raw-stream ordering and source retention | Yes | No |
-| Upstream selection and its audit trail | Yes | No |
-| Channel schema validation | No | Yes |
-| Scoped source dedupe | No | Yes |
-| Monitor filter and correlation | No | Yes |
-| Buffering, cooldown, and budgets | No | Yes |
-| Decision, evidence, delivery, and dead letters | No | Yes |
-
-When the upstream selection is complete, a monitor may omit `filter` or use it
-only for local safety checks. Keep `correlate`, buffer policy, decision, task
-evidence, route, and wake budgets in Eve so the durable attention behavior
-remains visible in one monitor definition.
-
-## Kafka and other durable logs
-
-The package does not currently ship a generic `EventLog` interface or a Kafka
-consumer. A custom consumer can call `publish()` today, but the integration owns
-its offset protocol and must preserve these rules:
-
-1. Use a stable provider or log-record identity for `id`.
-2. Retry ambiguous outcomes with that same identity.
-3. Commit the source offset only after `accepted` or `duplicate`.
-4. Do not claim stronger ordering or delivery semantics than the source and
-   consumer actually provide.
-5. Send the complete normalized payload on every handoff and retain it locally
-   until the next durable receiver accepts it.
-
-For a topology that also separates the correlation mailbox from PostgreSQL,
-see [celld mailbox](celld.md). The event-log and mailbox choices are independent.
+The package does not ship Kafka or SQS adapters. A custom consumer calls the
+same publisher used by provider-facing channels, and its selected backend may
+be either PostgreSQL or celld.

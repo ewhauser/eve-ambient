@@ -188,7 +188,7 @@ export async function deriveOccurrenceKey(input: {
   ]) as Promise<OccurrenceKey>;
 }
 
-/** RFC 0002 direct-dispatch identity. Legacy runtime identity remains below. */
+/** Direct-dispatch identity rooted in the accepted occurrence. */
 export async function deriveAttentionDirectDispatchKey(input: {
   readonly occurrenceKey: OccurrenceKey;
   readonly bindingGeneration: string;
@@ -200,7 +200,7 @@ export async function deriveAttentionDirectDispatchKey(input: {
   ]) as Promise<DirectDispatchKey>;
 }
 
-/** RFC 0002 full-branch identity. */
+/** Full-branch identity. */
 export async function deriveAttentionBranchKey(input: {
   readonly occurrenceKey: OccurrenceKey;
   readonly monitorId: string;
@@ -218,7 +218,7 @@ export async function deriveAttentionBranchKey(input: {
   ]) as Promise<BranchKey>;
 }
 
-/** RFC 0002 serialized correlation-workflow identity. */
+/** Serialized correlation-workflow identity. */
 export async function deriveAttentionInstanceKey(input: {
   readonly applicationId: string;
   readonly tenantId: string;
@@ -235,7 +235,7 @@ export async function deriveAttentionInstanceKey(input: {
   ]) as Promise<AttentionInstanceKey>;
 }
 
-/** RFC 0002 batch identity from canonical frozen membership. */
+/** Batch identity from canonical frozen membership. */
 export async function deriveAttentionBatchKey(input: {
   readonly instanceKey: AttentionInstanceKey;
   readonly orderedBranchKeys: readonly BranchKey[];
@@ -296,66 +296,6 @@ export async function deriveFanoutManifestHash(input: {
     input.occurrenceKey,
     branches,
   ]) as Promise<FanoutManifestHash>;
-}
-
-export async function deriveDirectDispatchKey(input: {
-  readonly eventKey: EventKey;
-  /** Durable ingress-receipt generation; matching retries reuse it. */
-  readonly acceptanceId: string;
-  readonly bindingGeneration: string;
-}): Promise<DirectDispatchKey> {
-  assertKeyKind(input.eventKey, "event");
-  return domainHash("eve:direct-dispatch:v1", [
-    input.eventKey,
-    nonEmpty(input.acceptanceId, "acceptanceId"),
-    nonEmpty(input.bindingGeneration, "bindingGeneration"),
-  ]) as Promise<DirectDispatchKey>;
-}
-
-export async function deriveBranchKey(input: {
-  readonly eventKey: EventKey;
-  /** Durable ingress-receipt generation; matching retries reuse it. */
-  readonly acceptanceId: string;
-  readonly monitorId: string;
-  readonly definitionVersion: string;
-  readonly phase?: MonitorPhase | undefined;
-}): Promise<BranchKey> {
-  assertKeyKind(input.eventKey, "event");
-  return domainHash("eve:branch:v1", [
-    input.eventKey,
-    nonEmpty(input.acceptanceId, "acceptanceId"),
-    nonEmpty(input.monitorId, "monitorId"),
-    nonEmpty(input.definitionVersion, "definitionVersion"),
-    input.phase ?? null,
-  ]) as Promise<BranchKey>;
-}
-
-export async function deriveBatchKey(input: {
-  readonly instanceId: string;
-  readonly orderedBranchKeys: readonly BranchKey[];
-}): Promise<BatchKey> {
-  const keys = distinctKeys(input.orderedBranchKeys, "orderedBranchKeys", "branch");
-  if (keys.length === 0) throw new TypeError("orderedBranchKeys must not be empty");
-  return domainHash("eve:batch:v1", [nonEmpty(input.instanceId, "instanceId"), keys]) as Promise<BatchKey>;
-}
-
-export async function deriveRunKey(input: {
-  readonly batchKey: BatchKey;
-  readonly purpose?: string | undefined;
-}): Promise<RunKey> {
-  assertKeyKind(input.batchKey, "batch");
-  return domainHash("eve:run:v1", [
-    input.batchKey,
-    nonEmpty(input.purpose ?? "primary", "purpose"),
-  ]) as Promise<RunKey>;
-}
-
-export async function deriveWakeKey(input: {
-  readonly runKey: RunKey;
-  readonly routeId: string;
-}): Promise<WakeKey> {
-  assertKeyKind(input.runKey, "run");
-  return domainHash("eve:wake:v1", [input.runKey, nonEmpty(input.routeId, "routeId")]) as Promise<WakeKey>;
 }
 
 export function createIdempotencyContext<TKey extends IdempotencyKey>(input: {
@@ -466,103 +406,6 @@ export function assertIdempotencyInput(input: {
   if (input.existingInputHash !== input.receivedInputHash) {
     throw new IdempotencyConflictError(input);
   }
-}
-
-interface IdempotencyReceiptBase<TKey extends IdempotencyKey> {
-  readonly namespace: string;
-  readonly key: TKey;
-  readonly inputHash: InputHash;
-  readonly createdAt: string;
-  /** Boundary after which this component no longer promises duplicate recognition. */
-  readonly expiresAt: string;
-}
-
-export type IdempotencyReceipt<
-  TResult extends JsonValue = JsonValue,
-  TKey extends IdempotencyKey = IdempotencyKey,
-> =
-  | (IdempotencyReceiptBase<TKey> & {
-      readonly status: "in_progress";
-      readonly leaseUntil?: string | undefined;
-    })
-  | (IdempotencyReceiptBase<TKey> & {
-      readonly status: "completed";
-      readonly result: TResult;
-      readonly completedAt: string;
-    })
-  | (IdempotencyReceiptBase<TKey> & {
-      readonly status: "failed";
-      readonly errorClass: string;
-      readonly retryable: boolean;
-      readonly failedAt: string;
-    });
-
-export type IdempotencyBeginResult<
-  TResult extends JsonValue = JsonValue,
-  TKey extends IdempotencyKey = IdempotencyKey,
-> =
-  | { readonly status: "new" }
-  | {
-      /** A matching retryable failure was atomically reserved for another attempt. */
-      readonly status: "retry";
-      readonly previousReceipt: Extract<
-        IdempotencyReceipt<TResult, TKey>,
-        { readonly status: "failed" }
-      > & { readonly retryable: true };
-    }
-  | { readonly status: "in_progress"; readonly retryAt?: string | undefined }
-  | {
-      readonly status: "completed";
-      readonly receipt: Extract<IdempotencyReceipt<TResult, TKey>, { readonly status: "completed" }>;
-    }
-  | {
-      /** A matching non-retryable failure is terminal and must not run again. */
-      readonly status: "failed";
-      readonly receipt: Extract<
-        IdempotencyReceipt<TResult, TKey>,
-        { readonly status: "failed" }
-      > & { readonly retryable: false };
-    }
-  | { readonly status: "conflict"; readonly existingInputHash: InputHash };
-
-export interface IdempotencyLedger<
-  TResult extends JsonValue = JsonValue,
-  TKey extends IdempotencyKey = IdempotencyKey,
-> {
-  /**
-   * Atomically reserves `(namespace, key)`. Matching retries observe the
-   * existing state; a different input hash returns `conflict` and must not
-   * replace the original reservation. Expiry ends this component's guarantee
-   * and is deliberately independent of payload retention.
-   *
-   * `new` means the first or post-expiry attempt was reserved. `retry` means a
-   * matching retryable failure was atomically reserved again under the same
-   * key. `failed` replays a terminal failure without reacquiring the operation.
-   */
-  begin(input: {
-    readonly namespace: string;
-    readonly key: TKey;
-    readonly inputHash: InputHash;
-    readonly leaseUntil?: string | undefined;
-    readonly expiresAt: string;
-  }): Promise<IdempotencyBeginResult<TResult, TKey>>;
-
-  complete(input: {
-    readonly namespace: string;
-    readonly key: TKey;
-    readonly inputHash: InputHash;
-    readonly result: TResult;
-    readonly completedAt: string;
-  }): Promise<void>;
-
-  fail(input: {
-    readonly namespace: string;
-    readonly key: TKey;
-    readonly inputHash: InputHash;
-    readonly errorClass: string;
-    readonly retryable: boolean;
-    readonly failedAt: string;
-  }): Promise<void>;
 }
 
 async function domainHash(domain: string, parts: readonly unknown[]): Promise<string> {
@@ -700,12 +543,12 @@ function assertKeyKind(value: string, kind: string): void {
   const versions: Readonly<Record<string, readonly number[]>> = {
     event: [1],
     occurrence: [1],
-    "direct-dispatch": [1, 2],
-    branch: [1, 2],
+    "direct-dispatch": [2],
+    branch: [2],
     instance: [2],
-    batch: [1, 2],
-    run: [1, 2],
-    wake: [1, 2],
+    batch: [2],
+    run: [2],
+    wake: [2],
     input: [1],
   };
   const allowed = versions[kind] ?? [1];

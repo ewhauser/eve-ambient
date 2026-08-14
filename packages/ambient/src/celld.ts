@@ -1,141 +1,193 @@
-/**
- * The celld mailbox adapter surface, kept out of the core entry point so an
- * application that never opts in never imports it.
- *
- * The runtime side of the tier is `MonitorRuntime.handleEvaluation`, which is
- * transport-agnostic on purpose. This module supplies the one transport most
- * hosts want — a `(Request) => Response` handler to mount on whatever server
- * the application already runs — plus the wire types the cell worker shares.
- */
-
-import type { MonitorRuntime } from "./runtime.js";
 import {
-  EvaluationAuthError,
-  EvaluationRequestError,
-  secretsMatch,
-} from "./mailbox.js";
-import type { EvaluationRequest, EvaluationResponse } from "./mailbox.js";
+  validateAcceptedFanout,
+  AttentionCapacityError,
+  type AcceptedFanout,
+  type AttentionAcceptanceReceipt,
+  type AttentionCallbacks,
+  type AttentionEngine,
+  type FrozenAttentionBatch,
+  type PreparedAttentionWake,
+} from "./attention.js";
+import { IdempotencyConflictError } from "./idempotency.js";
 
-export {
-  CELLD_APPEND_CONFLICT,
-  CELLD_BATCH_TOO_LARGE,
-  CELLD_CELL_IDENTITY_MISMATCH,
-  CELLD_DEFINITION_VERSION_MISMATCH,
-  CELLD_EVENT_TOO_LARGE,
-  CELLD_INVALID_CAPACITY_CONFIG,
-  CELLD_MALFORMED_APPEND,
-  CELLD_RESIDENT_CAPACITY_EXCEEDED,
-  CELLD_UNPINNED_CELL,
-  EvaluationAuthError,
-  EvaluationRequestError,
-  cellUrl,
-  projectInstanceView,
-  secretsMatch,
-} from "./mailbox.js";
-export type {
-  CelldAppendOutcome,
-  CelldAppendReceipt,
-  CelldAppendRequest,
-  CelldAppendResponse,
-  CelldCellConfig,
-  CelldErrorResponse,
-  CelldMailboxOptions,
-  EvaluationRequest,
-  EvaluationResponse,
-  EvaluationRetryResponse,
-  EvaluationStatus,
-  EvaluationTerminalResponse,
-  EvaluationTerminalStatus,
-  MailboxOptions,
-  StoreMailboxOptions,
-} from "./mailbox.js";
-
-export interface EvaluationFetchHandlerOptions {
-  /**
-   * The shared secret cells present as `authorization: Bearer <secret>`. It
-   * must match the runtime's `mailbox.secret`; it is checked here as well so a
-   * missing or malformed header is rejected before any parsing happens.
-   */
+export interface CelldAttentionEngineOptions {
+  readonly url: string;
   readonly secret: string;
-  /** Restricts the handler to one path. Any path is accepted when unset. */
-  readonly path?: string | undefined;
+  readonly fetch?: typeof fetch | undefined;
 }
 
-/**
- * Wraps `runtime.handleEvaluation` as a fetch handler for Node's
- * `Request`/`Response` (or any host with the same globals).
- *
- * Status mapping, and what each means to a cell:
- *
- * | status | cause                                | cell behaviour |
- * |--------|--------------------------------------|----------------|
- * | 200    | terminal outcome or scheduled retry  | completes the run, or re-arms directly at `retryAt` without spending the failure ladder |
- * | 401    | bad or missing bearer secret         | throws; celld's alarm ladder retries |
- * | 400    | malformed or misaddressed request    | throws; retries will keep failing — an operator has to intervene |
- * | 409    | the runId belongs to another instance| as above |
- * | 503    | evaluator could not record a durable outcome      | throws; the cell's failure ladder retries |
- *
- * Everything non-2xx is a retry from the cell's point of view; the codes are
- * for operators reading fleet logs.
- */
-export function createEvaluationFetchHandler(
-  runtime: MonitorRuntime,
-  options: EvaluationFetchHandlerOptions,
-): (request: Request) => Promise<Response> {
-  if (typeof options.secret !== "string" || options.secret.length === 0) {
-    throw new TypeError("evaluation handler secret must not be empty");
+export class CelldAttentionEngine implements AttentionEngine {
+  readonly #url: string;
+  readonly #secret: string;
+  readonly #fetch: typeof fetch;
+
+  constructor(options: CelldAttentionEngineOptions) {
+    this.#url = absoluteUrl(options.url, "celld url");
+    this.#secret = nonEmpty(options.secret, "celld secret");
+    this.#fetch = options.fetch ?? fetch;
   }
-  return async (request: Request): Promise<Response> => {
-    if (request.method !== "POST") {
-      return jsonResponse({ error: "evaluation endpoint accepts POST" }, 405);
+
+  async accept(input: AcceptedFanout): Promise<AttentionAcceptanceReceipt> {
+    const fanout = await validateAcceptedFanout(input);
+    const response = await this.#fetch(
+      cellUrl(this.#url, fanout.eventKey, "accept"),
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${this.#secret}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(fanout),
+      },
+    );
+    const body = await responseJson(response);
+    if (response.ok) return body as unknown as AttentionAcceptanceReceipt;
+    const detail = errorDetail(body);
+    if (response.status === 409) {
+      throw new IdempotencyConflictError({
+        namespace: detail.namespace ?? "celld-attention",
+        key: detail.key ?? fanout.eventKey,
+        existingInputHash: detail.existingInputHash ?? "unknown",
+        receivedInputHash: detail.receivedInputHash ?? fanout.inputHash,
+      });
     }
-    if (options.path !== undefined && new URL(request.url).pathname !== options.path) {
-      return jsonResponse({ error: "not found" }, 404);
-    }
-    const presented = bearerToken(request.headers.get("authorization"));
-    if (!secretsMatch(presented, options.secret)) {
-      return jsonResponse({ error: "unauthorized" }, 401);
-    }
-    let body: Omit<EvaluationRequest, "secret">;
+    if (response.status === 413) throw new AttentionCapacityError(detail.error);
+    throw new CelldAttentionError(detail.error, response.status, response.status >= 500 || response.status === 429);
+  }
+}
+
+export class CelldAttentionError extends Error {
+  readonly status: number;
+  readonly retryable: boolean;
+
+  constructor(message: string, status: number, retryable: boolean) {
+    super(message);
+    this.name = "CelldAttentionError";
+    this.status = status;
+    this.retryable = retryable;
+  }
+}
+
+export interface AttentionCallbackFetchHandlerOptions {
+  readonly secret: string;
+  readonly preparePath?: string | undefined;
+  readonly deliverPath?: string | undefined;
+}
+
+/** Authenticated by-value callback endpoint used by celld correlation cells. */
+export function createAttentionCallbackFetchHandler(
+  callbacks: AttentionCallbacks,
+  options: AttentionCallbackFetchHandlerOptions,
+): (request: Request) => Promise<Response> {
+  const secret = nonEmpty(options.secret, "attention callback secret");
+  const preparePath = options.preparePath ?? "/ambient/prepare";
+  const deliverPath = options.deliverPath ?? "/ambient/deliver";
+  return async (request) => {
+    if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
+    if (!secretsMatch(bearerToken(request), secret)) return json({ error: "unauthorized" }, 401);
+    let body: unknown;
     try {
-      body = (await request.json()) as Omit<EvaluationRequest, "secret">;
+      body = await request.json();
     } catch (error) {
-      return jsonResponse({ error: `invalid JSON body: ${message(error)}` }, 400);
+      return json({ error: `invalid JSON: ${message(error)}` }, 400);
     }
-    let response: EvaluationResponse;
     try {
-      response = await runtime.handleEvaluation({ ...body, secret: presented });
+      const path = new URL(request.url).pathname;
+      if (path === preparePath) {
+        return json(await callbacks.prepare(deepFreeze(body as FrozenAttentionBatch)));
+      }
+      if (path === deliverPath) {
+        return json(await callbacks.deliver(deepFreeze(body as PreparedAttentionWake)));
+      }
+      return json({ error: "not found" }, 404);
     } catch (error) {
-      if (error instanceof EvaluationAuthError) {
-        return jsonResponse({ error: "unauthorized" }, 401);
-      }
-      if (error instanceof EvaluationRequestError) {
-        return jsonResponse(
-          { error: error.message, code: error.code },
-          error.code === "run-conflict" ? 409 : 400,
-        );
-      }
-      // Everything else is retryable from the cell's perspective: the run's
-      // own checkpoint decides how much of it is repeated.
-      return jsonResponse({ error: message(error) }, 503);
+      return json({ error: message(error) }, 503);
     }
-    return jsonResponse(response, 200);
   };
 }
 
-function bearerToken(header: string | null): string {
-  if (header === null) return "";
-  const match = /^Bearer[ ]+(.+)$/i.exec(header.trim());
+export function cellUrl(baseUrl: string, name: string, action: string): string {
+  return `${baseUrl.replace(/\/$/, "")}/cells/${encodeURIComponent(name)}/${action}`;
+}
+
+export function secretsMatch(left: string, right: string): boolean {
+  const a = new TextEncoder().encode(left);
+  const b = new TextEncoder().encode(right);
+  let difference = a.length ^ b.length;
+  const length = Math.max(a.length, b.length);
+  for (let index = 0; index < length; index += 1) {
+    difference |= (a[index] ?? 0) ^ (b[index] ?? 0);
+  }
+  return difference === 0;
+}
+
+function bearerToken(request: Request): string {
+  const match = /^Bearer[ ]+(.+)$/i.exec(request.headers.get("authorization")?.trim() ?? "");
   return match?.[1] ?? "";
 }
 
-function jsonResponse(body: unknown, status: number): Response {
+async function responseJson(response: Response): Promise<Record<string, unknown>> {
+  try {
+    const value = (await response.json()) as unknown;
+    return value !== null && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : { error: "celld returned a non-object response" };
+  } catch {
+    return { error: `celld returned ${response.status} with invalid JSON` };
+  }
+}
+
+function errorDetail(value: Record<string, unknown>): {
+  readonly error: string;
+  readonly namespace?: string | undefined;
+  readonly key?: string | undefined;
+  readonly existingInputHash?: string | undefined;
+  readonly receivedInputHash?: string | undefined;
+} {
+  return {
+    error: typeof value.error === "string" ? value.error : "celld attention request failed",
+    ...(typeof value.namespace === "string" ? { namespace: value.namespace } : {}),
+    ...(typeof value.key === "string" ? { key: value.key } : {}),
+    ...(typeof value.existingInputHash === "string"
+      ? { existingInputHash: value.existingInputHash }
+      : {}),
+    ...(typeof value.receivedInputHash === "string"
+      ? { receivedInputHash: value.receivedInputHash }
+      : {}),
+  };
+}
+
+function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json" },
   });
 }
 
+function absoluteUrl(value: string, name: string): string {
+  const normalized = nonEmpty(value, name);
+  try {
+    return new URL(normalized).toString().replace(/\/$/, "");
+  } catch {
+    throw new TypeError(`${name} must be an absolute URL`);
+  }
+}
+
+function nonEmpty(value: string, name: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new TypeError(`${name} must not be empty`);
+  }
+  return value;
+}
+
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object") {
+    Object.freeze(value);
+    for (const nested of Object.values(value)) deepFreeze(nested);
+  }
+  return value;
 }

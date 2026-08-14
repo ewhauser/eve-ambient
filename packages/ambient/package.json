@@ -1,7 +1,7 @@
 {
   "name": "@ewhauser/eve-ambient",
   "version": "0.4.0",
-  "description": "Durable typed event monitors and ambient attention for Eve agents.",
+  "description": "Durable ambient attention engine for typed channel events.",
   "license": "MIT",
   "type": "module",
   "files": [
@@ -27,11 +27,6 @@
       "import": "./dist/celld-worker.js",
       "default": "./dist/celld-worker.js"
     },
-    "./ai-sdk": {
-      "types": "./dist/ai-sdk.d.ts",
-      "import": "./dist/ai-sdk.js",
-      "default": "./dist/ai-sdk.js"
-    },
     "./memory": {
       "types": "./dist/memory.d.ts",
       "import": "./dist/memory.js",
@@ -51,6 +46,7 @@
   },
   "scripts": {
     "build": "pnpm run clean && tsc -p tsconfig.build.json",
+    "check:celld-worker": "node celld-worker/build.mjs && node -e \"fs.rmSync('celld-worker/build', { recursive: true, force: true })\"",
     "clean": "node -e \"for (const path of ['dist', 'celld-worker/build']) fs.rmSync(path, { recursive: true, force: true })\"",
     "prepare": "pnpm run build",
     "test": "vitest run",
@@ -60,23 +56,10 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/pg": "^8.15.6",
-    "ai": "^7.0.38",
+    "esbuild": "^0.28.2",
     "pg": "^8.16.3",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.10",
-    "zod": "^4.4.3"
-  },
-  "peerDependencies": {
-    "ai": "^7.0.38",
-    "zod": "^4.4.3"
-  },
-  "peerDependenciesMeta": {
-    "ai": {
-      "optional": true
-    },
-    "zod": {
-      "optional": true
-    }
+    "vitest": "^4.1.10"
   },
   "engines": {
     "node": ">=24"
@@ -92,8 +75,5 @@
   "bugs": {
     "url": "https://github.com/ewhauser/eve-ambient/issues"
   },
-  "homepage": "https://github.com/ewhauser/eve-ambient#readme",
-  "dependencies": {
-    "xstate": "^5.20.0"
-  }
+  "homepage": "https://github.com/ewhauser/eve-ambient#readme"
 }

@@ -149,10 +149,27 @@ describe.skipIf(!enabled)("celld fleet integration", () => {
     ).json()) as Record<string, any>;
 
     const published = new Map<string, PublishedEvent>();
-    for (const entry of state.log as { kind: string; ref?: string }[]) {
-      if (entry.kind !== "append" || entry.ref === undefined) continue;
+    for (const entry of state.log as {
+      kind: string;
+      ref?: string;
+      branchKey?: PublishedEvent["branchKey"];
+      eventKey?: PublishedEvent["eventKey"];
+      inputHash?: PublishedEvent["inputHash"];
+      phase?: PublishedEvent["phase"] | null;
+    }[]) {
+      if (
+        entry.kind !== "append" ||
+        entry.ref === undefined ||
+        entry.branchKey === undefined ||
+        entry.eventKey === undefined ||
+        entry.inputHash === undefined
+      ) continue;
       const record = (await store.getEvent(entry.ref))!;
       published.set(entry.ref, {
+        branchKey: entry.branchKey,
+        eventKey: entry.eventKey,
+        inputHash: entry.inputHash,
+        ...(entry.phase === undefined || entry.phase === null ? {} : { phase: entry.phase }),
         bytes: record.bytes,
         acceptedAt: record.acceptedAt,
         ingressSequence: record.ingressSequence,

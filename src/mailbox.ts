@@ -18,7 +18,13 @@
  * lifecycle statechart it sits next to.
  */
 
-import type { StoredMonitorBatch, StoredMonitorInstance } from "./storage.js";
+import type {
+  BufferedEventRef,
+  BufferedEventValue,
+  StoredMonitorBatch,
+  StoredMonitorInstance,
+} from "./storage.js";
+import type { BranchKey, EventKey, InputHash } from "./idempotency.js";
 import type {
   ChannelEvent,
   MonitorBindingView,
@@ -69,6 +75,10 @@ export interface CelldAppendRequest {
   readonly correlationKeyHash: string;
   /** Durable idempotency key for the store-to-cell append handoff. */
   readonly subscriptionId: string;
+  readonly branchKey: BranchKey;
+  readonly eventKey: EventKey;
+  readonly inputHash: InputHash;
+  readonly phase?: "observed" | "undispatched" | undefined;
   readonly ref: string;
   readonly bytes: number;
   readonly ingressSequence: string;
@@ -158,7 +168,7 @@ export interface EvaluationRequest {
   readonly definitionVersion: string;
   readonly correlationKey: string;
   readonly correlationKeyHash: string;
-  readonly batch: StoredMonitorBatch;
+  readonly batch: StoredMonitorBatch<BufferedEventRef>;
   readonly instanceView: MonitorInstanceView;
   readonly claimedAt: string;
 }
@@ -200,7 +210,9 @@ export function secretsMatch(presented: string, expected: string): boolean {
 }
 
 /** The instance projection handed to decision, evidence, and route callbacks. */
-export function projectInstanceView(instance: StoredMonitorInstance): MonitorInstanceView {
+export function projectInstanceView<TEvent extends BufferedEventValue>(
+  instance: StoredMonitorInstance<TEvent>,
+): MonitorInstanceView {
   return {
     correlationKeyHash: instance.correlationKeyHash,
     ...(instance.lastDecision === undefined

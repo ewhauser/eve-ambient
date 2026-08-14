@@ -102,11 +102,18 @@ postgresDescribe("PostgresMonitorStore integration", () => {
     clock.advance(1_000);
     await runtime.purgeExpired();
 
-    expect(await runtime.listDeadLetters()).toContainEqual(
-      expect.objectContaining({
-        stage: "retention",
-        reason: "source dedupe retention expired before subscription completed",
-      }),
-    );
+    expect(await runtime.listDeadLetters()).toEqual([]);
+    await expect(store.listSubscriptionsForMonitor({
+      applicationId: "app",
+      monitorId: definition.id,
+    })).resolves.toMatchObject([{ event: { data: { key: "unfinished" } } }]);
+
+    await runtime.drain();
+    expect(await runtime.listRuns()).toHaveLength(4);
+    expect((await runtime.listRuns()).every((run) => !("events" in run.batch))).toBe(true);
+    await expect(store.listSubscriptionsForMonitor({
+      applicationId: "app",
+      monitorId: definition.id,
+    })).resolves.toEqual([]);
   }, 20_000);
 });

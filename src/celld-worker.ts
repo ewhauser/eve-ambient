@@ -54,7 +54,9 @@ import type {
   EvaluationTerminalResponse,
 } from "./mailbox.js";
 import { scopedKey } from "./storage.js";
+import { parseIdempotencyKey, parseInputHash } from "./idempotency.js";
 import type {
+  BufferedEventRef,
   StoredMonitorBatch,
   StoredMonitorInstance,
 } from "./storage.js";
@@ -69,6 +71,9 @@ import type {
 const DEFAULT_DECISION_RETENTION_MS = durationMs("30d");
 const DEFAULT_DEDUPE_RETENTION_MS = durationMs("7d");
 const LOG_LIMIT = 60;
+
+type CelldMonitorInstance = StoredMonitorInstance<BufferedEventRef>;
+type CelldMonitorBatch = StoredMonitorBatch<BufferedEventRef>;
 
 /** What the first append pins into the cell, and nothing else ever changes. */
 interface CellPin {
@@ -93,7 +98,7 @@ interface CellPin {
 interface RunCheckpoint {
   readonly runId: string;
   readonly stage: "evaluating" | "complete";
-  readonly batch: StoredMonitorBatch;
+  readonly batch: CelldMonitorBatch;
   readonly instanceView: MonitorInstanceView;
   readonly claimedAt: string;
   readonly outcome?: EvaluationTerminalResponse | undefined;
@@ -102,6 +107,9 @@ interface RunCheckpoint {
 interface AppendReceipt {
   readonly subscriptionId: string;
   readonly ref: string;
+  readonly branchKey: BufferedEventRef["branchKey"];
+  readonly eventKey: BufferedEventRef["eventKey"];
+  readonly inputHash: BufferedEventRef["inputHash"];
   readonly outcome: CelldAppendOutcome;
   readonly flushed: boolean;
   readonly recordedAt: string;
@@ -224,7 +232,7 @@ export class MonitorInstance {
    * Mirrors the runtime's `#newInstance`. The cell has no subscription record
    * to copy tenancy from, so those fields come off the pinned append.
    */
-  #newInstance(pin: CellPin, now: string): StoredMonitorInstance {
+  #newInstance(pin: CellPin, now: string): CelldMonitorInstance {
     return {
       id: pin.cellName,
       tenantId: pin.tenantId,
@@ -251,7 +259,7 @@ export class MonitorInstance {
    *     would strand the claimed batch.
    *   - no due time, no run     -> arm instance retention cleanup
    */
-  async #arm(instance: StoredMonitorInstance): Promise<number | null> {
+  async #arm(instance: CelldMonitorInstance): Promise<number | null> {
     if (instance.nextEvaluationAt !== undefined) {
       const at = Math.max(Date.parse(instance.nextEvaluationAt), this.#nowMs());
       await this.#storage.setAlarm(at);
@@ -265,7 +273,7 @@ export class MonitorInstance {
     return expiresAt;
   }
 
-  #isIdle(instance: StoredMonitorInstance): boolean {
+  #isIdle(instance: CelldMonitorInstance): boolean {
     return (
       instance.activeRunId === undefined &&
       instance.openBatch === undefined &&
@@ -330,6 +338,9 @@ export class MonitorInstance {
       typeof body?.monitorId !== "string" ||
       typeof body?.definitionVersion !== "string" ||
       typeof body?.subscriptionId !== "string" ||
+      typeof body?.branchKey !== "string" ||
+      typeof body?.eventKey !== "string" ||
+      typeof body?.inputHash !== "string" ||
       typeof body?.ref !== "string" ||
       typeof body?.config !== "object" ||
       body.config === null ||
@@ -341,8 +352,21 @@ export class MonitorInstance {
           ok: false,
           code: CELLD_MALFORMED_APPEND,
           error:
-            "append requires monitorId, definitionVersion, subscriptionId, ref, and config.retention",
+            "append requires monitorId, definitionVersion, subscriptionId, identity, ref, and config.retention",
         },
+        400,
+      );
+    }
+    try {
+      parseIdempotencyKey("branch", body.branchKey);
+      parseIdempotencyKey("event", body.eventKey);
+      parseInputHash(body.inputHash);
+      if (body.subscriptionId !== body.branchKey) {
+        throw new TypeError("subscriptionId must equal branchKey");
+      }
+    } catch (error) {
+      return json(
+        { ok: false, code: CELLD_MALFORMED_APPEND, error: String(error) },
         400,
       );
     }
@@ -388,7 +412,7 @@ export class MonitorInstance {
     }
     const definition = this.#definition(pin.config);
 
-    const existing = await this.#readJson<StoredMonitorInstance>("instance");
+    const existing = await this.#readJson<CelldMonitorInstance>("instance");
     const expiredIdle =
       existing !== undefined &&
       existing.expiresAt <= now &&
@@ -409,20 +433,25 @@ export class MonitorInstance {
       await this.#storage.delete(receiptKey);
       receipt = undefined;
     }
-    if (receipt !== undefined && receipt.ref !== body.ref) {
+    if (
+      receipt !== undefined &&
+      (receipt.ref !== body.ref ||
+        receipt.branchKey !== body.branchKey ||
+        receipt.eventKey !== body.eventKey ||
+        receipt.inputHash !== body.inputHash)
+    ) {
       return json(
         {
           ok: false,
           code: "append-conflict",
           error:
-            `subscription ${body.subscriptionId} was already appended as ${receipt.ref}; ` +
-            `request carried ${body.ref}`,
+            `subscription ${body.subscriptionId} was already appended with different identity`,
         },
         409,
       );
     }
     if (receipt !== undefined) {
-      if (await this.#containsRef(instance, body.ref)) {
+      if ((await this.#findBranch(instance, body.branchKey)) !== undefined) {
         await this.#ensureEventMarker(body, bytes, acceptedAt, now);
       }
       const alarmAt = await this.#arm(instance);
@@ -439,12 +468,35 @@ export class MonitorInstance {
     }
     // Heals the only commit gap in the receipt protocol: the instance is
     // written before the receipt. A retry that lands in that window can see
-    // the ref in either the buffered instance or the active run checkpoint,
+    // the branch in either the buffered instance or the active run checkpoint,
     // record the missing receipt, and must not dispatch APPEND again.
-    if (await this.#containsRef(instance, body.ref)) {
+    const storedBranch = await this.#findBranch(instance, body.branchKey);
+    if (storedBranch !== undefined) {
+      if (
+        storedBranch.ref !== body.ref ||
+        storedBranch.eventKey !== body.eventKey ||
+        storedBranch.inputHash !== body.inputHash ||
+        storedBranch.phase !== body.phase ||
+        storedBranch.bytes !== bytes ||
+        storedBranch.acceptedAt !== acceptedAt ||
+        storedBranch.ingressSequence !== body.ingressSequence
+      ) {
+        return json(
+          {
+            ok: false,
+            code: "append-conflict",
+            error:
+              `subscription ${body.subscriptionId} was already appended with different identity`,
+          },
+          409,
+        );
+      }
       const recovered: AppendReceipt = {
         subscriptionId: body.subscriptionId,
         ref: body.ref,
+        branchKey: body.branchKey,
+        eventKey: body.eventKey,
+        inputHash: body.inputHash,
         outcome: "updated",
         flushed: false,
         recordedAt: now,
@@ -468,7 +520,16 @@ export class MonitorInstance {
 
     const result = dispatchLifecycle(instance, definition, {
       type: "APPEND",
-      ref: { ref: body.ref, bytes, acceptedAt, ingressSequence: body.ingressSequence },
+      event: {
+        ref: body.ref,
+        branchKey: body.branchKey,
+        eventKey: body.eventKey,
+        inputHash: body.inputHash,
+        ...(body.phase === undefined ? {} : { phase: body.phase }),
+        bytes,
+        acceptedAt,
+        ingressSequence: body.ingressSequence,
+      },
       now,
     });
     instance = {
@@ -483,6 +544,9 @@ export class MonitorInstance {
     await this.#writeJson(receiptKey, {
       subscriptionId: body.subscriptionId,
       ref: body.ref,
+      branchKey: body.branchKey,
+      eventKey: body.eventKey,
+      inputHash: body.inputHash,
       outcome,
       flushed: result.flushed,
       recordedAt: now,
@@ -497,6 +561,10 @@ export class MonitorInstance {
       kind: "append",
       subscriptionId: body.subscriptionId,
       ref: body.ref,
+      branchKey: body.branchKey,
+      eventKey: body.eventKey,
+      inputHash: body.inputHash,
+      phase: body.phase ?? null,
       flushed: result.flushed,
       outcome,
       state: deriveLifecycleValue(instance, now),
@@ -507,13 +575,18 @@ export class MonitorInstance {
     return json(this.#appendResponse(name, pin, instance, outcome, result.flushed, alarmAt, now));
   }
 
-  async #containsRef(instance: StoredMonitorInstance, ref: string): Promise<boolean> {
-    if (instance.openBatch?.events.some((event) => event.ref === ref) === true) return true;
-    if (instance.sealedBatches.some((batch) => batch.events.some((event) => event.ref === ref))) {
-      return true;
+  async #findBranch(
+    instance: CelldMonitorInstance,
+    branchKey: BufferedEventRef["branchKey"],
+  ): Promise<BufferedEventRef | undefined> {
+    const open = instance.openBatch?.events.find((event) => event.branchKey === branchKey);
+    if (open !== undefined) return open;
+    for (const batch of instance.sealedBatches) {
+      const sealed = batch.events.find((event) => event.branchKey === branchKey);
+      if (sealed !== undefined) return sealed;
     }
     const run = await this.#readJson<RunCheckpoint>("run");
-    return run?.batch.events.some((event) => event.ref === ref) === true;
+    return run?.batch.events.find((event) => event.branchKey === branchKey);
   }
 
   async #ensureEventMarker(
@@ -526,6 +599,9 @@ export class MonitorInstance {
     if ((await this.#storage.get(key)) !== undefined) return;
     await this.#writeJson(key, {
       ref: body.ref,
+      branchKey: body.branchKey,
+      eventKey: body.eventKey,
+      inputHash: body.inputHash,
       bytes,
       acceptedAt,
       ingressSequence: body.ingressSequence,
@@ -536,7 +612,7 @@ export class MonitorInstance {
   #appendResponse(
     name: string,
     pin: CellPin,
-    instance: StoredMonitorInstance,
+    instance: CelldMonitorInstance,
     outcome: CelldAppendOutcome,
     flushed: boolean,
     alarmAt: number | null,
@@ -562,7 +638,7 @@ export class MonitorInstance {
 
   async #state(request: Request): Promise<Response> {
     const now = this.#now();
-    const instance = await this.#readJson<StoredMonitorInstance>("instance");
+    const instance = await this.#readJson<CelldMonitorInstance>("instance");
     const buffered: string[] = [];
     const listed = await this.#storage.list({ prefix: "evt:" });
     for (const key of listed.keys()) buffered.push(String(key).slice(4));
@@ -598,7 +674,7 @@ export class MonitorInstance {
     if (pin === undefined) {
       return json({ ok: false, code: CELLD_UNPINNED_CELL, error: "cell has no pinned monitor" }, 409);
     }
-    const instance = await this.#readJson<StoredMonitorInstance>("instance");
+    const instance = await this.#readJson<CelldMonitorInstance>("instance");
     if (instance === undefined) {
       return json({ ok: true, rearmed: false, reason: "no instance record", now });
     }
@@ -627,7 +703,7 @@ export class MonitorInstance {
       },
       now,
     );
-    const next: StoredMonitorInstance = {
+    const next: CelldMonitorInstance = {
       ...instance,
       ...(nextEvaluationAt === undefined
         ? { nextEvaluationAt: undefined }
@@ -698,7 +774,7 @@ export class MonitorInstance {
     // distinguishable after the fact.
     const invocation = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     let now = this.#now();
-    let instance = await this.#readJson<StoredMonitorInstance>("instance");
+    let instance = await this.#readJson<CelldMonitorInstance>("instance");
     if (instance === undefined) {
       await this.#cleanupExpiredReceipts(now);
       return;

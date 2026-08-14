@@ -14,6 +14,7 @@ import {
   MonitorRuntime,
   wake,
   type ChannelEvent,
+  type BufferedEvent,
   type LifecycleEvent,
   type MonitorDefinition,
   type MonitorDeliveryChannel,
@@ -92,6 +93,34 @@ type ModelOp =
 
 const T0 = Date.parse("2026-01-01T00:00:00.000Z");
 
+function bufferedEvent(ref: string, bytes: number, acceptedAt: string, ingressSequence: string): BufferedEvent {
+  return {
+    branchKey: `branch_${ref}` as BufferedEvent["branchKey"],
+    eventKey: `event_${ref}` as BufferedEvent["eventKey"],
+    inputHash: `hash_${ref}` as BufferedEvent["inputHash"],
+    bytes,
+    acceptedAt,
+    ingressSequence,
+    event: {
+      ref,
+      id: ref,
+      type: "message",
+      version: 1,
+      receivedAt: acceptedAt,
+      data: { key: "key", text: ref },
+      source: {
+        channelId: "chat",
+        installationId: "install-a",
+        tenantId: "tenant-a",
+        phase: "observed",
+      },
+      replyTarget: { room: "R1", thread: "key" },
+      origin: { kind: "external", depth: 0 },
+      trace: { traceId: `trace_${ref}` },
+    },
+  };
+}
+
 function freshInstance(): StoredMonitorInstance {
   const at = new Date(T0).toISOString();
   return {
@@ -123,10 +152,10 @@ function batchEventCount(instance: StoredMonitorInstance): number {
 function dispatch(
   instance: StoredMonitorInstance,
   definition: MonitorDefinition<ChannelEvent>,
-  event: LifecycleEvent,
+  event: LifecycleEvent<BufferedEvent>,
 ) {
-  const first = dispatchLifecycle(instance, definition, event);
-  const second = dispatchLifecycle(instance, definition, event);
+  const first = dispatchLifecycle<BufferedEvent>(instance, definition, event);
+  const second = dispatchLifecycle<BufferedEvent>(instance, definition, event);
   expect(JSON.parse(JSON.stringify(second))).toEqual(JSON.parse(JSON.stringify(first)));
   return first;
 }
@@ -227,12 +256,7 @@ describe("instance lifecycle model sweep", () => {
             const bytes = op === "append" ? 10 : (config.buffer.maxBytes ?? 100) - 5;
             const result = dispatch(inst, definition, {
               type: "APPEND",
-              ref: {
-                ref: `evt_${refCounter}`,
-                bytes,
-                acceptedAt: now,
-                ingressSequence: String(refCounter),
-              },
+              event: bufferedEvent(`evt_${refCounter}`, bytes, now, String(refCounter)),
               now,
             });
             next = { ...node, instance: result.instance, appended: node.appended + 1, depth: node.depth + 1 };
@@ -283,7 +307,9 @@ describe("instance lifecycle model sweep", () => {
             };
           } else {
             if (inst.activeRunId === undefined) continue;
-            const preSealedEvents = inst.sealedBatches.flatMap((batch) => batch.events.map((e) => e.ref));
+            const preSealedEvents = inst.sealedBatches.flatMap((batch) =>
+              batch.events.map(({ event }) => event.ref),
+            );
             const result =
               op === "fail"
                 ? dispatch(inst, definition, { type: "RUN_FAILED", now })
@@ -314,7 +340,7 @@ describe("instance lifecycle model sweep", () => {
                   // Consolidation merges accumulated batches exactly when a
                   // fresh cooldown starts.
                   expect(result.instance.sealedBatches).toHaveLength(0);
-                  const openRefs = result.instance.openBatch?.events.map((e) => e.ref) ?? [];
+                  const openRefs = result.instance.openBatch?.events.map(({ event }) => event.ref) ?? [];
                   for (const ref of preSealedEvents) expect(openRefs).toContain(ref);
                 }
               } else {
@@ -367,7 +393,7 @@ describe("expired cooldown consumption", () => {
 
     instance = dispatch(instance, definition, {
       type: "APPEND",
-      ref: { ref: "evt_1", bytes: 10, acceptedAt: at(0), ingressSequence: "1" },
+      event: bufferedEvent("evt_1", 10, at(0), "1"),
       now: at(0),
     }).instance;
     let result = dispatch(instance, definition, { type: "CLAIM", runId: "run_1", now: at(0) });
@@ -383,12 +409,12 @@ describe("expired cooldown consumption", () => {
     // expiry but before the due scan, so immediate mode seals it separately.
     instance = dispatch(instance, definition, {
       type: "APPEND",
-      ref: { ref: "evt_2", bytes: 10, acceptedAt: at(1_000), ingressSequence: "2" },
+      event: bufferedEvent("evt_2", 10, at(1_000), "2"),
       now: at(1_000),
     }).instance;
     instance = dispatch(instance, definition, {
       type: "APPEND",
-      ref: { ref: "evt_3", bytes: 10, acceptedAt: at(10_000), ingressSequence: "3" },
+      event: bufferedEvent("evt_3", 10, at(10_000), "3"),
       now: at(10_000),
     }).instance;
 
@@ -397,7 +423,7 @@ describe("expired cooldown consumption", () => {
       runId: "run_2",
       now: at(10_000),
     });
-    expect(result.claimedBatch?.events.map(({ ref }) => ref)).toEqual(["evt_3"]);
+    expect(result.claimedBatch?.events.map(({ event }) => event.ref)).toEqual(["evt_3"]);
     expect(result.claimedBatch?.closedBy).toBe("immediate");
     expect(result.instance.cooldownUntil).toBe(at(10_000));
 
@@ -415,7 +441,7 @@ describe("expired cooldown consumption", () => {
       runId: "run_3",
       now: at(10_000),
     });
-    expect(result.claimedBatch?.events.map(({ ref }) => ref)).toEqual(["evt_2"]);
+    expect(result.claimedBatch?.events.map(({ event }) => event.ref)).toEqual(["evt_2"]);
     expect(result.claimedBatch?.closedBy).toBe("cooldown-expired");
     expect(result.instance.cooldownUntil).toBeUndefined();
   });
@@ -540,6 +566,14 @@ function scenarioInput(id: string, key: string, text: string) {
  */
 function normalize(value: unknown, memo: Map<string, string>): unknown {
   const scrub = (current: unknown): unknown => {
+    if (typeof current === "string" && current.startsWith("eve:input:v1:")) {
+      let alias = memo.get(current);
+      if (alias === undefined) {
+        alias = `input#${memo.size}`;
+        memo.set(current, alias);
+      }
+      return alias;
+    }
     if (typeof current === "string" && /^(binding|session|turn)_/.test(current)) {
       let alias = memo.get(current);
       if (alias === undefined) {
@@ -623,7 +657,7 @@ async function runScenario(
   return {
     instances: normalize([...instances].sort((a, b) => a.id.localeCompare(b.id)), memo),
     runs: normalize([...runs].sort((a, b) => a.id.localeCompare(b.id)), memo),
-    deliveries: delivery.deliveries.map((request) => request.evidence.sourceEventRefs),
+    deliveries: delivery.deliveries.map((request) => request.evidence.sourceEventKeys),
   };
 }
 

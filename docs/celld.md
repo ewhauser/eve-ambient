@@ -16,6 +16,10 @@ durable cell alarm replacing the PostgreSQL `nextEvaluationAt` due scan.
 Nothing else moves: PostgreSQL remains the system of record for event payloads,
 runs, decisions, dead letters, budgets, and audit.
 
+This reference-only celld boundary is transitional. RFC 0001 Phase 3 replaces
+cell appends and evaluator callbacks with complete event envelopes; applications
+should not build a new payload-repository interface around the temporary shape.
+
 ## Architecture
 
 ```text
@@ -43,8 +47,8 @@ reference for evaluation; cells persist references and scheduling metadata.
 
 Appends are idempotent by durable subscription ID, including the case where a
 cell commits but its HTTP response is lost. Runs are written in the same format
-in both mailbox tiers, so `replay()`, `listRuns()`, and `listDeadLetters()` keep
-the same behavior. An idle cell arms cleanup for the monitor's decision
+in both mailbox tiers, so `listRuns()` and `listDeadLetters()` keep the same
+behavior. An idle cell arms cleanup for the monitor's decision
 retention expiry and then removes its instance record and expired append
 receipts durably.
 

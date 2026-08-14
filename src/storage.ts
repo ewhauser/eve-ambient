@@ -10,9 +10,20 @@ import type {
   MonitorInstanceView,
   MonitorPhase,
 } from "./types.js";
+import type {
+  BatchKey,
+  BranchKey,
+  EventKey,
+  InputHash,
+  RunKey,
+} from "./idempotency.js";
 
 export interface StoredEvent {
   readonly ref: string;
+  readonly eventKey: EventKey;
+  /** Unique durable generation for this post-horizon ingress acceptance. */
+  readonly acceptanceId: string;
+  readonly inputHash: InputHash;
   readonly dedupeKey: string;
   readonly tenantId: string;
   readonly applicationId: string;
@@ -45,16 +56,19 @@ export interface StoredDirectDispatch {
 export type SubscriptionStatus =
   | "pending"
   | "processing"
-  | "ready"
-  | "buffered"
-  | "filtered"
-  | "uncorrelated"
-  | "suppressed"
-  | "dead-lettered";
+  | "ready";
 
 export interface StoredSubscription {
   readonly id: string;
-  readonly eventRef: string;
+  readonly branchKey: BranchKey;
+  readonly eventKey: EventKey;
+  readonly acceptanceId: string;
+  readonly eventInputHash: InputHash;
+  readonly inputHash: InputHash;
+  /** Complete branch-owned input; store-mode processing never loads it elsewhere. */
+  readonly event: ChannelEvent<string, JsonValue, JsonValue>;
+  readonly bytes: number;
+  readonly acceptedAt: string;
   readonly tenantId: string;
   readonly applicationId: string;
   readonly monitorId: string;
@@ -72,26 +86,56 @@ export interface StoredSubscription {
   readonly updatedAt: string;
 }
 
-export interface BufferedEventRef {
-  readonly ref: string;
+export interface BufferedEventValue {
   readonly bytes: number;
   readonly acceptedAt: string;
   readonly ingressSequence: string;
 }
 
-export interface OpenMonitorBatch {
-  readonly events: readonly BufferedEventRef[];
+/** Complete event envelope owned by a store mailbox. */
+export interface BufferedEvent extends BufferedEventValue {
+  readonly branchKey: BranchKey;
+  readonly eventKey: EventKey;
+  readonly inputHash: InputHash;
+  readonly event: ChannelEvent<string, JsonValue, JsonValue>;
+}
+
+/** Transitional celld-only value removed by the full-payload celld phase. */
+export interface BufferedEventRef extends BufferedEventValue {
+  readonly ref: string;
+  readonly branchKey: BranchKey;
+  readonly eventKey: EventKey;
+  readonly inputHash: InputHash;
+  readonly phase?: MonitorPhase | undefined;
+}
+
+export interface OpenMonitorBatch<TEvent extends BufferedEventValue = BufferedEvent> {
+  readonly events: readonly TEvent[];
   readonly bytes: number;
   readonly openedAt: string;
   readonly updatedAt: string;
 }
 
-export interface StoredMonitorBatch {
-  readonly events: readonly BufferedEventRef[];
+export interface StoredMonitorBatch<TEvent extends BufferedEventValue = BufferedEvent> {
+  readonly events: readonly TEvent[];
   readonly bytes: number;
   readonly openedAt: string;
   readonly closedAt: string;
   readonly closedBy: MonitorBatchClosedBy;
+}
+
+/** Claimed immutable membership handed to one durable run. */
+export interface FrozenMonitorBatch extends StoredMonitorBatch<BufferedEvent> {
+  readonly batchKey: BatchKey;
+  readonly inputHash: InputHash;
+  readonly eventKeys: readonly EventKey[];
+  readonly frozenAt: string;
+}
+
+/** Durable lineage retained after terminal completion; event payloads are not. */
+export interface FrozenMonitorBatchSummary extends Omit<FrozenMonitorBatch, "events"> {
+  readonly branchKeys: readonly BranchKey[];
+  readonly eventCount: number;
 }
 
 export interface StoredLastDecision {
@@ -101,7 +145,7 @@ export interface StoredLastDecision {
   readonly decidedAt: string;
 }
 
-export interface StoredMonitorInstance {
+export interface StoredMonitorInstance<TEvent extends BufferedEventValue = BufferedEvent> {
   readonly id: string;
   readonly tenantId: string;
   readonly applicationId: string;
@@ -109,8 +153,8 @@ export interface StoredMonitorInstance {
   readonly definitionVersion: string;
   readonly correlationKey: string;
   readonly correlationKeyHash: string;
-  readonly openBatch?: OpenMonitorBatch | undefined;
-  readonly sealedBatches: readonly StoredMonitorBatch[];
+  readonly openBatch?: OpenMonitorBatch<TEvent> | undefined;
+  readonly sealedBatches: readonly StoredMonitorBatch<TEvent>[];
   readonly activeRunId?: string | undefined;
   readonly nextEvaluationAt?: string | undefined;
   readonly evaluationGeneration: number;
@@ -146,13 +190,17 @@ export type MonitorRunStage =
 
 export interface StoredMonitorRun {
   readonly id: string;
+  readonly runKey: RunKey;
+  readonly inputHash: InputHash;
+  readonly eventKeys: readonly EventKey[];
   readonly instanceId: string;
   readonly tenantId: string;
   readonly applicationId: string;
   readonly monitorId: string;
   readonly definitionVersion: string;
   readonly correlationKeyHash: string;
-  readonly batch: StoredMonitorBatch;
+  /** Full while actionable; reduced to lineage and completeness once terminal. */
+  readonly batch: FrozenMonitorBatch | FrozenMonitorBatchSummary;
   readonly mode: MonitorMode;
   readonly instanceView: MonitorInstanceView;
   readonly status: MonitorRunStatus;
@@ -179,8 +227,6 @@ export interface StoredMonitorRun {
     readonly retryAt?: string | undefined;
   } | undefined;
   readonly error?: string | undefined;
-  /** The earliest raw event expiry; live/downstream replay requires this input. */
-  readonly replayExpiresAt: string;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly expiresAt: string;
@@ -192,6 +238,9 @@ export interface StoredDeadLetter {
   readonly applicationId: string;
   readonly monitorId?: string | undefined;
   readonly definitionVersion?: string | undefined;
+  readonly eventKey?: EventKey | undefined;
+  readonly branchKey?: BranchKey | undefined;
+  /** Transitional celld/direct-dispatch reference removed with the event repository. */
   readonly eventRef?: string | undefined;
   readonly subscriptionId?: string | undefined;
   readonly instanceId?: string | undefined;

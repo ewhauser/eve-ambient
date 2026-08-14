@@ -12,6 +12,11 @@ import type {
   UsageReservation,
 } from "./storage.js";
 import { scopedKey } from "./storage.js";
+import {
+  assertIdempotencyInput,
+  parseIdempotencyKey,
+  parseInputHash,
+} from "./idempotency.js";
 import { addMs, cloneJson, iso } from "./util.js";
 
 /** Durable-semantics in-memory store for local development and deterministic tests. */
@@ -257,24 +262,6 @@ export class MemoryMonitorStore implements MonitorStore {
         }
         this.#events.delete(ref);
         this.#eventDedupe.delete(event.dedupeKey);
-        for (const [subscriptionId, subscription] of this.#subscriptions) {
-          if (subscription.eventRef !== ref) continue;
-          if (["pending", "processing", "ready"].includes(subscription.status)) {
-            this.#deadLetters.set(`purge:${subscription.id}`, {
-              id: `purge:${subscription.id}`,
-              tenantId: subscription.tenantId,
-              applicationId: subscription.applicationId,
-              monitorId: subscription.monitorId,
-              definitionVersion: subscription.definitionVersion,
-              eventRef: subscription.eventRef,
-              subscriptionId: subscription.id,
-              stage: "retention",
-              reason: "source dedupe retention expired before subscription completed",
-              createdAt: now,
-            });
-          }
-          this.#subscriptions.delete(subscriptionId);
-        }
         events += 1;
       } else if (event.payloadExpiresAt <= now && event.event !== undefined) {
         this.#events.set(ref, { ...event, event: undefined });
@@ -327,7 +314,18 @@ export class MemoryMonitorStore implements MonitorStore {
         this.#eventDedupe.set(dedupeKey, ref);
       },
       putEvent: async (event) => {
+        parseIdempotencyKey("event", event.eventKey);
+        parseInputHash(event.inputHash);
         const previousRef = this.#eventDedupe.get(event.dedupeKey);
+        const previous = previousRef === undefined ? undefined : this.#events.get(previousRef);
+        if (previous !== undefined) {
+          assertIdempotencyInput({
+            namespace: "memory-ingress",
+            key: event.eventKey,
+            existingInputHash: previous.inputHash,
+            receivedInputHash: event.inputHash,
+          });
+        }
         if (previousRef !== undefined && previousRef !== event.ref) this.#events.delete(previousRef);
         this.#events.set(event.ref, clone(event));
         this.#eventDedupe.set(event.dedupeKey, event.ref);
@@ -337,6 +335,22 @@ export class MemoryMonitorStore implements MonitorStore {
         return value === undefined ? null : clone(value);
       },
       putSubscription: async (subscription) => {
+        parseIdempotencyKey("branch", subscription.branchKey);
+        parseIdempotencyKey("event", subscription.eventKey);
+        parseInputHash(subscription.eventInputHash);
+        parseInputHash(subscription.inputHash);
+        if (subscription.id !== subscription.branchKey) {
+          throw new TypeError("subscription id must equal branchKey");
+        }
+        const existing = this.#subscriptions.get(subscription.id);
+        if (existing !== undefined) {
+          assertIdempotencyInput({
+            namespace: "memory-branch",
+            key: subscription.branchKey,
+            existingInputHash: existing.inputHash,
+            receivedInputHash: subscription.inputHash,
+          });
+        }
         this.#subscriptions.set(subscription.id, clone(subscription));
       },
       deleteSubscription: async (id) => {
@@ -363,6 +377,20 @@ export class MemoryMonitorStore implements MonitorStore {
         return value === undefined ? null : clone(value);
       },
       putRun: async (run) => {
+        parseIdempotencyKey("run", run.runKey);
+        parseInputHash(run.inputHash);
+        const existing = this.#runs.get(run.id);
+        if (existing !== undefined) {
+          if (existing.runKey !== run.runKey) {
+            throw new TypeError(`run ${run.id} changed runKey`);
+          }
+          assertIdempotencyInput({
+            namespace: "memory-run",
+            key: run.runKey,
+            existingInputHash: existing.inputHash,
+            receivedInputHash: run.inputHash,
+          });
+        }
         this.#runs.set(run.id, clone(run));
       },
       putDeadLetter: async (deadLetter) => {

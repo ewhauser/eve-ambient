@@ -1,6 +1,7 @@
 import { createActor, setup, assign } from "xstate";
 import type {
-  BufferedEventRef,
+  BufferedEvent,
+  BufferedEventValue,
   OpenMonitorBatch,
   StoredLastDecision,
   StoredMonitorBatch,
@@ -39,10 +40,10 @@ export interface LifecycleConfig {
   readonly cooldownAfterWakeMs?: number | undefined;
 }
 
-export interface LifecycleContext {
+export interface LifecycleContext<TEvent extends BufferedEventValue = BufferedEventValue> {
   readonly config: LifecycleConfig;
-  readonly openBatch: OpenMonitorBatch | undefined;
-  readonly sealedBatches: readonly StoredMonitorBatch[];
+  readonly openBatch: OpenMonitorBatch<TEvent> | undefined;
+  readonly sealedBatches: readonly StoredMonitorBatch<TEvent>[];
   readonly activeRunId: string | undefined;
   readonly evaluationGeneration: number;
   readonly lastDecision: StoredLastDecision | undefined;
@@ -53,7 +54,7 @@ export interface LifecycleContext {
   readonly binding: MonitorBindingView | undefined;
   /** Transient dispatch outputs; stripped before persistence. */
   readonly lastAppendFlushed: boolean;
-  readonly claimedBatch: StoredMonitorBatch | undefined;
+  readonly claimedBatch: StoredMonitorBatch<TEvent> | undefined;
 }
 
 export type LifecycleRunStatus =
@@ -63,8 +64,8 @@ export type LifecycleRunStatus =
   | "delivered"
   | "unroutable";
 
-export type LifecycleEvent =
-  | { readonly type: "APPEND"; readonly ref: BufferedEventRef; readonly now: string }
+export type LifecycleEvent<TEvent extends BufferedEventValue = BufferedEventValue> =
+  | { readonly type: "APPEND"; readonly event: TEvent; readonly now: string }
   | { readonly type: "CLAIM"; readonly runId: string; readonly now: string }
   | {
       readonly type: "RUN_COMPLETED";
@@ -82,11 +83,11 @@ export type LifecycleEvent =
   | { readonly type: "RUN_FAILED"; readonly now: string };
 
 /** Reproduces the historical due-batch selection, including closedBy causes. */
-function selectDueBatch(
-  context: LifecycleContext,
+function selectDueBatch<TEvent extends BufferedEventValue>(
+  context: LifecycleContext<TEvent>,
   now: string,
 ):
-  | { readonly kind: "sealed"; readonly batch: StoredMonitorBatch }
+  | { readonly kind: "sealed"; readonly batch: StoredMonitorBatch<TEvent> }
   | { readonly kind: "open"; readonly closedBy: MonitorBatchClosedBy }
   | null {
   if (context.cooldownUntil !== undefined && context.cooldownUntil > now) return null;
@@ -104,11 +105,11 @@ function selectDueBatch(
   return { kind: "open", closedBy: maximum <= quiet ? "max-wait" : "quiet-period" };
 }
 
-function closeBatch(
-  open: OpenMonitorBatch,
+function closeBatch<TEvent extends BufferedEventValue>(
+  open: OpenMonitorBatch<TEvent>,
   now: string,
   closedBy: MonitorBatchClosedBy,
-): StoredMonitorBatch {
+): StoredMonitorBatch<TEvent> {
   return {
     events: open.events,
     bytes: open.bytes,
@@ -118,7 +119,11 @@ function closeBatch(
   };
 }
 
-function appendRef(context: LifecycleContext, ref: BufferedEventRef, now: string): Partial<LifecycleContext> {
+function appendEvent<TEvent extends BufferedEventValue>(
+  context: LifecycleContext<TEvent>,
+  event: TEvent,
+  now: string,
+): Partial<LifecycleContext<TEvent>> {
   const buffer = context.config.buffer;
   if (buffer.mode === "immediate") {
     if (context.cooldownUntil !== undefined && context.cooldownUntil > now) {
@@ -126,11 +131,11 @@ function appendRef(context: LifecycleContext, ref: BufferedEventRef, now: string
       return {
         openBatch:
           open === undefined
-            ? { events: [ref], bytes: ref.bytes, openedAt: now, updatedAt: now }
+            ? { events: [event], bytes: event.bytes, openedAt: now, updatedAt: now }
             : {
                 ...open,
-                events: [...open.events, ref],
-                bytes: open.bytes + ref.bytes,
+                events: [...open.events, event],
+                bytes: open.bytes + event.bytes,
                 updatedAt: now,
               },
         eventsSinceLastWake: context.eventsSinceLastWake + 1,
@@ -140,7 +145,7 @@ function appendRef(context: LifecycleContext, ref: BufferedEventRef, now: string
     return {
       sealedBatches: [
         ...context.sealedBatches,
-        { events: [ref], bytes: ref.bytes, openedAt: now, closedAt: now, closedBy: "immediate" },
+        { events: [event], bytes: event.bytes, openedAt: now, closedAt: now, closedBy: "immediate" },
       ],
       eventsSinceLastWake: context.eventsSinceLastWake + 1,
       lastAppendFlushed: true,
@@ -151,7 +156,7 @@ function appendRef(context: LifecycleContext, ref: BufferedEventRef, now: string
   let flushed = false;
   if (
     open !== undefined &&
-    (open.events.length + 1 > buffer.maxEvents! || open.bytes + ref.bytes > buffer.maxBytes!)
+    (open.events.length + 1 > buffer.maxEvents! || open.bytes + event.bytes > buffer.maxBytes!)
   ) {
     const closedBy: MonitorBatchClosedBy =
       open.events.length + 1 > buffer.maxEvents! ? "max-events" : "max-bytes";
@@ -161,11 +166,11 @@ function appendRef(context: LifecycleContext, ref: BufferedEventRef, now: string
   }
   open =
     open === undefined
-      ? { events: [ref], bytes: ref.bytes, openedAt: now, updatedAt: now }
+      ? { events: [event], bytes: event.bytes, openedAt: now, updatedAt: now }
       : {
           ...open,
-          events: [...open.events, ref],
-          bytes: open.bytes + ref.bytes,
+          events: [...open.events, event],
+          bytes: open.bytes + event.bytes,
           updatedAt: now,
         };
   return {
@@ -176,11 +181,11 @@ function appendRef(context: LifecycleContext, ref: BufferedEventRef, now: string
   };
 }
 
-function completeRun(
-  context: LifecycleContext,
+function completeRun<TEvent extends BufferedEventValue>(
+  context: LifecycleContext<TEvent>,
   event: Extract<LifecycleEvent, { type: "RUN_COMPLETED" }>,
-): Partial<LifecycleContext> {
-  let next: LifecycleContext = {
+): Partial<LifecycleContext<TEvent>> {
+  let next: LifecycleContext<TEvent> = {
     ...context,
     activeRunId: undefined,
     claimedBatch: undefined,
@@ -237,7 +242,10 @@ function completeRun(
   return next;
 }
 
-function consolidateBatches(context: LifecycleContext, now: string): LifecycleContext {
+function consolidateBatches<TEvent extends BufferedEventValue>(
+  context: LifecycleContext<TEvent>,
+  now: string,
+): LifecycleContext<TEvent> {
   const events = [
     ...context.sealedBatches.flatMap((batch) => batch.events),
     ...(context.openBatch?.events ?? []),
@@ -261,8 +269,8 @@ function consolidateBatches(context: LifecycleContext, now: string): LifecycleCo
 
 export const instanceLifecycleMachine = setup({
   types: {
-    context: {} as LifecycleContext,
-    events: {} as LifecycleEvent,
+    context: {} as LifecycleContext<BufferedEventValue>,
+    events: {} as LifecycleEvent<BufferedEventValue>,
     input: {} as { readonly config: LifecycleConfig },
   },
   guards: {
@@ -279,7 +287,7 @@ export const instanceLifecycleMachine = setup({
   actions: {
     append: assign(({ context, event }) => {
       if (event.type !== "APPEND") return {};
-      return appendRef(context, event.ref, event.now);
+      return appendEvent(context, event.event, event.now);
     }),
     claim: assign(({ context, event }) => {
       if (event.type !== "CLAIM") return {};
@@ -382,9 +390,9 @@ export function lifecycleConfig(definition: MonitorDefinition<ChannelEvent>): Li
 }
 
 /** Derives the statechart value from durable instance fields at hydration. */
-export function deriveLifecycleValue(
+export function deriveLifecycleValue<TEvent extends BufferedEventValue>(
   instance: Pick<
-    StoredMonitorInstance,
+    StoredMonitorInstance<TEvent>,
     "activeRunId" | "cooldownUntil" | "openBatch" | "sealedBatches"
   >,
   now: string,
@@ -421,10 +429,10 @@ export function computeNextEvaluationAt(
   );
 }
 
-export interface LifecycleDispatchResult {
-  readonly instance: StoredMonitorInstance;
+export interface LifecycleDispatchResult<TEvent extends BufferedEventValue = BufferedEvent> {
+  readonly instance: StoredMonitorInstance<TEvent>;
   readonly flushed: boolean;
-  readonly claimedBatch: StoredMonitorBatch | undefined;
+  readonly claimedBatch: StoredMonitorBatch<TEvent> | undefined;
 }
 
 /**
@@ -433,13 +441,13 @@ export interface LifecycleDispatchResult {
  * `nextEvaluationAt`. Timestamp maintenance (`updatedAt`, `expiresAt`) stays
  * with the caller.
  */
-export function dispatchLifecycle(
-  instance: StoredMonitorInstance,
+export function dispatchLifecycle<TEvent extends BufferedEventValue>(
+  instance: StoredMonitorInstance<TEvent>,
   definition: MonitorDefinition<ChannelEvent>,
-  event: LifecycleEvent,
-): LifecycleDispatchResult {
+  event: LifecycleEvent<TEvent>,
+): LifecycleDispatchResult<TEvent> {
   const config = lifecycleConfig(definition);
-  const context: LifecycleContext = {
+  const context: LifecycleContext<BufferedEventValue> = {
     config,
     openBatch: instance.openBatch,
     sealedBatches: instance.sealedBatches,
@@ -482,8 +490,8 @@ export function dispatchLifecycle(
       eventsSinceLastWake: next.eventsSinceLastWake,
       ...(next.binding === undefined ? {} : { binding: next.binding }),
       nextEvaluationAt: computeNextEvaluationAt(next, event.now),
-    },
+    } as StoredMonitorInstance<TEvent>,
     flushed: next.lastAppendFlushed,
-    claimedBatch: next.claimedBatch,
+    claimedBatch: next.claimedBatch as StoredMonitorBatch<TEvent> | undefined,
   };
 }

@@ -8,7 +8,7 @@ Eve Ambient has four conceptual boundaries:
 2. **Monitors decide what merits cognition.** They filter, correlate, buffer,
    classify, project evidence, and select a registered delivery channel.
 3. **The runtime makes that process durable.** It owns dedupe, leases, timers,
-   budgets, retries, runs, replay, dead letters, and retention.
+   budgets, retries, runs, dead letters, and retention.
 4. **Sessions reason and act.** They receive trusted static instructions and a
    separate immutable evidence snapshot.
 

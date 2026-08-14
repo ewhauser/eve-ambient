@@ -16,8 +16,6 @@ export {
   MonitorRuntime,
   type DrainResult,
   type MonitorRuntimeOptions,
-  type ReplayOptions,
-  type ReplayResult,
 } from "./runtime.js";
 /**
  * Mailbox wire types only. The celld adapter itself — the fetch handler and
@@ -39,7 +37,10 @@ export type {
   StoreMailboxOptions,
 } from "./mailbox.js";
 export type {
-  BufferedEventRef,
+  BufferedEvent,
+  BufferedEventValue,
+  FrozenMonitorBatch,
+  FrozenMonitorBatchSummary,
   MonitorStore,
   MonitorStoreTransaction,
   OpenMonitorBatch,

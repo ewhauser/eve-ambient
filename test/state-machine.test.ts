@@ -5,6 +5,7 @@ import {
   defineChannelEvent,
   defineInboundChannel,
   defineMonitor,
+  deriveEventKey,
   ignore,
   MonitorRuntime,
   TransientMonitorError,
@@ -60,12 +61,12 @@ describe("buffering, cooldown, quotas, and failures", () => {
     await runtime.drain();
     expect(delivery.deliveries).toHaveLength(1);
     expect(delivery.deliveries[0]?.evidence.completeness.closedBy).toBe("max-events");
-    expect(delivery.deliveries[0]?.evidence.sourceEventRefs).toHaveLength(2);
+    expect(delivery.deliveries[0]?.evidence.sourceEventKeys).toHaveLength(2);
 
     clock.advance(10_000);
     await runtime.drain();
     expect(delivery.deliveries).toHaveLength(2);
-    expect(delivery.deliveries[1]?.evidence.sourceEventRefs).toHaveLength(1);
+    expect(delivery.deliveries[1]?.evidence.sourceEventKeys).toHaveLength(1);
   });
 
   it("dead-letters an individually oversized monitor event without blocking another key", async () => {
@@ -115,7 +116,7 @@ describe("buffering, cooldown, quotas, and failures", () => {
     await runtime.drain();
     expect(decision).toHaveBeenCalledTimes(2);
     expect(delivery.deliveries).toHaveLength(2);
-    expect(delivery.deliveries[1]?.evidence.sourceEventRefs).toHaveLength(2);
+    expect(delivery.deliveries[1]?.evidence.sourceEventKeys).toHaveLength(2);
     expect(delivery.deliveries[1]?.evidence.completeness.closedBy).toBe("cooldown-expired");
   });
 
@@ -216,18 +217,10 @@ describe("buffering, cooldown, quotas, and failures", () => {
     );
   });
 
-  it("keeps mailbox order when later pure preprocessing completes first", async () => {
+  it("keeps mailbox order with branch-owned payloads", async () => {
     const clock = new VirtualMonitorClock();
     const delivery = new MemoryConversationChannel({ id: "delivery", clock });
     const store = new MemoryMonitorStore();
-    const getEvent = store.getEvent.bind(store);
-    vi.spyOn(store, "getEvent").mockImplementation(async (ref) => {
-      const value = await getEvent(ref);
-      if (value?.eventId === "first") {
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
-      return value;
-    });
     const monitor = baseMonitor(delivery, { id: "ordered", correlate: () => "same" });
     const runtime = await createRuntime(clock, delivery, monitor, { store });
     await runtime.publishChat(channel, "message", input("first", "same", "first"), []);
@@ -237,13 +230,14 @@ describe("buffering, cooldown, quotas, and failures", () => {
       { keys: ["same"] },
       { keys: ["same"] },
     ]);
-    expect(delivery.deliveries.map((request) => request.evidence.sourceEventRefs[0])).toEqual([
-      expect.stringContaining("evt_"),
-      expect.stringContaining("evt_"),
-    ]);
-    const accepted = delivery.deliveries.map((request) => request.evidence.sourceEventRefs[0]);
-    expect((await store.getEvent(accepted[0]!))?.eventId).toBe("first");
-    expect((await store.getEvent(accepted[1]!))?.eventId).toBe("second");
+    const accepted = delivery.deliveries.map((request) => request.evidence.sourceEventKeys[0]);
+    await expect(Promise.all(["first", "second"].map((sourceEventId) => deriveEventKey({
+      tenantId: "tenant-a",
+      applicationId: "app-a",
+      channelId: "chat",
+      installationId: "install-a",
+      sourceEventId,
+    })))).resolves.toEqual(accepted);
   });
 
   it("does not let a cardinality-blocked key stall an existing mailbox", async () => {
@@ -578,7 +572,8 @@ function deliveryRequest(id: string): MonitorDeliveryRequest<{ room: string; thr
       id: `evidence-${id}`,
       runId: id,
       createdAt: "2026-01-01T00:00:00.000Z",
-      sourceEventRefs: [id],
+      runKey: id,
+      sourceEventKeys: [id],
       projectedEvidence: { id },
       decision: { action: "wake", reason: "useful" },
       completeness: {
@@ -598,6 +593,7 @@ function deliveryRequest(id: string): MonitorDeliveryRequest<{ room: string; thr
       monitorId: "test",
       definitionVersion: "v1",
       runId: id,
+      runKey: id,
       correlationKeyHash: "hash",
       evidenceSnapshotId: `evidence-${id}`,
       sourceTypes: ["message"],

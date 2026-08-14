@@ -275,8 +275,9 @@ export type MonitorModelInvoker = (request: MonitorModelRequest) => Promise<Moni
 export interface MonitorEvidenceSnapshot {
   readonly id: string;
   readonly runId: string;
+  readonly runKey: string;
   readonly createdAt: string;
-  readonly sourceEventRefs: readonly string[];
+  readonly sourceEventKeys: readonly string[];
   readonly projectedEvidence: JsonValue;
   readonly decision: MonitorDecision;
   readonly completeness: MonitorBatchView;
@@ -288,6 +289,7 @@ export interface MonitorSessionTrigger {
   readonly monitorId: string;
   readonly definitionVersion: string;
   readonly runId: string;
+  readonly runKey: string;
   readonly correlationKeyHash: string;
   readonly evidenceSnapshotId: string;
   readonly sourceTypes: readonly string[];
@@ -493,7 +495,10 @@ export interface MonitorLifecycleEvent {
   readonly definitionVersion?: string | undefined;
   readonly correlationKeyHash?: string | undefined;
   readonly eventRef?: string | undefined;
+  readonly eventKey?: string | undefined;
+  readonly branchKey?: string | undefined;
   readonly runId?: string | undefined;
+  readonly runKey?: string | undefined;
   readonly attributes?: Readonly<Record<string, JsonPrimitive>> | undefined;
 }
 

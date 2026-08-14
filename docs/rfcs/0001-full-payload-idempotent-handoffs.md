@@ -1,7 +1,7 @@
 # RFC: Full-Payload, End-to-End Idempotent Event Handoffs
 
 - Status: Accepted
-- Implementation: Planned in follow-up pull requests
+- Implementation: Phases 1 and 2 implemented; later transport phases pending
 - Scope: End-to-end protocol across Eve Ambient ingress, fan-out, mailboxes, evaluation, session delivery, and final actions
 - Related: `ewhauser/eve-ambient` issue #3
 
@@ -253,7 +253,7 @@ Keys SHOULD use domain-separated SHA-256 over a versioned canonical encoding. Ex
 ```text
 eventKey  = H("eve:event:v1", tenant, application, channel, installation, sourceEventId)
 
-branchKey = H("eve:branch:v1", eventKey, monitorId, definitionVersion, phase)
+branchKey = H("eve:branch:v1", eventKey, acceptanceId, monitorId, definitionVersion, phase)
 
 batchKey  = H("eve:batch:v1", instanceId, orderedDistinctBranchKeys)
 
@@ -265,6 +265,12 @@ turnKey   = H("eve:turn:v1", bindingGeneration, orderedDistinctIngressKeys)
 
 actionKey = H("eve:action:v1", turnKey, durableActionCallId)
 ```
+
+`acceptanceId` is the durable ingress-receipt generation. Matching retries
+reuse it. If the source receipt horizon has ended and the provider identity is
+accepted as new work, ingress mints a new generation so descendant keys cannot
+collide with still-retained receipts from an earlier acceptance. It is not a
+transport attempt or payload reference.
 
 Canonical encoding MUST be unambiguous and versioned. Concatenating strings with a delimiter is insufficient unless escaping and type boundaries are formally defined.
 
@@ -797,6 +803,7 @@ Obsolete types, methods, schema objects, tests, and documentation are removed di
 - Replace buffered references with full event envelopes.
 - Make batches and runs self-contained and assign `batchKey` only at membership freeze/claim.
 - Remove evaluator payload lookup.
+- Remove the replay API and reduce terminal batches to lineage/completeness metadata.
 - Preserve existing filtering, correlation, ordering, batching, cooldown, and deployment pinning behavior.
 
 ### Phase 3: Celld by value
@@ -813,7 +820,7 @@ Obsolete types, methods, schema objects, tests, and documentation are removed di
 - Add SQS full-message consume/delete semantics.
 - Validate each adapter against the same idempotency and failure-injection suite.
 - Remove central event payload APIs and storage dependencies.
-- Remove replay and event-retention capabilities.
+- Remove remaining central event-retention capabilities.
 - Remove ref-resolution tests and documentation.
 - Retain backend-native retention documentation only as operational guidance.
 

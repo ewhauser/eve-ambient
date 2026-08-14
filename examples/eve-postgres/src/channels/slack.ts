@@ -1,40 +1,59 @@
 import {
-  defineChannelEvent,
-  defineInboundChannel,
-  type ChannelEvent,
-  type PublishEventInput,
+  defineChannelCanonicalization,
+  type CanonicalChannelEvent,
 } from "@ewhauser/eve-ambient";
-import type { EveDeliveryTarget } from "@ewhauser/eve-ambient-eve";
 import { z } from "zod";
 
-export const slackMessageSchema = z.object({
+export const slackMessageInputSchema = z.object({
+  eventId: z.string().min(1),
+  installationId: z.string().min(1),
+  tenantId: z.string().min(1),
+  occurredAt: z.string().datetime(),
   channelId: z.string().min(1),
-  messageTs: z.string().min(1),
+  incidentId: z.string().min(1),
   severity: z.enum(["info", "warning", "critical"]),
   text: z.string().min(1),
-  threadTs: z.string().min(1).optional(),
+  threadTs: z.string().min(1),
 });
 
-export type SlackMessageData = z.infer<typeof slackMessageSchema>;
-export type SlackMessageEvent = ChannelEvent<
-  "message",
-  SlackMessageData,
-  EveDeliveryTarget
->;
-export type SlackMessageInput = PublishEventInput<
-  SlackMessageData,
-  EveDeliveryTarget
+export type SlackMessageInput = z.infer<typeof slackMessageInputSchema>;
+export type SlackMessageEvent = CanonicalChannelEvent<
+  "slack.message",
+  {
+    readonly channelId: string;
+    readonly incidentId: string;
+    readonly severity: "info" | "warning" | "critical";
+    readonly text: string;
+    readonly threadTs: string;
+  },
+  { readonly address: string }
 >;
 
-/** Canonical Slack events emitted by the application's authenticated adapter. */
-export const slackChannel = defineInboundChannel({
-  id: "slack",
-  replyTarget: z.object({ address: z.string().min(1) }),
-  inbound: {
-    message: defineChannelEvent({
-      chat: true,
-      maxBytes: 128_000,
-      schema: slackMessageSchema,
-    }),
+/** The authenticated Slack adapter owns this deterministic normalization. */
+export const slackChannel = defineChannelCanonicalization({
+  version: 1,
+  canonicalize(raw: SlackMessageInput): SlackMessageEvent {
+    const input = slackMessageInputSchema.parse(raw);
+    return {
+      id: input.eventId,
+      type: "slack.message",
+      version: 1,
+      occurredAt: input.occurredAt,
+      data: {
+        channelId: input.channelId,
+        incidentId: input.incidentId,
+        severity: input.severity,
+        text: input.text,
+        threadTs: input.threadTs,
+      },
+      source: {
+        channelId: "slack",
+        installationId: input.installationId,
+        tenantId: input.tenantId,
+      },
+      replyTarget: { address: `slack:${input.channelId}:${input.threadTs}` },
+      subjects: [{ namespace: "incident", key: input.incidentId }],
+      origin: { kind: "external", depth: 0 },
+    };
   },
 });

@@ -1,14 +1,14 @@
 # RFC: Durable Attention Engine
 
 - Status: Accepted
-- Implementation: Protocol, v2 lineage, fan-out validation, memory reference
-  engine, and shared conformance suite implemented; celld, PostgreSQL, direct
-  adapter split, and clean replacement pending
+- Implementation: Complete in PR #20: protocol, shared workflow reducer,
+  memory/PostgreSQL/celld engines, direct-adapter split, examples, and clean
+  replacement all implemented
 - Scope: Replace the public store-and-runtime persistence model with one
   durable attention-engine command and two application callbacks
 - Preserves: RFC 0001 full-payload custody, idempotency lineage, membership
   freezes, and no-replay guarantees
-- Supersedes if accepted: The current `MonitorStore`, `MonitorRuntime`, public
+- Supersedes: The former `MonitorStore`, `MonitorRuntime`, public
   persistence records, and shared storage topology
 - Related: [RFC 0001](0001-full-payload-idempotent-handoffs.md),
   `ewhauser/eve-ambient` issue #3
@@ -763,17 +763,17 @@ custody, or downstream action lineage, RFC 0001 controls.
 
 ## Implementation plan
 
-This RFC should be implemented in reviewable pull requests:
+This RFC was implemented in reviewable stages:
 
-1. **Protocol and reference model.** Add `occurrenceKey`, the pure fan-out
+1. **Protocol and reference model.** Added `occurrenceKey`, the pure fan-out
    compiler, `AttentionEngine`, callback types, a memory engine, and the shared
    conformance suite.
-2. **celld engine.** Add event-coordinator and correlation workflows, the
+2. **celld engine.** Added event-coordinator and correlation workflows, the
    two-stage authenticated callback protocol, failure tests, and a celld-only
    example with no PostgreSQL dependency.
-3. **PostgreSQL engine.** Implement the same protocol with private schema and
+3. **PostgreSQL engine.** Implemented the same protocol with private schema and
    worker APIs and run the shared conformance suite.
-4. **Clean replacement.** Remove `MonitorStore`, `MonitorRuntime`, public
+4. **Clean replacement.** Removed `MonitorStore`, `MonitorRuntime`, public
    persistence records, old migrations, conditional direct-dispatch state,
    global ingress sequence, built-in budgets, and portable run/dead-letter
    queries. Rewrite documentation and examples around the engine boundary.

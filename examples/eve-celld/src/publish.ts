@@ -1,14 +1,10 @@
-import { type MonitorRuntime } from "@ewhauser/eve-ambient";
+import { githubChannel, type PullRequestInput } from "./channels/github.js";
+import type { EveCelldApplication } from "./runtime.js";
 
-import {
-  githubChannel,
-  type PullRequestChangedInput,
-} from "./channels/github.js";
-
-/** Publishes one normalized GitHub event after webhook verification. */
-export function publishPullRequestChanged(
-  runtime: MonitorRuntime,
-  input: PullRequestChangedInput,
+/** Acknowledge the GitHub webhook only after this promise resolves. */
+export function publishPullRequest(
+  application: EveCelldApplication,
+  input: PullRequestInput,
 ) {
-  return runtime.publish(githubChannel, "pull-request-changed", input);
+  return application.publisher.publish(githubChannel, input);
 }

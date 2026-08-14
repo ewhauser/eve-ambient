@@ -14,8 +14,10 @@ export const packages = new Map([
       requiredFiles: [
         "dist/index.d.ts",
         "dist/index.js",
-        "dist/ai-sdk.d.ts",
-        "dist/ai-sdk.js",
+        "dist/application.d.ts",
+        "dist/application.js",
+        "dist/coordinator.d.ts",
+        "dist/coordinator.js",
         "dist/celld.d.ts",
         "dist/celld.js",
         "dist/celld-worker.d.ts",
@@ -26,7 +28,9 @@ export const packages = new Map([
         "dist/postgres.js",
         "dist/testing.d.ts",
         "dist/testing.js",
-        "migrations/001_eve_ambient.sql",
+        "dist/workflow.d.ts",
+        "dist/workflow.js",
+        "migrations/001_attention_engine.sql",
         "celld-worker/README.md",
         "celld-worker/build.mjs",
         "celld-worker/index.ts",
@@ -127,6 +131,21 @@ function parsePackOutput(output, packagePath) {
 function validateContents(packagePath, expected, packResult) {
   const paths = new Set(packResult.files.map((file) => file.path));
   const missing = expected.requiredFiles.filter((file) => !paths.has(file));
+  const legacyAmbientFiles = new Set([
+    "dist/ai-sdk.d.ts",
+    "dist/ai-sdk.js",
+    "dist/definition.d.ts",
+    "dist/definition.js",
+    "dist/instance-machine.d.ts",
+    "dist/instance-machine.js",
+    "dist/mailbox.d.ts",
+    "dist/mailbox.js",
+    "dist/runtime.d.ts",
+    "dist/runtime.js",
+    "dist/storage.d.ts",
+    "dist/storage.js",
+    "migrations/001_eve_ambient.sql",
+  ]);
   const forbidden = [...paths].filter(
     (file) =>
       file === ".env" ||
@@ -135,7 +154,8 @@ function validateContents(packagePath, expected, packResult) {
       file.startsWith("celld-worker/build/") ||
       file.startsWith("node_modules/") ||
       file.startsWith("src/") ||
-      file.startsWith("test/"),
+      file.startsWith("test/") ||
+      (packagePath === "packages/ambient" && legacyAmbientFiles.has(file)),
   );
 
   if (missing.length > 0 || forbidden.length > 0) {

@@ -1,115 +1,53 @@
-# `@ewhauser/eve-ambient-eve`
+# @ewhauser/eve-ambient-eve
 
-Official Eve delivery adapter for `@ewhauser/eve-ambient`.
-
-The adapter sends the complete monitor delivery or direct-dispatch event to an
-Eve channel address and passes the stable `wakeKey` or `directDispatchKey` as
-Eve's channel-delivery idempotency key. It does not store event payloads and it
-does not add replay.
-
-## Compatibility
-
-| Adapter | Core | Eve | Required patch |
-|---|---|---|---|
-| `0.x` | `>=0.4.0 <1` | exactly `0.38.1` | `patches/eve@0.38.1.patch` |
-
-The Eve version is exact because the patch changes private compiled workflow
-code. Do not use a semver range for Eve, and do not carry the patch forward to
-another Eve release without rebuilding and running this repository's
-conformance suite.
-
-`eve@0.38.1-source.patch` is included beside the installable package patch for
-human review and future upgrades. Consumers register only
-`eve@0.38.1.patch`, because the npm package contains compiled output rather
-than Eve's TypeScript sources.
-
-## Install and apply the patch
-
-A dependency cannot activate pnpm's patch configuration in its consuming
-workspace. Every application must copy and register the patch itself:
+The official Eve delivery adapter for `@ewhauser/eve-ambient`.
 
 ```sh
 pnpm add @ewhauser/eve-ambient @ewhauser/eve-ambient-eve eve@0.38.1
-mkdir -p patches
-cp node_modules/@ewhauser/eve-ambient-eve/patches/eve@0.38.1.patch patches/
 ```
 
-Add this to the application's `pnpm-workspace.yaml`:
+The adapter targets exactly Eve `0.38.1`. Consumers must apply the included
+`patches/eve@0.38.1.patch` for `vercel/eve#1842`; the patch makes Eve's durable
+session admission honor the supplied idempotency key.
 
-```yaml
-patchedDependencies:
-  "eve@0.38.1": patches/eve@0.38.1.patch
-```
-
-Then recreate the affected package and verify the public type:
-
-```sh
-pnpm install --force
-rg "idempotencyKey" node_modules/eve/dist/src/channel/channel-operations.d.ts
-```
-
-CI should run that verification after every frozen install. A missing patch is
-a correctness failure: the adapter must not silently fall back to an unkeyed
-Eve send.
-
-## Monitor delivery
-
-Create the adapter inside an Eve channel route or receive hook, where Eve
-provides `from`:
+## Attention route
 
 ```ts
-import { createEveDeliveryChannel } from "@ewhauser/eve-ambient-eve";
+import { createEveAttentionRoute } from "@ewhauser/eve-ambient-eve";
 
-const delivery = createEveDeliveryChannel({
-  from,
-  auth: null,
+const eveRoute = createEveAttentionRoute({
+  id: "eve",
+  from: channelFrom,
+  address: wake => `agent:${wake.tenantId}`,
+  auth: wake => authForTenant(wake.tenantId),
 });
 ```
 
-Use `delivery` in the core runtime's `deliveryChannels` and route monitors to
-the channel id `eve`. An `EveDeliveryTarget` is a complete JSON value:
+Use the route with `createAttentionCallbacks({ rules, routes: [eveRoute] })`.
+It serializes trusted instructions separately from untrusted evidence and maps
+the prepared wake's `wakeKey` directly to Eve's `idempotencyKey`. A retry of
+the same recorded wake therefore reaches the same durable Eve turn.
+
+Customize `renderMessage` only when the replacement preserves the trust
+boundary and complete lineage needed by the receiving agent.
+
+## Direct dispatch
 
 ```ts
-const target = { address: "monitor:incident-42" };
-```
+import { createEveDirectDispatchAdapter } from "@ewhauser/eve-ambient-eve";
 
-The default renderer serializes trusted task instructions and untrusted
-evidence into separately labelled fields. Applications can provide
-`renderMessage` when their agent expects another complete by-value envelope.
-
-## Direct chat dispatch
-
-`createEveDirectDispatchHandler` sends the full canonical event and uses the
-core-provided `directDispatchKey` as the Eve delivery key:
-
-```ts
-import { createEveDirectDispatchHandler } from "@ewhauser/eve-ambient-eve";
-
-const direct = createEveDirectDispatchHandler({
-  from,
-  auth: null,
-  address: ({ event }) => {
-    const target = event.replyTarget;
-    return typeof target === "object" &&
-      target !== null &&
-      !Array.isArray(target) &&
-      typeof target.address === "string"
-      ? target.address
-      : undefined;
-  },
+const direct = createEveDirectDispatchAdapter({
+  from: channelFrom,
+  address: request => `agent:${request.tenantId}`,
+  auth: request => authForTenant(request.tenantId),
 });
 ```
 
-## Guarantee boundary
+Direct chat delivery is not part of the attention workflow. Configure it as
+the publisher's optional `direct.adapter`. The adapter maps the request's
+stable direct-dispatch key to Eve's admission key and returns an idempotent
+receipt containing the matching key and input hash.
 
-The carried patch deduplicates delivery admission while the Eve channel
-address is owned by its durable conversation session. The address/session
-lifetime is therefore the supported admission horizon. A retry outside that
-horizon may create a new session and must be outside the application's stated
-idempotency window.
-
-This package carries lineage through Eve admission; it does not make arbitrary
-external tools idempotent. A final durable action must derive its own stable
-`actionKey` from the admitted cause key and use a destination idempotency API,
-reconciliation key, or transactional inbox/outbox. See
-[`RFC 0001`](https://github.com/ewhauser/eve-ambient/blob/main/docs/rfcs/0001-full-payload-idempotent-handoffs.md).
+This package stores no events or workflow state. Durable correlation and
+prepared-wake retry belong to the selected attention engine; durable final
+admission belongs to Eve.

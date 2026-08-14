@@ -1,62 +1,107 @@
-import { describe, expect, it } from "vitest";
-import { MonitorRuntime } from "@ewhauser/eve-ambient";
-import { MemoryMonitorStore } from "@ewhauser/eve-ambient/memory";
 import {
-  MemoryConversationChannel,
-  VirtualMonitorClock,
-} from "@ewhauser/eve-ambient/testing";
-import type { EveDeliveryTarget } from "@ewhauser/eve-ambient-eve";
-
+  createAmbientPublisher,
+  createAttentionCallbacks,
+} from "@ewhauser/eve-ambient";
+import { MemoryAttentionEngine } from "@ewhauser/eve-ambient/memory";
+import { VirtualMonitorClock } from "@ewhauser/eve-ambient/testing";
+import { createEveAttentionRoute } from "@ewhauser/eve-ambient-eve";
+import type { ChannelFrom, ChannelSendOptions } from "eve/channels";
+import { expect, it } from "vitest";
 import { githubChannel } from "../src/channels/github.js";
-import { publishPullRequestChanged } from "../src/publish.js";
 import { blockedPullRequestRule } from "../src/rules/blocked-pull-request.js";
 
-describe("blockedPullRequestRule", () => {
-  it("wakes Eve for the latest blocking GitHub state", async () => {
-    const clock = new VirtualMonitorClock();
-    const delivery = new MemoryConversationChannel<EveDeliveryTarget>({
-      clock,
-      id: "eve",
-    });
-    const runtime = new MonitorRuntime({
-      applicationId: "developer-productivity-agent",
-      channels: [githubChannel],
-      clock,
-      deliveryChannels: [delivery],
-      deployment: { monitors: [blockedPullRequestRule(delivery)] },
-      store: new MemoryMonitorStore(),
-    });
-    await runtime.initialize();
-
-    await publishPullRequestChanged(runtime, {
-      data: {
-        failingChecks: ["test"],
-        mergeState: "conflicting",
-        number: 1842,
-        repository: "vercel/eve",
-        reviewDecision: "changes-requested",
-        state: "open",
-        title: "Carry channel delivery idempotency",
-        updatedAt: "2026-08-14T18:00:00.000Z",
-      },
-      id: "github-delivery-123",
-      installationId: "github-installation-42",
-      origin: { kind: "external" },
-      replyTarget: { address: "github:vercel/eve:pull:1842" },
-      tenantId: "acme",
-    });
-    await runtime.drain();
-    clock.advance(10_000);
-    await runtime.drain();
-
-    expect(delivery.deliveries).toHaveLength(1);
-    expect(delivery.deliveries[0]).toMatchObject({
-      target: { address: "github:vercel/eve:pull:1842" },
-      evidence: {
-        projectedEvidence: {
-          blockers: ["changes-requested", "check:test", "merge-conflict"],
-        },
-      },
-    });
+it("publishes a GitHub channel rule into one idempotent Eve wake", async () => {
+  const deliveries: Array<{ message: string; options: ChannelSendOptions }> = [];
+  const from = (() => ({
+    async send(message: string, options: ChannelSendOptions) {
+      deliveries.push({ message, options });
+      return { id: "session-1" };
+    },
+  })) as unknown as ChannelFrom;
+  const clock = new VirtualMonitorClock();
+  const route = createEveAttentionRoute({ id: "eve", auth: null, address: "pull-request", from });
+  const callbacks = createAttentionCallbacks({
+    rules: [blockedPullRequestRule],
+    routes: [route],
+    clock,
   });
+  const engine = new MemoryAttentionEngine({ callbacks, clock });
+  const publisher = createAmbientPublisher({
+    applicationId: "engineering-agent",
+    engine,
+    rules: [blockedPullRequestRule],
+  });
+
+  const receipt = await publisher.publish(githubChannel, {
+    eventId: "delivery-1",
+    installationId: "github-installation",
+    tenantId: "tenant-1",
+    repository: "ewhauser/eve-ambient",
+    number: 20,
+    title: "Replace the attention runtime",
+    state: "open",
+    mergeState: "clean",
+    reviewDecision: "review-required",
+    failingChecks: ["ci"],
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  });
+  clock.advance(60_000);
+  await engine.runDue();
+
+  expect(receipt.attention.branchKeys).toHaveLength(1);
+  expect(deliveries).toHaveLength(1);
+  expect(deliveries[0]?.options.idempotencyKey).toMatch(/^eve:wake:v2:/);
+  expect(JSON.parse(deliveries[0]?.message ?? "").evidence.value.failingChecks).toEqual(["ci"]);
+});
+
+it("lets a later clean channel event suppress a debounced blocked wake", async () => {
+  const deliveries: string[] = [];
+  const from = (() => ({
+    async send(message: string) {
+      deliveries.push(message);
+      return { id: "session-1" };
+    },
+  })) as unknown as ChannelFrom;
+  const clock = new VirtualMonitorClock();
+  const route = createEveAttentionRoute({ id: "eve", auth: null, address: "pull-request", from });
+  const callbacks = createAttentionCallbacks({
+    rules: [blockedPullRequestRule],
+    routes: [route],
+    clock,
+  });
+  const engine = new MemoryAttentionEngine({ callbacks, clock });
+  const publisher = createAmbientPublisher({
+    applicationId: "engineering-agent",
+    engine,
+    rules: [blockedPullRequestRule],
+  });
+  const base = {
+    installationId: "github-installation",
+    tenantId: "tenant-1",
+    repository: "ewhauser/eve-ambient",
+    number: 20,
+    title: "Replace the attention runtime",
+    state: "open" as const,
+  };
+
+  await publisher.publish(githubChannel, {
+    ...base,
+    eventId: "delivery-blocked",
+    mergeState: "conflicting",
+    reviewDecision: "changes-requested",
+    failingChecks: ["ci"],
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  });
+  await publisher.publish(githubChannel, {
+    ...base,
+    eventId: "delivery-clean",
+    mergeState: "clean",
+    reviewDecision: "approved",
+    failingChecks: [],
+    updatedAt: "2026-01-01T00:00:30.000Z",
+  });
+  clock.advance(60_000);
+
+  await expect(engine.runDue()).resolves.toMatchObject({ ignored: 1 });
+  expect(deliveries).toHaveLength(0);
 });

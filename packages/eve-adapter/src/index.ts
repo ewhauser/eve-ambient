@@ -1,48 +1,121 @@
-import {
-  BindingConflictError,
-  type DirectDispatchHandler,
-  type DirectDispatchRequest,
-  type JsonValue,
-  type MonitorBindingView,
-  type MonitorDeliveryChannel,
-  type MonitorDeliveryRequest,
+import type {
+  AttentionRoute,
+  DirectDispatchAdapter,
+  DirectDispatchRequest,
+  JsonValue,
+  PreparedAttentionWake,
 } from "@ewhauser/eve-ambient";
-import type { ChannelFrom, ChannelSendOptions, Session } from "eve/channels";
+import type { ChannelFrom, ChannelSendOptions } from "eve/channels";
 
 export const SUPPORTED_EVE_VERSION = "0.38.1" as const;
 export const EVE_PATCH_FILE = "patches/eve@0.38.1.patch" as const;
 
-export type EveDeliveryTarget = Readonly<{
-  address: string;
-}>;
-
 export type EveChannelAuth = ChannelSendOptions["auth"];
 
-export interface EveDeliveryChannelOptions {
-  readonly auth:
-    | EveChannelAuth
-    | ((request: MonitorDeliveryRequest<EveDeliveryTarget>) => EveChannelAuth);
-  readonly binding?: (
-    request: MonitorDeliveryRequest<EveDeliveryTarget>,
-    session: Session,
-  ) => MonitorBindingView;
+export interface EveAttentionRouteOptions {
+  readonly id?: string | undefined;
+  readonly auth: EveChannelAuth | ((wake: PreparedAttentionWake) => EveChannelAuth);
+  readonly address: string | ((wake: PreparedAttentionWake) => string);
   readonly from: ChannelFrom;
-  readonly id?: string;
-  readonly renderMessage?: (
-    request: MonitorDeliveryRequest<EveDeliveryTarget>,
-  ) => string;
+  readonly renderMessage?: ((wake: PreparedAttentionWake) => string) | undefined;
 }
 
 export interface EveDirectDispatchOptions {
-  readonly address: (request: DirectDispatchRequest) => string | undefined;
   readonly auth:
     | EveChannelAuth
     | ((request: DirectDispatchRequest) => EveChannelAuth);
+  readonly address: string | ((request: DirectDispatchRequest) => string);
   readonly from: ChannelFrom;
-  readonly renderMessage?: (request: DirectDispatchRequest) => string;
+  readonly renderMessage?: ((request: DirectDispatchRequest) => string) | undefined;
+  readonly now?: (() => Date) | undefined;
 }
 
-function resolveValue<TRequest, TValue>(
+/** Renders trusted task instructions separately from untrusted evidence. */
+export function renderEveAttentionMessage(wake: PreparedAttentionWake): string {
+  return JSON.stringify({
+    kind: "eve-ambient.attention",
+    applicationId: wake.applicationId,
+    tenantId: wake.tenantId,
+    monitorId: wake.monitorId,
+    definitionVersion: wake.definitionVersion,
+    correlationKey: wake.correlationKey,
+    wakeKey: wake.wakeKey,
+    runKey: wake.runKey,
+    batchKey: wake.batchKey,
+    rootEventKeys: wake.rootEventKeys,
+    task: {
+      trust: "application",
+      instruction: wake.instruction,
+    },
+    decision: wake.decision,
+    evidence: {
+      trust: "untrusted",
+      value: wake.evidence,
+    },
+  });
+}
+
+/** Final Ambient route: `wakeKey` becomes Eve's durable session admission key. */
+export function createEveAttentionRoute(
+  options: EveAttentionRouteOptions,
+): AttentionRoute {
+  return {
+    id: options.id ?? "eve",
+    async deliver(wake): Promise<JsonValue> {
+      const address = nonEmpty(resolve(options.address, wake), "Eve attention address");
+      const session = await options.from(address).send(
+        (options.renderMessage ?? renderEveAttentionMessage)(wake),
+        {
+          auth: resolve(options.auth, wake),
+          idempotencyKey: wake.wakeKey,
+          turnPolicy: "queue",
+        },
+      );
+      return { address, sessionId: session.id, turnId: wake.wakeKey };
+    },
+  };
+}
+
+export function renderEveDirectDispatchMessage(
+  request: DirectDispatchRequest,
+): string {
+  return JSON.stringify({
+    kind: "eve-ambient.direct-dispatch",
+    applicationId: request.applicationId,
+    tenantId: request.tenantId,
+    eventKey: request.eventKey,
+    occurrenceKey: request.occurrenceKey,
+    idempotencyKey: request.idempotencyKey,
+    event: request.event,
+  });
+}
+
+/** Adapter-owned direct chat boundary, independent of the attention engine. */
+export function createEveDirectDispatchAdapter(
+  options: EveDirectDispatchOptions,
+): DirectDispatchAdapter {
+  return {
+    async dispatch(request) {
+      const address = nonEmpty(resolve(options.address, request), "Eve direct address");
+      const session = await options.from(address).send(
+        (options.renderMessage ?? renderEveDirectDispatchMessage)(request),
+        {
+          auth: resolve(options.auth, request),
+          idempotencyKey: request.idempotencyKey,
+          turnPolicy: "queue",
+        },
+      );
+      return {
+        idempotencyKey: request.idempotencyKey,
+        inputHash: request.inputHash,
+        dispatchedAt: (options.now ?? (() => new Date()))().toISOString(),
+        result: { address, sessionId: session.id, turnId: request.idempotencyKey },
+      };
+    },
+  };
+}
+
+function resolve<TRequest, TValue>(
   value: TValue | ((request: TRequest) => TValue),
   request: TRequest,
 ): TValue {
@@ -51,126 +124,9 @@ function resolveValue<TRequest, TValue>(
     : value;
 }
 
-function canonicalBindingRef(address: string): string {
-  return `eve:channel-address:${address}`;
-}
-
-function assertBinding(request: MonitorDeliveryRequest<EveDeliveryTarget>): string {
-  const bindingRef = canonicalBindingRef(request.target.address);
-  if (request.bindingRef !== undefined && request.bindingRef !== bindingRef) {
-    throw new BindingConflictError(
-      `Eve address ${JSON.stringify(request.target.address)} resolves to ${JSON.stringify(bindingRef)}, not existing binding ${JSON.stringify(request.bindingRef)}`,
-    );
+function nonEmpty(value: string, name: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new TypeError(`${name} must not be empty`);
   }
-  return bindingRef;
+  return value;
 }
-
-/**
- * Renders one complete monitor handoff while keeping trusted task text visibly
- * separate from untrusted evidence inside Eve's user-message boundary.
- */
-export function renderEveMonitorMessage(
-  request: MonitorDeliveryRequest<EveDeliveryTarget>,
-): string {
-  return JSON.stringify({
-    applicationId: request.applicationId,
-    auth: request.auth,
-    bindingRef: request.bindingRef,
-    correlationSubject: request.correlationSubject,
-    kind: "eve-ambient.monitor-delivery",
-    idempotencyKey: request.idempotencyKey,
-    session: request.session,
-    task: {
-      trust: "application",
-      instructions: request.taskInstructions,
-    },
-    target: request.target,
-    tenantId: request.tenantId,
-    evidence: {
-      trust: "untrusted",
-      value: request.evidence,
-    },
-    trigger: request.trigger,
-  });
-}
-
-/** Delivers wake keys into Eve's durable channel-address inbox. */
-export function createEveDeliveryChannel(
-  options: EveDeliveryChannelOptions,
-): MonitorDeliveryChannel<EveDeliveryTarget> {
-  return {
-    id: options.id ?? "eve",
-    async deliver(request) {
-      const bindingRef = assertBinding(request);
-      const session = await options.from(request.target.address).send(
-        (options.renderMessage ?? renderEveMonitorMessage)(request),
-        {
-          auth: resolveValue(options.auth, request),
-          idempotencyKey: request.idempotencyKey,
-          turnPolicy: "queue",
-        },
-      );
-      const binding =
-        options.binding?.(request, session) ?? {
-          agentHasParticipated: false,
-          bindingRef,
-          status: "active" as const,
-        };
-      if (binding.bindingRef !== bindingRef) {
-        throw new BindingConflictError(
-          `Eve binding projection returned ${JSON.stringify(binding.bindingRef)}, expected ${JSON.stringify(bindingRef)}`,
-        );
-      }
-
-      return {
-        binding,
-        outcome: "accepted",
-        sessionId: session.id,
-        // Eve does not expose its internal turn id from ChannelSource.send().
-        // The admission key is the stable public identity for this delivery.
-        turnId: request.idempotencyKey,
-      };
-    },
-  };
-}
-
-/** Renders the complete canonical event for direct chat dispatch. */
-export function renderEveDirectDispatchMessage(request: DirectDispatchRequest): string {
-  return JSON.stringify({
-    applicationId: request.applicationId,
-    kind: "eve-ambient.direct-dispatch",
-    event: request.event,
-    eventKey: request.eventKey,
-    idempotencyKey: request.idempotencyKey,
-    inputHash: request.inputHash,
-    tenantId: request.tenantId,
-  });
-}
-
-/**
- * Creates a direct-dispatch handler that returns null only when the application
- * has no Eve address for the full event payload.
- */
-export function createEveDirectDispatchHandler(
-  options: EveDirectDispatchOptions,
-): DirectDispatchHandler {
-  return async (request) => {
-    const address = options.address(request);
-    if (address === undefined) return null;
-
-    await options.from(address).send(
-      (options.renderMessage ?? renderEveDirectDispatchMessage)(request),
-      {
-        auth: resolveValue(options.auth, request),
-        idempotencyKey: request.idempotencyKey,
-        turnPolicy: "queue",
-      },
-    );
-    return { turnId: request.idempotencyKey };
-  };
-}
-
-// Compile-time assertion: EveDeliveryTarget is a durable JSON value accepted
-// by the provider-independent core boundary.
-const _targetIsJson: JsonValue = { address: "example" } satisfies EveDeliveryTarget;
-void _targetIsJson;

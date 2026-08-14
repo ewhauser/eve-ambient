@@ -1,153 +1,85 @@
-# Postgres-first deployment
+# PostgreSQL attention engine
 
-The Postgres-first profile is the supported default and the recommended place
-to start. PostgreSQL stores ingress receipts, full branch handoffs, correlation
-mailboxes, timers, actionable runs, decisions, dead letters, budgets, dedupe
-tombstones, and deployment identity. Branch and run event bodies are ephemeral:
-they are removed after their next durable handoff or terminal completion.
+The PostgreSQL backend implements the durable attention protocol with private
+per-event coordinator rows and per-correlation workflow rows. PostgreSQL is
+required only when this backend is selected.
 
-There is no sleeping workflow or resident actor for each active key. Short-lived
-workers claim work using durable leases, process different keys concurrently,
-and serialize work for the same key.
+## Install the private schema
 
-## Install and migrate
+Apply `packages/ambient/migrations/001_attention_engine.sql` with the same
+migration mechanism used by the application. It creates:
 
-```sh
-pnpm add @ewhauser/eve-ambient
-```
+- `eve_ambient_event_coordinators`, keyed by `(engine_id, event_key)`; and
+- `eve_ambient_correlation_workflows`, keyed by
+  `(engine_id, instance_key)` with a due-work index.
 
-Apply `migrations/001_eve_ambient.sql` before initializing the runtime. The
-package accepts a `pg`-compatible pool without forcing a particular PostgreSQL
-client dependency.
+The JSON state contains complete payloads only while work is active. These
+tables are not an event repository, audit schema, history API, or replay
+surface. They are private to this implementation and may change between major
+versions.
+
+## Run the backend
 
 ```ts
-import { MonitorRuntime } from "@ewhauser/eve-ambient";
-import { PostgresMonitorStore } from "@ewhauser/eve-ambient/postgres";
+import { createAttentionCallbacks } from "@ewhauser/eve-ambient";
+import { PostgresAttentionEngine } from "@ewhauser/eve-ambient/postgres";
 
-const runtime = new MonitorRuntime({
-  applicationId: "engineering-agent",
-  deployment: { monitors },
-  channels,
-  deliveryChannels,
-  store: new PostgresMonitorStore({ pool }),
-  modelInvoker,
-  observer,
+const callbacks = createAttentionCallbacks({ rules, routes });
+const engine = new PostgresAttentionEngine({
+  engineId: "support-agent",
+  pool,
+  callbacks,
 });
 
-await runtime.initialize();
+await engine.initialize();
 ```
 
-Initialization validates the deployment and its durable monitor identities. Do
-not change monitor IDs or definition versions as if they were stateless labels;
-see [Definition rollout](operations-and-security.md#definition-identity-and-rollout).
-
-## Push ingress
-
-After verifying the provider request, normalize and publish the event:
+`initialize()` verifies that the migration is present; it does not create or
+upgrade tables. The publisher calls `accept()`. One or more workers poll due
+work:
 
 ```ts
-const result = await runtime.publish(datadogEvents, "alert.changed", {
-  tenantId,
-  installationId,
-  id: deliveryId,
-  occurredAt: alert.timestamp,
-  data: alert,
-  subjects: [{ namespace: "service", key: alert.service }],
-  origin: { kind: "external" },
-});
+setInterval(() => {
+  void engine.runOnce({ limit: 100 });
+}, 250);
 ```
 
-`publish()` returns after the payload-free ingress receipt and complete matching
-branch snapshots commit atomically.
-It does not wait for filtering, a model, or an agent turn. A pull consumer may
-commit its source offset after `accepted` or `duplicate`. Retry an ambiguous
-outcome with the same stable provider event ID.
+Production workers should use their normal scheduler, cancellation, error
+reporting, and backoff rather than an unobserved interval.
 
-## Chat direct dispatch
+## Transaction and callback boundary
 
-Use `publishChat()` for chat events. The acceptance transaction freezes the
-direct-dispatch operation and writes both observed branches and complete
-conditional undispatched branches. The conditional branches cannot be drained
-until all direct handlers return no durable turn receipt; a dispatched or failed
-outcome removes them.
+Advisory transaction locks serialize one event coordinator or correlation
+workflow. Transactions validate and checkpoint state; they do not surround
+application callbacks.
 
-```ts
-const result = await runtime.publishChat(
-  slackEvents,
-  "message",
-  normalized,
-  {
-    bindingGeneration: directRouter.generation,
-    handlers: directHandlers,
-  },
-);
-```
+The worker sequence is:
 
-Provider acknowledgement must remain outside this completion path: acknowledge
-according to the channel deadline, then let direct dispatch finish durably. A
-failed or unknown direct outcome is dead-lettered and never emits
-`undispatched`.
+1. claim and commit a run lease;
+2. call `prepare()` outside the transaction;
+3. validate and commit the prepared result;
+4. call `deliver()` outside the transaction; and
+5. validate and commit its receipt.
 
-Each handler receives `{ idempotencyKey, inputHash, event, ... }`. It must
-deduplicate the full-payload turn command by `idempotencyKey`, which is the
-stable `directDispatchKey`. `bindingGeneration` identifies the handler/binding
-plan and must change when that plan changes. `publishChat()` durably leases an
-attempt, and a duplicate resumes it after a worker crash or
-`TransientMonitorError`. The result includes `directDispatchKey` and reports
-`pending` while a lease or retry backoff is active; otherwise it returns the
-persisted `dispatched`, `undispatched`, or `failed` outcome.
+This boundary is why the PostgreSQL implementation needs both migrations and a
+state machine. A process may stop between any two steps. The state records
+which exact operation is safe to retry while avoiding a database transaction
+across network or model work.
 
-## Run workers
+Database checkpoint failures are not counted as rule or delivery failures.
+They abort the transaction and leave the last committed workflow state for the
+next worker.
 
-Call `drain()` from short-lived workers or a frequent scheduler:
+## Scaling and retention
 
-```ts
-const result = await runtime.drain();
-```
+Different event and instance keys proceed independently. Multiple workers may
+poll the due index; per-key advisory locks and run leases prevent concurrent
+state transitions. Hot correlation keys remain serialized by design.
 
-`drain()` advances accepted subscriptions through filtering and correlation,
-updates mailboxes, claims due batches, runs decisions, materializes evidence,
-and delivers wakes. Claims use leases so another worker can recover abandoned
-work. Due scans are fair across tenants, and different correlation keys run in
-parallel.
+Completed event coordinators and branch/delivery receipts expire after
+`dedupeMs`. Terminal workflow cleanup deletes complete event and prepared-wake
+payloads. `diagnostics()` returns aggregate payload-free counts for tests and
+operations; it cannot retrieve event values.
 
-PostgreSQL uses point reads, an indexed tenant-cardinality count, and a global
-sequence behind a lightweight per-domain commit-order fence. The ingress
-transaction does not scan instance state or update one sequence row per tenant.
-
-## Scaling
-
-There is intentionally no universal events-per-second claim. Measure with the
-deployment's actual:
-
-- payload sizes and source-event rate;
-- subscriptions per event and filter selectivity;
-- correlation-key cardinality and hot-key distribution;
-- immediate versus debounce buffer policy;
-- decision and delivery latency;
-- database hardware, connection limits, storage, and tuning; and
-- worker, subscription, and evaluation concurrency.
-
-Scale workers and PostgreSQL first. Consider a separate durable ingress log
-when partitioned ingestion or independent source retention is a requirement. Consider
-celld when the measured bottleneck is per-key serialization, due scans, or
-mailbox advisory-lock traffic—not simply because the raw ingress rate is high.
-
-See [Deployment options](deployment-options.md) for the complete comparison.
-
-## Production checklist
-
-- Apply the migration through the application's normal schema-change process.
-- Give every provider event a stable scoped ID and retry ambiguous acceptance.
-- Run enough drain workers to meet the desired filter and evaluation latency.
-- Export `MonitorLifecycleEvent` telemetry and alert on delivery failures and
-  dead-letter growth.
-- Call `purgeExpired()` on a schedule compatible with configured retention.
-- Test delivery-channel idempotency and conversation-binding conflicts.
-- Exercise new canary input through the normal ingress path before a rollout.
-- Back up PostgreSQL according to the decision, receipt, lineage, and audit
-  recovery requirements of the application; terminal event payloads are not
-  retained for recovery.
-
-More failure and trust boundaries are documented in
-[Operations and security](operations-and-security.md).
+Set `EVE_AMBIENT_POSTGRES_URL` when running the package conformance suite to
+exercise this backend against a real PostgreSQL database.

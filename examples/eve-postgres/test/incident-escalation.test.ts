@@ -1,59 +1,53 @@
-import { describe, expect, it } from "vitest";
-import { MonitorRuntime } from "@ewhauser/eve-ambient";
-import { MemoryMonitorStore } from "@ewhauser/eve-ambient/memory";
 import {
-  MemoryConversationChannel,
-  VirtualMonitorClock,
-} from "@ewhauser/eve-ambient/testing";
-import type { EveDeliveryTarget } from "@ewhauser/eve-ambient-eve";
-
+  createAmbientPublisher,
+  createAttentionCallbacks,
+} from "@ewhauser/eve-ambient";
+import { MemoryAttentionEngine } from "@ewhauser/eve-ambient/memory";
+import { VirtualMonitorClock } from "@ewhauser/eve-ambient/testing";
+import { createEveAttentionRoute } from "@ewhauser/eve-ambient-eve";
+import type { ChannelFrom, ChannelSendOptions } from "eve/channels";
+import { expect, it } from "vitest";
 import { slackChannel } from "../src/channels/slack.js";
-import { publishSlackMessage } from "../src/publish.js";
 import { incidentEscalationRule } from "../src/rules/incident-escalation.js";
 
-describe("incidentEscalationRule", () => {
-  it("wakes Eve for a critical Slack thread with complete evidence", async () => {
-    const clock = new VirtualMonitorClock();
-    const delivery = new MemoryConversationChannel<EveDeliveryTarget>({
-      clock,
-      id: "eve",
-    });
-    const runtime = new MonitorRuntime({
-      applicationId: "engineering-agent",
-      channels: [slackChannel],
-      clock,
-      deliveryChannels: [delivery],
-      deployment: { monitors: [incidentEscalationRule(delivery)] },
-      store: new MemoryMonitorStore(),
-    });
-    await runtime.initialize();
-
-    await publishSlackMessage(runtime, {
-      actor: { id: "U123", principalType: "user" },
-      data: {
-        channelId: "C123",
-        messageTs: "1723651200.000100",
-        severity: "critical",
-        text: "SEV-1: checkout is unavailable",
-      },
-      id: "slack-event-123",
-      installationId: "slack-workspace-T1",
-      origin: { kind: "external" },
-      replyTarget: { address: "slack:C123:1723651200.000100" },
-      tenantId: "acme",
-    });
-    await runtime.drain();
-    clock.advance(2_000);
-    await runtime.drain();
-
-    expect(delivery.deliveries).toHaveLength(1);
-    expect(delivery.deliveries[0]).toMatchObject({
-      target: { address: "slack:C123:1723651200.000100" },
-      evidence: {
-        projectedEvidence: {
-          signals: ["critical-severity", "incident-language"],
-        },
-      },
-    });
+it("publishes a Slack rule into one idempotent Eve wake", async () => {
+  const deliveries: Array<{ message: string; options: ChannelSendOptions }> = [];
+  const from = (() => ({
+    async send(message: string, options: ChannelSendOptions) {
+      deliveries.push({ message, options });
+      return { id: "session-1" };
+    },
+  })) as unknown as ChannelFrom;
+  const route = createEveAttentionRoute({ id: "eve", auth: null, address: "incident", from });
+  const clock = new VirtualMonitorClock();
+  const callbacks = createAttentionCallbacks({
+    rules: [incidentEscalationRule],
+    routes: [route],
+    clock,
   });
+  const engine = new MemoryAttentionEngine({ callbacks, clock });
+  const publisher = createAmbientPublisher({
+    applicationId: "engineering-agent",
+    engine,
+    rules: [incidentEscalationRule],
+  });
+
+  const receipt = await publisher.publish(slackChannel, {
+    eventId: "event-1",
+    installationId: "slack-installation",
+    tenantId: "tenant-1",
+    occurredAt: "2026-01-01T00:00:00.000Z",
+    channelId: "C123",
+    incidentId: "incident-42",
+    severity: "critical",
+    text: "database unavailable",
+    threadTs: "1700000000.000001",
+  });
+  clock.advance(30_000);
+  await engine.runDue();
+
+  expect(receipt.attention.branchKeys).toHaveLength(1);
+  expect(deliveries).toHaveLength(1);
+  expect(deliveries[0]?.options.idempotencyKey).toMatch(/^eve:wake:v2:/);
+  expect(JSON.parse(deliveries[0]?.message ?? "").evidence.value.messages).toHaveLength(1);
 });

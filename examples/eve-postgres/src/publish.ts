@@ -1,21 +1,10 @@
-import {
-  type DirectDispatchOptions,
-  type MonitorRuntime,
-} from "@ewhauser/eve-ambient";
+import { slackChannel, type SlackMessageInput } from "./channels/slack.js";
+import type { EvePostgresApplication } from "./runtime.js";
 
-import {
-  slackChannel,
-  type SlackMessageInput,
-} from "./channels/slack.js";
-
-/** Publishes one normalized Slack event after the provider request is verified. */
+/** Acknowledge the Slack transport only after this promise resolves. */
 export function publishSlackMessage(
-  runtime: MonitorRuntime,
+  application: EvePostgresApplication,
   input: SlackMessageInput,
-  direct: DirectDispatchOptions = {
-    bindingGeneration: "example:no-direct-handler:v1",
-    handlers: [],
-  },
 ) {
-  return runtime.publishChat(slackChannel, "message", input, direct);
+  return application.publisher.publish(slackChannel, input);
 }

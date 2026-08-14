@@ -1,54 +1,17 @@
-# Eve + celld example
+# Eve + celld attention engine
 
-This private workspace applies the experimental full-payload celld composition
-to a concrete high-volume rule:
+This private workspace shows a typed GitHub channel event and ambient rule
+running on the celld `AttentionEngine` with no PostgreSQL dependency.
 
-- [`src/channels/github.ts`](src/channels/github.ts) declares a canonical
-  `pull-request-changed` event and its complete Eve target;
-- [`src/rules/blocked-pull-request.ts`](src/rules/blocked-pull-request.ts)
-  correlates each repository/PR, absorbs webhook bursts, and wakes Eve only for
-  current conflicts, requested changes, or failing checks; and
-- [`src/publish.ts`](src/publish.ts) publishes verified webhook values against
-  that declared channel.
+1. Deploy the packaged worker with the configuration in
+   `packages/ambient/celld-worker/`.
+2. Build the application with `createEveCelldApplication()`.
+3. Mount `application.handleCallbacks` at `/ambient/prepare` and
+   `/ambient/deliver`.
+4. Pass authenticated GitHub deliveries to `publishPullRequest()`.
 
-PostgreSQL still owns definitions, runs, receipts, and audit state; a cell owns
-complete mailbox payloads after its append receipt. Neither tier exposes event
-lookup or replay.
-
-See the core [celld guide](../../docs/celld.md) for deployment and the
-[`@ewhauser/eve-ambient-eve` README](../../packages/eve-adapter/README.md) for
-the required Eve patch.
-
-```ts
-const runtime = createEveCelldRuntime({
-  applicationId: "developer-productivity-agent",
-  eve: { auth: null, from },
-  mailbox: {
-    mode: "celld",
-    fleetUrl: "https://ambient-cells.example.com",
-    evaluatorUrl: "https://ambient-evaluator.example.com",
-    secret: process.env.EVALUATOR_SECRET!,
-  },
-  pool,
-});
-
-await runtime.initialize();
-await publishPullRequestChanged(runtime, {
-  tenantId: "acme",
-  installationId: "github-installation-42",
-  id: "github-delivery-123",
-  data: {
-    failingChecks: ["test"],
-    mergeState: "clean",
-    number: 1842,
-    repository: "vercel/eve",
-    reviewDecision: "review-required",
-    state: "open",
-    title: "Carry channel delivery idempotency",
-    updatedAt: "2026-08-14T18:00:00.000Z",
-  },
-  replyTarget: { address: "github:vercel/eve:pull:1842" },
-  origin: { kind: "external" },
-});
-await runtime.drain();
-```
+Event-coordinator cells freeze fan-out. Correlation cells hold complete branch
+and batch values, drive alarms, record prepared outcomes before delivery, and
+delete terminal payloads. Their only application calls are authenticated
+by-value `prepare` and `deliver` callbacks. There is no PostgreSQL pool, event
+repository, payload lookup, history, or replay API.

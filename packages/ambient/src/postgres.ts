@@ -1,821 +1,611 @@
-import type {
-  MonitorStore,
-  MonitorStoreTransaction,
-  StoredDeadLetter,
-  StoredDefinitionPin,
-  StoredDeployment,
-  StoredIngressReceipt,
-  StoredMonitorInstance,
-  StoredMonitorRun,
-  StoredSubscription,
-  SubscriptionStatus,
-} from "./storage.js";
-import { scopedKey } from "./storage.js";
 import {
-  assertIdempotencyInput,
-  parseIdempotencyKey,
-  parseInputHash,
+  AttentionCapacityError,
+  validateAcceptedFanout,
+  validateFullAttentionBranch,
+  type AcceptedFanout,
+  type AttentionAcceptanceReceipt,
+  type AttentionCallbacks,
+  type AttentionEngine,
+  type FullAttentionBranch,
+} from "./attention.js";
+import {
+  completeEventCoordinator,
+  createEventCoordinator,
+  eventCoordinatorExpired,
+  markCoordinatorBranchAccepted,
+  pendingCoordinatorBranches,
+  validateEventCoordinatorRetry,
+  type EventCoordinatorState,
+} from "./coordinator.js";
+import {
+  deriveAttentionInstanceKey,
+  hashIdempotencyInput,
+  IdempotencyConflictError,
+  type AttentionInstanceKey,
+  type EventKey,
 } from "./idempotency.js";
-import { TransientMonitorError } from "./types.js";
-import { addMs } from "./util.js";
+import type {
+  MemoryAttentionDiagnostics,
+  MemoryAttentionEngineFaults,
+  MemoryAttentionEngineOptions,
+  MemoryAttentionRunResult,
+} from "./memory-engine.js";
+import type { MonitorClock } from "./types.js";
+import {
+  AttentionCallbackValidationError,
+  appendAttentionBranch,
+  applyAttentionDeliveryReceipt,
+  applyPreparedAttentionOutcome,
+  claimAttentionRun,
+  createAttentionWorkflow,
+  failAttentionRun,
+  isCurrentAttentionClaim,
+  nextAttentionDueAt,
+  purgeAttentionWorkflow,
+  type AttentionWorkflowState,
+} from "./workflow.js";
 
-export interface PostgresQueryResult<TRow extends Record<string, unknown> = Record<string, unknown>> {
+const DEFAULT_DEDUPE_MS = 7 * 24 * 60 * 60 * 1_000;
+const DEFAULT_RETRY_DELAY_MS = 1_000;
+const DEFAULT_CLAIM_LEASE_MS = 30_000;
+const DEFAULT_MAX_ATTEMPTS = 10;
+const DEFAULT_MAX_BRANCHES = 1_000;
+const DEFAULT_MAX_FANOUT_BYTES = 16 * 1_024 * 1_024;
+const DEFAULT_MAX_PREPARED_WAKE_BYTES = 1 * 1_024 * 1_024;
+
+export interface PostgresQueryResult<TRow = Record<string, unknown>> {
   readonly rows: readonly TRow[];
   readonly rowCount?: number | null | undefined;
 }
 
-export interface PostgresQueryable {
-  query<TRow extends Record<string, unknown> = Record<string, unknown>>(
+export interface PostgresClient {
+  query<TRow = Record<string, unknown>>(
     text: string,
     values?: readonly unknown[],
   ): Promise<PostgresQueryResult<TRow>>;
+  release?(): void;
 }
 
-export interface PostgresClient extends PostgresQueryable {
-  release(): void;
-}
-
-export interface PostgresPool extends PostgresQueryable {
+export interface PostgresPool extends PostgresClient {
   connect(): Promise<PostgresClient>;
 }
 
-/**
- * Co-located PostgreSQL implementation of every `MonitorStore` responsibility,
- * using row data plus advisory-locked transactions for cross-facet atomicity.
- */
-export class PostgresMonitorStore implements MonitorStore {
-  readonly #pool: PostgresPool;
-  readonly #schema: string;
+export interface PostgresAttentionEngineOptions
+  extends Omit<MemoryAttentionEngineOptions, "callbacks" | "faults"> {
+  readonly pool: PostgresPool;
+  readonly callbacks: AttentionCallbacks;
+  /** Namespaces independent applications in the private backend tables. */
+  readonly engineId?: string | undefined;
+}
 
-  constructor(options: { readonly pool: PostgresPool; readonly schema?: string | undefined }) {
+interface Limits {
+  readonly dedupeMs: number;
+  readonly retryDelayMs: number;
+  readonly claimLeaseMs: number;
+  readonly maxAttempts: number;
+  readonly maxBranches: number;
+  readonly maxFanoutBytes: number;
+  readonly maxPreparedWakeBytes: number;
+}
+
+interface StateRow<T> {
+  readonly state: T | string;
+}
+
+interface WorkflowMutation<T> {
+  readonly result: T;
+  readonly workflow?: AttentionWorkflowState | undefined;
+  readonly delete?: boolean | undefined;
+}
+
+/** Scalable per-event/per-correlation PostgreSQL AttentionEngine. */
+export class PostgresAttentionEngine implements AttentionEngine {
+  readonly #pool: PostgresPool;
+  readonly #callbacks: AttentionCallbacks;
+  readonly #clock: MonitorClock;
+  readonly #engineId: string;
+  readonly #limits: Limits;
+  readonly #faults: MemoryAttentionEngineFaults;
+
+  constructor(
+    options: PostgresAttentionEngineOptions,
+    internal: { readonly faults?: MemoryAttentionEngineFaults | undefined } = {},
+  ) {
+    if (
+      options?.pool === undefined ||
+      typeof options.pool.query !== "function" ||
+      typeof options.pool.connect !== "function"
+    ) {
+      throw new TypeError("PostgresAttentionEngine requires a pg-compatible pool");
+    }
+    if (
+      options.callbacks === null ||
+      typeof options.callbacks !== "object" ||
+      typeof options.callbacks.prepare !== "function" ||
+      typeof options.callbacks.deliver !== "function"
+    ) {
+      throw new TypeError("attention callbacks must define prepare and deliver");
+    }
     this.#pool = options.pool;
-    this.#schema = sqlIdentifier(options.schema ?? "public");
+    this.#callbacks = options.callbacks;
+    this.#clock = options.clock ?? { now: () => new Date() };
+    this.#engineId = nonEmpty(options.engineId ?? "default", "engineId");
+    this.#limits = {
+      dedupeMs: positiveInteger(options.dedupeMs ?? DEFAULT_DEDUPE_MS, "dedupeMs"),
+      retryDelayMs: positiveInteger(
+        options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS,
+        "retryDelayMs",
+      ),
+      claimLeaseMs: positiveInteger(
+        options.claimLeaseMs ?? DEFAULT_CLAIM_LEASE_MS,
+        "claimLeaseMs",
+      ),
+      maxAttempts: positiveInteger(options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS, "maxAttempts"),
+      maxBranches: positiveInteger(options.maxBranches ?? DEFAULT_MAX_BRANCHES, "maxBranches"),
+      maxFanoutBytes: positiveInteger(
+        options.maxFanoutBytes ?? DEFAULT_MAX_FANOUT_BYTES,
+        "maxFanoutBytes",
+      ),
+      maxPreparedWakeBytes: positiveInteger(
+        options.maxPreparedWakeBytes ?? DEFAULT_MAX_PREPARED_WAKE_BYTES,
+        "maxPreparedWakeBytes",
+      ),
+    };
+    this.#faults = internal.faults ?? {};
   }
 
-  async transaction<T>(
-    lockKey: string,
-    callback: (tx: MonitorStoreTransaction) => Promise<T>,
-  ): Promise<T> {
-    const client = await connectPostgres(this.#pool);
+  async initialize(): Promise<void> {
     try {
-      await postgresQuery(client, "BEGIN");
-      await postgresQuery(client, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [lockKey]);
-      const result = await callback(new PostgresTransaction(client, this.#schema));
-      await postgresQuery(client, "COMMIT");
+      await this.#pool.query("SELECT event_key FROM eve_ambient_event_coordinators LIMIT 0");
+      await this.#pool.query("SELECT instance_key FROM eve_ambient_correlation_workflows LIMIT 0");
+    } catch (error) {
+      throw new Error(
+        `PostgreSQL attention schema is unavailable; apply migrations/001_attention_engine.sql: ${message(error)}`,
+        { cause: error },
+      );
+    }
+  }
+
+  async accept(input: AcceptedFanout): Promise<AttentionAcceptanceReceipt> {
+    const proposed = await validateAcceptedFanout(input);
+    const client = await acquire(this.#pool);
+    try {
+      let coordinator = await this.#ensureCoordinator(client, proposed);
+      if (coordinator.receipt !== undefined) return clone(coordinator.receipt);
+      for (;;) {
+        const branch = pendingCoordinatorBranches(coordinator)[0];
+        if (branch === undefined) break;
+        await this.#faults.beforeBranchAppend?.(clone(branch));
+        await this.#appendBranch(client, branch);
+        await this.#faults.afterBranchAppend?.(clone(branch));
+        coordinator = await this.#mutateCoordinator(
+          client,
+          proposed.eventKey,
+          (current) => {
+            markCoordinatorBranchAccepted(current, branch.branchKey);
+            return current;
+          },
+        );
+      }
+      coordinator = await this.#mutateCoordinator(client, proposed.eventKey, (current) => {
+        if (current.receipt === undefined) {
+          completeEventCoordinator(current, {
+            now: this.#now(),
+            dedupeMs: this.#limits.dedupeMs,
+          });
+        }
+        return current;
+      });
+      if (coordinator.receipt === undefined) throw new Error("event coordinator did not complete");
+      return clone(coordinator.receipt);
+    } finally {
+      client.release?.();
+    }
+  }
+
+  async runOnce(
+    options: { readonly limit?: number | undefined } = {},
+  ): Promise<MemoryAttentionRunResult> {
+    const limit = positiveInteger(options.limit ?? 100, "limit");
+    const client = await acquire(this.#pool);
+    try {
+      await this.#cleanupExpiredCoordinators(client);
+      const due = await client.query<{ readonly instance_key: string }>(
+        `SELECT instance_key
+           FROM eve_ambient_correlation_workflows
+          WHERE engine_id = $1 AND next_due_at <= $2::timestamptz
+          ORDER BY next_due_at, instance_key
+          LIMIT $3`,
+        [this.#engineId, this.#now(), limit],
+      );
+      const result = {
+        claimed: 0,
+        ignored: 0,
+        shadowed: 0,
+        delivered: 0,
+        failed: 0,
+        terminalFailures: 0,
+      };
+      for (const row of due.rows) {
+        const outcome = await this.#processOne(client, row.instance_key as AttentionInstanceKey);
+        if (outcome === "none") continue;
+        result.claimed += 1;
+        if (outcome === "ignored") result.ignored += 1;
+        if (outcome === "shadowed") result.shadowed += 1;
+        if (outcome === "delivered") result.delivered += 1;
+        if (outcome === "failed") result.failed += 1;
+        if (outcome === "terminal-failure") result.terminalFailures += 1;
+      }
+      return result;
+    } finally {
+      client.release?.();
+    }
+  }
+
+  async diagnostics(): Promise<MemoryAttentionDiagnostics> {
+    const client = await acquire(this.#pool);
+    try {
+      await this.#cleanupExpiredCoordinators(client);
+      const coordinators = await client.query<StateRow<EventCoordinatorState>>(
+        `SELECT state FROM eve_ambient_event_coordinators WHERE engine_id = $1`,
+        [this.#engineId],
+      );
+      const workflowRows = await client.query<StateRow<AttentionWorkflowState>>(
+        `SELECT state FROM eve_ambient_correlation_workflows WHERE engine_id = $1`,
+        [this.#engineId],
+      );
+      const workflows: AttentionWorkflowState[] = [];
+      for (const row of workflowRows.rows) {
+        const workflow = parseState<AttentionWorkflowState>(row.state);
+        if (purgeAttentionWorkflow(workflow, this.#now()) !== "empty") workflows.push(workflow);
+      }
+      const eventStates = coordinators.rows.map((row) => parseState<EventCoordinatorState>(row.state));
+      return {
+        eventCoordinators: eventStates.length,
+        pendingFanoutPayloads: eventStates.filter((state) => state.fanout !== undefined).length,
+        acceptanceReceipts: eventStates.filter((state) => state.receipt !== undefined).length,
+        correlationWorkflows: workflows.length,
+        bufferedBranchPayloads: workflows.reduce(
+          (count, workflow) =>
+            count +
+            (workflow.open?.branches.length ?? 0) +
+            workflow.sealed.reduce((sum, batch) => sum + batch.branches.length, 0),
+          0,
+        ),
+        activeBatchPayloads: workflows.reduce(
+          (count, workflow) => count + (workflow.active?.batch.branches.length ?? 0),
+          0,
+        ),
+        preparedWakePayloads: workflows.filter((workflow) => workflow.active?.wake !== undefined)
+          .length,
+        branchReceipts: workflows.reduce(
+          (count, workflow) => count + workflow.branchLedger.length,
+          0,
+        ),
+        deliveryReceipts: workflows.reduce(
+          (count, workflow) => count + workflow.deliveryReceipts.length,
+          0,
+        ),
+        terminalFailures: workflows.reduce(
+          (count, workflow) => count + workflow.terminalFailures.length,
+          0,
+        ),
+      };
+    } finally {
+      client.release?.();
+    }
+  }
+
+  async #ensureCoordinator(
+    client: PostgresClient,
+    proposed: AcceptedFanout,
+  ): Promise<EventCoordinatorState> {
+    return this.#transaction(client, `event:${proposed.eventKey}`, async () => {
+      let current = await this.#loadCoordinator(client, proposed.eventKey, true);
+      const now = this.#now();
+      if (current !== undefined && eventCoordinatorExpired(current, now)) {
+        await this.#checkpointQuery(
+          client,
+          `DELETE FROM eve_ambient_event_coordinators WHERE engine_id = $1 AND event_key = $2`,
+          [this.#engineId, proposed.eventKey],
+        );
+        current = undefined;
+      }
+      if (current === undefined) {
+        current = createEventCoordinator(proposed, {
+          now,
+          maxBranches: this.#limits.maxBranches,
+          maxFanoutBytes: this.#limits.maxFanoutBytes,
+        });
+        await this.#saveCoordinator(client, current);
+      } else {
+        validateEventCoordinatorRetry(current, proposed);
+      }
+      return clone(current);
+    });
+  }
+
+  async #mutateCoordinator(
+    client: PostgresClient,
+    eventKey: EventKey,
+    mutate: (state: EventCoordinatorState) => EventCoordinatorState,
+  ): Promise<EventCoordinatorState> {
+    return this.#transaction(client, `event:${eventKey}`, async () => {
+      const current = await this.#loadCoordinator(client, eventKey, true);
+      if (current === undefined) throw new Error("event coordinator disappeared before completion");
+      const next = mutate(current);
+      await this.#saveCoordinator(client, next);
+      return clone(next);
+    });
+  }
+
+  async #appendBranch(client: PostgresClient, input: FullAttentionBranch): Promise<void> {
+    const branch = await validateFullAttentionBranch(input);
+    const instanceKey = await deriveAttentionInstanceKey({
+      applicationId: branch.applicationId,
+      tenantId: branch.tenantId,
+      monitorId: branch.monitorId,
+      definitionVersion: branch.definitionVersion,
+      correlationKey: branch.correlationKey,
+    });
+    const policyHash = await hashIdempotencyInput({ mode: branch.mode, policy: branch.policy });
+    await this.#mutateWorkflow(client, instanceKey, async (current) => {
+      const workflow = current ?? createAttentionWorkflow({ instanceKey, branch, policyHash });
+      appendAttentionBranch(workflow, branch, {
+        now: this.#now(),
+        dedupeMs: this.#limits.dedupeMs,
+        policyHash,
+      });
+      return { result: undefined, workflow };
+    });
+  }
+
+  async #processOne(
+    client: PostgresClient,
+    instanceKey: AttentionInstanceKey,
+  ): Promise<"none" | "ignored" | "shadowed" | "delivered" | "failed" | "terminal-failure"> {
+    const claimed = await this.#mutateWorkflow(client, instanceKey, async (workflow) => {
+      if (workflow === undefined) return { result: undefined, delete: true };
+      if (purgeAttentionWorkflow(workflow, this.#now()) === "empty") {
+        return { result: undefined, delete: true };
+      }
+      const active = await claimAttentionRun(workflow, {
+        now: this.#now(),
+        leaseMs: this.#limits.claimLeaseMs,
+      });
+      return { result: active === undefined ? undefined : clone(active), workflow };
+    });
+    if (claimed === undefined) return "none";
+    let failureStage = claimed.stage;
+    try {
+      if (claimed.stage === "preparing") {
+        const prepared = await this.#callbacks.prepare(deepFreeze(clone(claimed.batch)));
+        const transition = await this.#mutateWorkflow(client, instanceKey, async (workflow) => {
+          if (!isCurrentAttentionClaim(workflow, claimed, "preparing")) {
+            return { result: "stale" as const, workflow };
+          }
+          const result = await applyPreparedAttentionOutcome(workflow, prepared, {
+            now: this.#now(),
+            dedupeMs: this.#limits.dedupeMs,
+            maxPreparedWakeBytes: this.#limits.maxPreparedWakeBytes,
+          });
+          return { result, workflow };
+        });
+        if (transition === "stale") return "none";
+        if (transition !== "deliver") return transition;
+      }
+      failureStage = "delivering";
+      const wake = await this.#mutateWorkflow(client, instanceKey, async (workflow) => {
+        if (!isCurrentAttentionClaim(workflow, claimed, "delivering")) {
+          return { result: undefined, workflow };
+        }
+        if (workflow.active?.wake === undefined) throw new Error("delivery stage has no prepared wake");
+        return { result: clone(workflow.active.wake), workflow };
+      });
+      if (wake === undefined) return "none";
+      const receipt = await this.#callbacks.deliver(deepFreeze(wake));
+      const committed = await this.#mutateWorkflow(client, instanceKey, async (workflow) => {
+        if (!isCurrentAttentionClaim(workflow, claimed, "delivering")) {
+          return { result: false, workflow };
+        }
+        applyAttentionDeliveryReceipt(workflow, receipt, {
+          now: this.#now(),
+          dedupeMs: this.#limits.dedupeMs,
+        });
+        return { result: true, workflow };
+      });
+      return committed ? "delivered" : "none";
+    } catch (error) {
+      if (error instanceof PostgresCheckpointError) throw error.cause;
+      return this.#mutateWorkflow(client, instanceKey, async (workflow) => {
+        if (!isCurrentAttentionClaim(workflow, claimed, failureStage)) {
+          return { result: "none" as const, workflow };
+        }
+        const result = failAttentionRun(workflow, error, {
+          now: this.#now(),
+          dedupeMs: this.#limits.dedupeMs,
+          retryDelayMs: this.#limits.retryDelayMs,
+          maxAttempts: this.#limits.maxAttempts,
+          terminalError: isTerminalError,
+        });
+        return { result, workflow };
+      });
+    }
+  }
+
+  async #mutateWorkflow<T>(
+    client: PostgresClient,
+    instanceKey: AttentionInstanceKey,
+    mutate: (state: AttentionWorkflowState | undefined) => Promise<WorkflowMutation<T>>,
+  ): Promise<T> {
+    return this.#transaction(client, `workflow:${instanceKey}`, async () => {
+      const current = await this.#loadWorkflow(client, instanceKey, true);
+      const mutation = await mutate(current);
+      if (mutation.delete === true || mutation.workflow === undefined) {
+        await this.#checkpointQuery(
+          client,
+          `DELETE FROM eve_ambient_correlation_workflows WHERE engine_id = $1 AND instance_key = $2`,
+          [this.#engineId, instanceKey],
+        );
+      } else {
+        await this.#saveWorkflow(client, mutation.workflow);
+      }
+      return mutation.result;
+    });
+  }
+
+  async #transaction<T>(
+    client: PostgresClient,
+    lockKey: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    let phase: "database" | "operation" = "database";
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+        `eve-ambient:${this.#engineId}:${lockKey}`,
+      ]);
+      phase = "operation";
+      const result = await operation();
+      phase = "database";
+      await client.query("COMMIT");
       return result;
     } catch (error) {
-      try {
-        await client.query("ROLLBACK");
-      } catch {
-        // Preserve the original transaction error.
-      }
+      await client.query("ROLLBACK").catch(() => undefined);
+      if (error instanceof PostgresCheckpointError) throw error;
+      if (phase === "database") throw new PostgresCheckpointError(error);
       throw error;
-    } finally {
-      client.release();
     }
   }
 
-  async listSubscriptions(input: {
-    readonly applicationId: string;
-    readonly statuses: readonly SubscriptionStatus[];
-    readonly availableBefore: string;
-    readonly limit: number;
-  }): Promise<readonly StoredSubscription[]> {
-    const result = await postgresQuery<{ record: StoredSubscription }>(
-      this.#pool,
-      `WITH ranked AS (
-         SELECT record, tenant_id, available_at, ingress_sequence, id,
-                row_number() OVER (
-                  PARTITION BY tenant_id
-                  ORDER BY available_at, ingress_sequence, id
-                ) AS tenant_rank
-           FROM ${this.#table("eve_ambient_subscriptions")}
-          WHERE application_id = $1
-            AND status = ANY($2::text[])
-            AND available_at <= $3::timestamptz
-            AND (
-              status <> 'processing'
-              OR lease_expires_at IS NULL
-              OR lease_expires_at <= $3::timestamptz
-            )
-       )
-       SELECT record
-         FROM ranked
-        ORDER BY tenant_rank, available_at, tenant_id, ingress_sequence, id
-        LIMIT $4`,
-      [input.applicationId, input.statuses, input.availableBefore, input.limit],
+  async #loadCoordinator(
+    client: PostgresClient,
+    eventKey: EventKey,
+    forUpdate: boolean,
+  ): Promise<EventCoordinatorState | undefined> {
+    const result = await this.#checkpointQuery<StateRow<EventCoordinatorState>>(
+      client,
+      `SELECT state FROM eve_ambient_event_coordinators
+        WHERE engine_id = $1 AND event_key = $2${forUpdate ? " FOR UPDATE" : ""}`,
+      [this.#engineId, eventKey],
     );
-    return result.rows.map((row) => row.record);
+    return result.rows[0] === undefined ? undefined : parseState(result.rows[0].state);
   }
 
-  async listSubscriptionsForMonitor(input: {
-    readonly applicationId: string;
-    readonly monitorId: string;
-  }): Promise<readonly StoredSubscription[]> {
-    const result = await postgresQuery<{ record: StoredSubscription }>(
-      this.#pool,
-      `SELECT record
-         FROM ${this.#table("eve_ambient_subscriptions")}
-        WHERE application_id = $1 AND monitor_id = $2
-        ORDER BY ingress_sequence, id`,
-      [input.applicationId, input.monitorId],
-    );
-    return result.rows.map((row) => row.record);
-  }
-
-  async listDueInstances(input: {
-    readonly applicationId: string;
-    readonly availableBefore: string;
-    readonly limit: number;
-  }): Promise<readonly StoredMonitorInstance[]> {
-    const result = await postgresQuery<{ record: StoredMonitorInstance }>(
-      this.#pool,
-      `WITH ranked AS (
-         SELECT record, tenant_id, id, next_evaluation_at,
-                row_number() OVER (PARTITION BY tenant_id ORDER BY next_evaluation_at, id) AS tenant_rank
-           FROM ${this.#table("eve_ambient_instances")}
-          WHERE application_id = $1
-            AND active_run_id IS NULL
-            AND next_evaluation_at <= $2::timestamptz
-       )
-       SELECT record
-         FROM ranked
-        ORDER BY tenant_rank, next_evaluation_at, tenant_id, id
-        LIMIT $3`,
-      [input.applicationId, input.availableBefore, input.limit],
-    );
-    return result.rows.map((row) => row.record);
-  }
-
-  async listDueRuns(input: {
-    readonly applicationId: string;
-    readonly availableBefore: string;
-    readonly limit: number;
-  }): Promise<readonly StoredMonitorRun[]> {
-    const result = await postgresQuery<{ record: StoredMonitorRun }>(
-      this.#pool,
-      `WITH ranked AS (
-         SELECT record, tenant_id, id, available_at,
-                row_number() OVER (PARTITION BY tenant_id ORDER BY available_at, id) AS tenant_rank
-           FROM ${this.#table("eve_ambient_runs")}
-          WHERE application_id = $1
-            AND status = ANY(ARRAY['pending','retry','processing']::text[])
-            AND available_at <= $2::timestamptz
-            AND (status <> 'processing' OR lease_expires_at IS NULL OR lease_expires_at <= $2::timestamptz)
-       )
-       SELECT record
-         FROM ranked
-        ORDER BY tenant_rank, available_at, tenant_id, id
-        LIMIT $3`,
-      [input.applicationId, input.availableBefore, input.limit],
-    );
-    return result.rows.map((row) => row.record);
-  }
-
-  async listInstances(input: {
-    readonly applicationId: string;
-    readonly monitorId?: string | undefined;
-  }): Promise<readonly StoredMonitorInstance[]> {
-    const values: unknown[] = [input.applicationId];
-    const monitorClause =
-      input.monitorId === undefined ? "" : (values.push(input.monitorId), " AND monitor_id = $2");
-    const result = await postgresQuery<{ record: StoredMonitorInstance }>(
-      this.#pool,
-      `SELECT record
-         FROM ${this.#table("eve_ambient_instances")}
-        WHERE application_id = $1${monitorClause}
-        ORDER BY tenant_id, monitor_id, id`,
-      values,
-    );
-    return result.rows.map((row) => row.record);
-  }
-
-  async listRuns(input: {
-    readonly applicationId: string;
-    readonly monitorId?: string | undefined;
-    readonly limit?: number | undefined;
-  }): Promise<readonly StoredMonitorRun[]> {
-    const values: unknown[] = [input.applicationId];
-    const monitorClause =
-      input.monitorId === undefined ? "" : (values.push(input.monitorId), ` AND monitor_id = $${values.length}`);
-    values.push(input.limit ?? 100);
-    const result = await postgresQuery<{ record: StoredMonitorRun }>(
-      this.#pool,
-      `SELECT record
-         FROM ${this.#table("eve_ambient_runs")}
-        WHERE application_id = $1${monitorClause}
-        ORDER BY created_at DESC
-        LIMIT $${values.length}`,
-      values,
-    );
-    return result.rows.map((row) => row.record);
-  }
-
-  async listDeadLetters(input: {
-    readonly applicationId: string;
-    readonly monitorId?: string | undefined;
-    readonly limit?: number | undefined;
-  }): Promise<readonly StoredDeadLetter[]> {
-    const values: unknown[] = [input.applicationId];
-    const monitorClause =
-      input.monitorId === undefined ? "" : (values.push(input.monitorId), ` AND monitor_id = $${values.length}`);
-    values.push(input.limit ?? 100);
-    const result = await postgresQuery<{ record: StoredDeadLetter }>(
-      this.#pool,
-      `SELECT record
-         FROM ${this.#table("eve_ambient_dead_letters")}
-        WHERE application_id = $1${monitorClause}
-        ORDER BY created_at DESC
-        LIMIT $${values.length}`,
-      values,
-    );
-    return result.rows.map((row) => row.record);
-  }
-
-  async listDefinitionPins(applicationId: string): Promise<readonly StoredDefinitionPin[]> {
-    const result = await postgresQuery<{
-      kind: StoredDefinitionPin["kind"];
-      id: string;
-      monitorId: string;
-      definitionVersion: string;
-    }>(
-      this.#pool,
-      `SELECT 'subscription'::text AS kind, id, monitor_id AS "monitorId", definition_version AS "definitionVersion"
-         FROM ${this.#table("eve_ambient_subscriptions")}
-        WHERE application_id = $1
-          AND status = ANY(ARRAY['conditional','pending','processing','ready']::text[])
-       UNION ALL
-       SELECT 'instance'::text AS kind, id, monitor_id AS "monitorId", definition_version AS "definitionVersion"
-         FROM ${this.#table("eve_ambient_instances")}
-        WHERE application_id = $1
-       UNION ALL
-       SELECT 'run'::text AS kind, id, monitor_id AS "monitorId", record->>'definitionVersion' AS "definitionVersion"
-         FROM ${this.#table("eve_ambient_runs")}
-        WHERE application_id = $1
-          AND status = ANY(ARRAY['pending','processing','retry']::text[])`,
-      [applicationId],
-    );
-    return result.rows;
-  }
-
-  async getRun(id: string): Promise<StoredMonitorRun | null> {
-    return selectRecord<StoredMonitorRun>(
-      this.#pool,
-      `SELECT record FROM ${this.#table("eve_ambient_runs")} WHERE id = $1`,
-      [id],
+  async #saveCoordinator(client: PostgresClient, state: EventCoordinatorState): Promise<void> {
+    await this.#checkpointQuery(
+      client,
+      `INSERT INTO eve_ambient_event_coordinators
+         (engine_id, event_key, state, expires_at, updated_at)
+       VALUES ($1, $2, $3::jsonb, $4::timestamptz, now())
+       ON CONFLICT (engine_id, event_key) DO UPDATE
+       SET state = EXCLUDED.state, expires_at = EXCLUDED.expires_at, updated_at = EXCLUDED.updated_at`,
+      [this.#engineId, state.eventKey, JSON.stringify(state), state.dedupeExpiresAt ?? null],
     );
   }
 
-  async getInstance(id: string): Promise<StoredMonitorInstance | null> {
-    return selectRecord<StoredMonitorInstance>(
-      this.#pool,
-      `SELECT record FROM ${this.#table("eve_ambient_instances")} WHERE id = $1`,
-      [id],
+  async #loadWorkflow(
+    client: PostgresClient,
+    instanceKey: AttentionInstanceKey,
+    forUpdate: boolean,
+  ): Promise<AttentionWorkflowState | undefined> {
+    const result = await this.#checkpointQuery<StateRow<AttentionWorkflowState>>(
+      client,
+      `SELECT state FROM eve_ambient_correlation_workflows
+        WHERE engine_id = $1 AND instance_key = $2${forUpdate ? " FOR UPDATE" : ""}`,
+      [this.#engineId, instanceKey],
+    );
+    return result.rows[0] === undefined ? undefined : parseState(result.rows[0].state);
+  }
+
+  async #saveWorkflow(client: PostgresClient, state: AttentionWorkflowState): Promise<void> {
+    await this.#checkpointQuery(
+      client,
+      `INSERT INTO eve_ambient_correlation_workflows
+         (engine_id, instance_key, state, next_due_at, updated_at)
+       VALUES ($1, $2, $3::jsonb, $4::timestamptz, now())
+       ON CONFLICT (engine_id, instance_key) DO UPDATE
+       SET state = EXCLUDED.state, next_due_at = EXCLUDED.next_due_at, updated_at = EXCLUDED.updated_at`,
+      [this.#engineId, state.instanceKey, JSON.stringify(state), nextAttentionDueAt(state) ?? null],
     );
   }
 
-  async purgeExpired(now: string): Promise<{
-    readonly ingressReceipts: number;
-    readonly runs: number;
-    readonly instances: number;
-    readonly usage: number;
-  }> {
-    const client = await connectPostgres(this.#pool);
+  async #cleanupExpiredCoordinators(client: PostgresClient): Promise<void> {
+    await client.query(
+      `DELETE FROM eve_ambient_event_coordinators
+        WHERE engine_id = $1 AND expires_at IS NOT NULL AND expires_at <= $2::timestamptz`,
+      [this.#engineId, this.#now()],
+    );
+  }
+
+  async #checkpointQuery<TRow = Record<string, unknown>>(
+    client: PostgresClient,
+    text: string,
+    values?: readonly unknown[],
+  ): Promise<PostgresQueryResult<TRow>> {
     try {
-      await postgresQuery(client, "BEGIN");
-      await postgresQuery(
-        client,
-        `INSERT INTO ${this.#table("eve_ambient_dead_letters")}
-           (id, application_id, monitor_id, created_at, record)
-         SELECT 'purge:direct:' || (receipt.record->'directDispatch'->>'directDispatchKey'),
-                receipt.application_id,
-                NULL,
-                $1::timestamptz,
-                jsonb_build_object(
-                  'id', 'purge:direct:' || (receipt.record->'directDispatch'->>'directDispatchKey'),
-                  'tenantId', receipt.tenant_id,
-                  'applicationId', receipt.application_id,
-                  'eventKey', receipt.record->>'eventKey',
-                  'directDispatchKey', receipt.record->'directDispatch'->>'directDispatchKey',
-                  'stage', 'direct-dispatch',
-                  'reason', 'ingress receipt horizon expired before direct dispatch completed',
-                  'createdAt', $1::timestamptz
-                )
-           FROM ${this.#table("eve_ambient_ingress_receipts")} AS receipt
-          WHERE receipt.dedupe_expires_at <= $1::timestamptz
-            AND receipt.record->'directDispatch'->>'status' = ANY(ARRAY['pending','processing']::text[])
-         ON CONFLICT (id) DO NOTHING`,
-        [now],
-      );
-      await postgresQuery(
-        client,
-        `DELETE FROM ${this.#table("eve_ambient_subscriptions")} AS subscription
-          USING ${this.#table("eve_ambient_ingress_receipts")} AS receipt
-          WHERE receipt.dedupe_expires_at <= $1::timestamptz
-            AND receipt.record->'directDispatch'->>'status' = ANY(ARRAY['pending','processing']::text[])
-            AND subscription.event_key = receipt.record->>'eventKey'
-            AND subscription.acceptance_id = receipt.record->>'acceptanceId'
-            AND subscription.status = 'conditional'`,
-        [now],
-      );
-      const deletedReceipts = await postgresQuery(
-        client,
-        `DELETE FROM ${this.#table("eve_ambient_ingress_receipts")}
-          WHERE dedupe_expires_at <= $1::timestamptz`,
-        [now],
-      );
-      const deletedRuns = await postgresQuery(
-        client,
-        `DELETE FROM ${this.#table("eve_ambient_runs")}
-          WHERE expires_at <= $1::timestamptz
-            AND status = ANY(ARRAY['ignored','shadowed','suppressed','delivered','unroutable','dead-lettered']::text[])`,
-        [now],
-      );
-      const deletedInstances = await postgresQuery(
-        client,
-        `DELETE FROM ${this.#table("eve_ambient_instances")}
-          WHERE expires_at <= $1::timestamptz
-            AND active_run_id IS NULL
-            AND COALESCE(jsonb_array_length(record->'sealedBatches'), 0) = 0
-            AND NOT (record ? 'openBatch')`,
-        [now],
-      );
-      const deletedUsage = await postgresQuery(
-        client,
-        `DELETE FROM ${this.#table("eve_ambient_usage")} WHERE expires_at <= $1::timestamptz`,
-        [now],
-      );
-      await postgresQuery(client, "COMMIT");
-      return {
-        ingressReceipts: deletedReceipts.rowCount ?? 0,
-        runs: deletedRuns.rowCount ?? 0,
-        instances: deletedInstances.rowCount ?? 0,
-        usage: deletedUsage.rowCount ?? 0,
-      };
+      return await client.query<TRow>(text, values);
     } catch (error) {
-      try {
-        await client.query("ROLLBACK");
-      } catch {
-        // Preserve the original store failure.
-      }
-      throw error;
-    } finally {
-      client.release();
+      throw new PostgresCheckpointError(error);
     }
   }
 
-  #table(name: string): string {
-    return `${this.#schema}.${name}`;
+  #now(): string {
+    return this.#clock.now().toISOString();
   }
 }
 
-class PostgresTransaction implements MonitorStoreTransaction {
-  readonly #client: PostgresClient;
-  readonly #schema: string;
+class PostgresCheckpointError extends Error {
+  readonly cause: unknown;
 
-  constructor(client: PostgresClient, schema: string) {
-    this.#client = client;
-    this.#schema = schema;
-  }
-
-  getIngressReceiptByDedupeKey(key: string): Promise<StoredIngressReceipt | null> {
-    return selectRecord(
-      this.#client,
-      `SELECT record FROM ${this.#table("eve_ambient_ingress_receipts")} WHERE dedupe_key = $1 FOR UPDATE`,
-      [key],
-    );
-  }
-
-  getIngressReceipt(ref: string): Promise<StoredIngressReceipt | null> {
-    return selectRecord(
-      this.#client,
-      `SELECT record FROM ${this.#table("eve_ambient_ingress_receipts")} WHERE ref = $1 FOR UPDATE`,
-      [ref],
-    );
-  }
-
-  async releaseIngressDedupe(ref: string): Promise<void> {
-    const receipt = await this.getIngressReceipt(ref);
-    if (receipt === null) return;
-    const dedupeKey = scopedKey("expired", receipt.ref, receipt.dedupeKey);
-    await postgresQuery(
-      this.#client,
-      `UPDATE ${this.#table("eve_ambient_ingress_receipts")}
-          SET dedupe_key = $2,
-              record = jsonb_set(record, '{dedupeKey}', to_jsonb($2::text))
-        WHERE ref = $1`,
-      [ref, dedupeKey],
-    );
-  }
-
-  async putIngressReceipt(receipt: StoredIngressReceipt): Promise<void> {
-    parseIdempotencyKey("event", receipt.eventKey);
-    parseInputHash(receipt.inputHash);
-    parseInputHash(receipt.deploymentRevision);
-    if (receipt.directDispatch !== undefined) {
-      parseIdempotencyKey("direct-dispatch", receipt.directDispatch.directDispatchKey);
-      parseInputHash(receipt.directDispatch.inputHash);
-    }
-    const existing = await this.getIngressReceiptByDedupeKey(receipt.dedupeKey);
-    if (existing !== null) {
-      assertIdempotencyInput({
-        namespace: "postgres-ingress",
-        key: receipt.eventKey,
-        existingInputHash: existing.inputHash,
-        receivedInputHash: receipt.inputHash,
-      });
-    }
-    await postgresQuery(
-      this.#client,
-      `INSERT INTO ${this.#table("eve_ambient_ingress_receipts")}
-         (ref, dedupe_key, tenant_id, application_id, channel_id, ingress_sequence, dedupe_expires_at, record)
-       VALUES ($1,$2,$3,$4,$5,$6::bigint,$7::timestamptz,$8::jsonb)
-       ON CONFLICT (dedupe_key) DO UPDATE SET
-         ref = EXCLUDED.ref,
-         tenant_id = EXCLUDED.tenant_id,
-         application_id = EXCLUDED.application_id,
-         channel_id = EXCLUDED.channel_id,
-         ingress_sequence = EXCLUDED.ingress_sequence,
-         dedupe_expires_at = EXCLUDED.dedupe_expires_at,
-         record = EXCLUDED.record`,
-      [
-        receipt.ref,
-        receipt.dedupeKey,
-        receipt.tenantId,
-        receipt.applicationId,
-        receipt.channelId,
-        receipt.ingressSequence,
-        receipt.dedupeExpiresAt,
-        JSON.stringify(receipt),
-      ],
-    );
-  }
-
-  getSubscription(id: string): Promise<StoredSubscription | null> {
-    return selectRecord(
-      this.#client,
-      `SELECT record FROM ${this.#table("eve_ambient_subscriptions")} WHERE id = $1 FOR UPDATE`,
-      [id],
-    );
-  }
-
-  async putSubscription(subscription: StoredSubscription): Promise<void> {
-    parseIdempotencyKey("branch", subscription.branchKey);
-    parseIdempotencyKey("event", subscription.eventKey);
-    parseInputHash(subscription.eventInputHash);
-    parseInputHash(subscription.inputHash);
-    if (subscription.id !== subscription.branchKey) {
-      throw new TypeError("subscription id must equal branchKey");
-    }
-    const existing = await this.getSubscription(subscription.id);
-    if (existing !== null) {
-      assertIdempotencyInput({
-        namespace: "postgres-branch",
-        key: subscription.branchKey,
-        existingInputHash: existing.inputHash,
-        receivedInputHash: subscription.inputHash,
-      });
-    }
-    await postgresQuery(
-      this.#client,
-      `INSERT INTO ${this.#table("eve_ambient_subscriptions")}
-         (id, branch_key, event_key, acceptance_id, input_hash, tenant_id, application_id, monitor_id, definition_version, correlation_key_hash, ingress_sequence, status, available_at, lease_expires_at, record)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::bigint,$12,$13::timestamptz,$14::timestamptz,$15::jsonb)
-       ON CONFLICT (id) DO UPDATE SET
-         branch_key = EXCLUDED.branch_key,
-         event_key = EXCLUDED.event_key,
-         acceptance_id = EXCLUDED.acceptance_id,
-         input_hash = EXCLUDED.input_hash,
-         monitor_id = EXCLUDED.monitor_id,
-         definition_version = EXCLUDED.definition_version,
-         correlation_key_hash = EXCLUDED.correlation_key_hash,
-         status = EXCLUDED.status,
-         available_at = EXCLUDED.available_at,
-         lease_expires_at = EXCLUDED.lease_expires_at,
-         record = EXCLUDED.record`,
-      [
-        subscription.id,
-        subscription.branchKey,
-        subscription.eventKey,
-        subscription.acceptanceId,
-        subscription.inputHash,
-        subscription.tenantId,
-        subscription.applicationId,
-        subscription.monitorId,
-        subscription.definitionVersion,
-        subscription.correlationKeyHash ?? null,
-        subscription.ingressSequence,
-        subscription.status,
-        subscription.availableAt,
-        subscription.leaseExpiresAt ?? null,
-        JSON.stringify(subscription),
-      ],
-    );
-  }
-
-  async deleteSubscription(id: string): Promise<void> {
-    await postgresQuery(
-      this.#client,
-      `DELETE FROM ${this.#table("eve_ambient_subscriptions")} WHERE id = $1`,
-      [id],
-    );
-  }
-
-  async hasActiveSubscriptionForAcceptance(input: {
-    readonly eventKey: StoredSubscription["eventKey"];
-    readonly acceptanceId: string;
-  }): Promise<boolean> {
-    const result = await postgresQuery<{ exists: boolean }>(
-      this.#client,
-      `SELECT EXISTS (
-         SELECT 1
-           FROM ${this.#table("eve_ambient_subscriptions")}
-          WHERE event_key = $1 AND acceptance_id = $2
-       ) AS exists`,
-      [input.eventKey, input.acceptanceId],
-    );
-    return result.rows[0]?.exists ?? false;
-  }
-
-  getInstance(id: string): Promise<StoredMonitorInstance | null> {
-    return selectRecord(
-      this.#client,
-      `SELECT record FROM ${this.#table("eve_ambient_instances")} WHERE id = $1 FOR UPDATE`,
-      [id],
-    );
-  }
-
-  async countInstances(input: {
-    readonly tenantId: string;
-    readonly applicationId: string;
-  }): Promise<number> {
-    const result = await postgresQuery<{ count: string }>(
-      this.#client,
-      `SELECT count(*)::text AS count
-         FROM ${this.#table("eve_ambient_instances")}
-        WHERE tenant_id = $1 AND application_id = $2`,
-      [input.tenantId, input.applicationId],
-    );
-    return Number(result.rows[0]?.count ?? 0);
-  }
-
-  async putInstance(instance: StoredMonitorInstance): Promise<void> {
-    await postgresQuery(
-      this.#client,
-      `INSERT INTO ${this.#table("eve_ambient_instances")}
-         (id, tenant_id, application_id, monitor_id, definition_version, next_evaluation_at, active_run_id, expires_at, record)
-       VALUES ($1,$2,$3,$4,$5,$6::timestamptz,$7,$8::timestamptz,$9::jsonb)
-       ON CONFLICT (id) DO UPDATE SET
-         monitor_id = EXCLUDED.monitor_id,
-         definition_version = EXCLUDED.definition_version,
-         next_evaluation_at = EXCLUDED.next_evaluation_at,
-         active_run_id = EXCLUDED.active_run_id,
-         expires_at = EXCLUDED.expires_at,
-         record = EXCLUDED.record`,
-      [
-        instance.id,
-        instance.tenantId,
-        instance.applicationId,
-        instance.monitorId,
-        instance.definitionVersion,
-        instance.nextEvaluationAt ?? null,
-        instance.activeRunId ?? null,
-        instance.expiresAt,
-        JSON.stringify(instance),
-      ],
-    );
-  }
-
-  async deleteInstance(id: string): Promise<void> {
-    await postgresQuery(
-      this.#client,
-      `DELETE FROM ${this.#table("eve_ambient_instances")} WHERE id = $1`,
-      [id],
-    );
-  }
-
-  getRun(id: string): Promise<StoredMonitorRun | null> {
-    return selectRecord(
-      this.#client,
-      `SELECT record FROM ${this.#table("eve_ambient_runs")} WHERE id = $1 FOR UPDATE`,
-      [id],
-    );
-  }
-
-  async putRun(run: StoredMonitorRun): Promise<void> {
-    parseIdempotencyKey("run", run.runKey);
-    parseInputHash(run.inputHash);
-    const existing = await this.getRun(run.id);
-    if (existing !== null) {
-      if (existing.runKey !== run.runKey) {
-        throw new TypeError(`run ${run.id} changed runKey`);
-      }
-      assertIdempotencyInput({
-        namespace: "postgres-run",
-        key: run.runKey,
-        existingInputHash: existing.inputHash,
-        receivedInputHash: run.inputHash,
-      });
-    }
-    await postgresQuery(
-      this.#client,
-      `INSERT INTO ${this.#table("eve_ambient_runs")}
-         (id, instance_id, tenant_id, application_id, monitor_id, status, available_at, lease_expires_at, created_at, expires_at, record)
-       VALUES ($1,$2,$3,$4,$5,$6,$7::timestamptz,$8::timestamptz,$9::timestamptz,$10::timestamptz,$11::jsonb)
-       ON CONFLICT (id) DO UPDATE SET
-         status = EXCLUDED.status,
-         available_at = EXCLUDED.available_at,
-         lease_expires_at = EXCLUDED.lease_expires_at,
-         expires_at = EXCLUDED.expires_at,
-         record = EXCLUDED.record`,
-      [
-        run.id,
-        run.instanceId,
-        run.tenantId,
-        run.applicationId,
-        run.monitorId,
-        run.status,
-        run.availableAt,
-        run.leaseExpiresAt ?? null,
-        run.createdAt,
-        run.expiresAt,
-        JSON.stringify(run),
-      ],
-    );
-  }
-
-  async putDeadLetter(deadLetter: StoredDeadLetter): Promise<void> {
-    await postgresQuery(
-      this.#client,
-      `INSERT INTO ${this.#table("eve_ambient_dead_letters")}
-         (id, application_id, monitor_id, created_at, record)
-       VALUES ($1,$2,$3,$4::timestamptz,$5::jsonb)
-       ON CONFLICT (id) DO NOTHING`,
-      [
-        deadLetter.id,
-        deadLetter.applicationId,
-        deadLetter.monitorId ?? null,
-        deadLetter.createdAt,
-        JSON.stringify(deadLetter),
-      ],
-    );
-  }
-
-  getDeployment(applicationId: string): Promise<StoredDeployment | null> {
-    return selectRecord(
-      this.#client,
-      `SELECT record FROM ${this.#table("eve_ambient_deployments")} WHERE application_id = $1 FOR UPDATE`,
-      [applicationId],
-    );
-  }
-
-  async putDeployment(deployment: StoredDeployment): Promise<void> {
-    await postgresQuery(
-      this.#client,
-      `INSERT INTO ${this.#table("eve_ambient_deployments")} (application_id, record)
-       VALUES ($1,$2::jsonb)
-       ON CONFLICT (application_id) DO UPDATE SET record = EXCLUDED.record`,
-      [deployment.applicationId, JSON.stringify(deployment)],
-    );
-  }
-
-  async nextIngressSequence(scope: string): Promise<string> {
-    // Native sequences avoid a frequently updated heap row, while this
-    // transaction-scoped fence keeps sequence order aligned with visibility:
-    // a later acceptance in the same domain cannot commit past this one.
-    await postgresQuery(
-      this.#client,
-      "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-      [scopedKey("ingress-sequence", scope)],
-    );
-    const result = await postgresQuery<{ value: string }>(
-      this.#client,
-      `SELECT nextval('${this.#table("eve_ambient_ingress_sequence")}'::regclass)::text AS value`,
-    );
-    const value = result.rows[0]?.value;
-    if (value === undefined) throw new Error("PostgreSQL did not return an ingress sequence");
-    return value;
-  }
-
-  async hasEarlierOpenSubscription(input: {
-    readonly tenantId: string;
-    readonly applicationId: string;
-    readonly monitorId: string;
-    readonly definitionVersion: string;
-    readonly correlationKeyHash: string;
-    readonly ingressSequence: string;
-  }): Promise<boolean> {
-    const result = await postgresQuery<{ exists: boolean }>(
-      this.#client,
-      `SELECT EXISTS (
-         SELECT 1
-           FROM ${this.#table("eve_ambient_subscriptions")}
-          WHERE tenant_id = $1
-            AND application_id = $2
-            AND monitor_id = $3
-            AND definition_version = $4
-            AND (correlation_key_hash IS NULL OR correlation_key_hash = $5)
-            AND ingress_sequence < $6::bigint
-            AND status IN ('pending', 'processing', 'ready')
-       ) AS exists`,
-      [
-        input.tenantId,
-        input.applicationId,
-        input.monitorId,
-        input.definitionVersion,
-        input.correlationKeyHash,
-        input.ingressSequence,
-      ],
-    );
-    return result.rows[0]?.exists ?? false;
-  }
-
-  async reserveUsage(input: {
-    readonly id: string;
-    readonly scope: string;
-    readonly metric: string;
-    readonly amount: number;
-    readonly limit: number;
-    readonly windowMs: number;
-    readonly now: string;
-  }): Promise<{ readonly allowed: true } | { readonly allowed: false; readonly retryAt: string }> {
-    await postgresQuery(
-      this.#client,
-      "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-      [scopedKey(input.scope, input.metric)],
-    );
-    const duplicate = await postgresQuery<{ id: string }>(
-      this.#client,
-      `SELECT id FROM ${this.#table("eve_ambient_usage")} WHERE id = $1`,
-      [input.id],
-    );
-    if (duplicate.rows.length > 0) return { allowed: true };
-    const windowStart = addMs(input.now, -input.windowMs);
-    const current = await postgresQuery<{ used: string; oldest: string | null }>(
-      this.#client,
-      `SELECT COALESCE(sum(amount), 0)::text AS used, min(occurred_at)::text AS oldest
-         FROM ${this.#table("eve_ambient_usage")}
-        WHERE scope = $1 AND metric = $2
-          AND occurred_at > $3::timestamptz
-          AND expires_at > $4::timestamptz`,
-      [input.scope, input.metric, windowStart, input.now],
-    );
-    const row = current.rows[0];
-    const used = Number(row?.used ?? 0);
-    if (used + input.amount > input.limit) {
-      return {
-        allowed: false,
-        retryAt: row?.oldest === null || row?.oldest === undefined
-          ? addMs(input.now, input.windowMs)
-          : addMs(row.oldest, input.windowMs),
-      };
-    }
-    await postgresQuery(
-      this.#client,
-      `INSERT INTO ${this.#table("eve_ambient_usage")}
-         (id, scope, metric, amount, occurred_at, expires_at)
-       VALUES ($1,$2,$3,$4,$5::timestamptz,$6::timestamptz)`,
-      [input.id, input.scope, input.metric, input.amount, input.now, addMs(input.now, input.windowMs)],
-    );
-    return { allowed: true };
-  }
-
-  #table(name: string): string {
-    return `${this.#schema}.${name}`;
+  constructor(cause: unknown) {
+    super("PostgreSQL attention checkpoint failed", { cause });
+    this.cause = cause;
   }
 }
 
-async function selectRecord<T>(
-  queryable: PostgresQueryable,
-  query: string,
-  values: readonly unknown[],
-): Promise<T | null> {
-  const result = await postgresQuery<{ record: T }>(queryable, query, values);
-  return result.rows[0]?.record ?? null;
+function isTerminalError(error: unknown): boolean {
+  return (
+    error instanceof AttentionCapacityError ||
+    error instanceof IdempotencyConflictError ||
+    error instanceof AttentionCallbackValidationError
+  );
 }
 
-async function connectPostgres(pool: PostgresPool): Promise<PostgresClient> {
-  try {
-    return await pool.connect();
-  } catch (error) {
-    throw new TransientMonitorError("PostgreSQL monitor store connection failed", { cause: error });
+async function acquire(pool: PostgresPool): Promise<PostgresClient> {
+  return pool.connect();
+}
+
+function parseState<T>(value: T | string): T {
+  return clone(typeof value === "string" ? (JSON.parse(value) as T) : value);
+}
+
+function positiveInteger(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(`${name} must be a positive safe integer`);
   }
+  return value;
 }
 
-async function postgresQuery<TRow extends Record<string, unknown> = Record<string, unknown>>(
-  queryable: PostgresQueryable,
-  query: string,
-  values?: readonly unknown[],
-): Promise<PostgresQueryResult<TRow>> {
-  try {
-    return await queryable.query<TRow>(query, values);
-  } catch (error) {
-    if (error instanceof TransientMonitorError) throw error;
-    throw new TransientMonitorError("PostgreSQL monitor store operation failed", { cause: error });
+function nonEmpty(value: string, name: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new TypeError(`${name} must not be empty`);
   }
+  return value;
 }
 
-function sqlIdentifier(value: string): string {
-  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(value)) throw new TypeError("invalid PostgreSQL schema name");
-  return `"${value}"`;
+function clone<T>(value: T): T {
+  return structuredClone(value);
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object") {
+    Object.freeze(value);
+    for (const nested of Object.values(value)) deepFreeze(nested);
+  }
+  return value;
+}
+
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

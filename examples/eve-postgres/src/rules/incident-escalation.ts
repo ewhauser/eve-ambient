@@ -1,97 +1,49 @@
-import {
-  compileMonitor,
-  defineMonitor,
-  ignore,
-  wake,
-  type MonitorDeliveryChannel,
-} from "@ewhauser/eve-ambient";
-import type { EveDeliveryTarget } from "@ewhauser/eve-ambient-eve";
+import { defineAmbientRule } from "@ewhauser/eve-ambient";
+import type { SlackMessageEvent } from "../channels/slack.js";
 
-import {
-  slackChannel,
-  type SlackMessageEvent,
-} from "../channels/slack.js";
-
-type EscalationMetadata = Readonly<{ signals: readonly string[] }>;
-
-function escalationSignals(events: readonly Readonly<SlackMessageEvent>[]): string[] {
-  const signals = new Set<string>();
-  for (const event of events) {
-    if (event.data.severity === "critical") signals.add("critical-severity");
-    if (/\b(?:sev[ -]?[01]|outage|customer impact)\b/i.test(event.data.text)) {
-      signals.add("incident-language");
-    }
-  }
-  return [...signals].sort();
-}
-
-/** One deterministic ambient rule evaluated against canonical Slack events. */
-export function incidentEscalationRule(
-  delivery: MonitorDeliveryChannel<EveDeliveryTarget>,
-) {
-  const definition = defineMonitor<
-    SlackMessageEvent,
-    EscalationMetadata,
-    EscalationMetadata
-  >({
-    id: "incident-escalation",
-    mode: "active",
-    sources: [slackChannel.event("message", { phase: "undispatched" })],
-    filter: ({ event }) =>
-      event.actor?.isBot !== true && event.data.text.trim().length > 0,
-    correlate: ({ event }) =>
-      JSON.stringify([
-        event.source.installationId,
-        event.data.channelId,
-        event.data.threadTs ?? event.data.messageTs,
-      ]),
+export const incidentEscalationRule = defineAmbientRule<SlackMessageEvent>({
+  id: "incident-escalation",
+  version: "v1",
+  mode: "active",
+  policy: {
     buffer: {
       mode: "debounce",
-      quietPeriod: "2s",
-      maxWait: "20s",
-      maxEvents: 50,
-      maxBytes: 128_000,
+      quietPeriodMs: 30_000,
+      maxWaitMs: 120_000,
+      maxEvents: 100,
+      maxBytes: 1_000_000,
     },
-    decision: ({ events }) => {
-      const signals = escalationSignals(events);
-      return signals.length === 0
-        ? ignore({ reason: "no-escalation-signal", metadata: { signals } })
-        : wake({ reason: "incident-needs-attention", metadata: { signals } });
-    },
-    cooldown: { afterWake: "2m", during: "accumulate" },
-    task: {
-      instructions:
-        "Assess the incident evidence, identify the next useful action, and respond only when you can materially help.",
-      evidence: ({ events, decision, batch }) => ({
-        messages: events.map((event) => ({
-          actorId: event.actor?.id ?? null,
-          messageTs: event.data.messageTs,
-          ref: event.ref,
-          severity: event.data.severity,
-          text: event.data.text,
+    cooldownAfterWakeMs: 300_000,
+  },
+  matches: (event) => event.type === "slack.message" && event.data.severity !== "info",
+  correlationKey: (event) => event.data.incidentId,
+  orderKey: (event) => event.occurredAt ?? event.id,
+  async prepare(batch) {
+    const critical = batch.branches.some(
+      (branch) => branch.event.data.severity === "critical",
+    );
+    if (!critical) {
+      return {
+        kind: "ignore",
+        decision: { reason: "no critical incident evidence" },
+      };
+    }
+    const address = batch.branches.at(-1)?.event.replyTarget?.address;
+    if (address === undefined) throw new Error("incident event has no Slack reply target");
+    return {
+      kind: "wake",
+      routeId: "eve",
+      instruction: "Assess the incident and coordinate the next escalation step.",
+      decision: { reason: "critical incident evidence", severity: "critical" },
+      evidence: {
+        address,
+        messages: batch.branches.map((branch) => ({
+          eventKey: branch.eventKey,
+          occurredAt: branch.event.occurredAt ?? null,
+          text: branch.event.data.text,
+          severity: branch.event.data.severity,
         })),
-        signals: decision.metadata?.signals ?? [],
-        completeness: batch,
-      }),
-    },
-    route: ({ events }) => {
-      const target = events.at(-1)?.replyTarget;
-      return target === undefined
-        ? null
-        : { auth: "app", channel: delivery, target };
-    },
-    session: { strategy: "channel", idleTimeout: "24h" },
-    limits: {
-      perMonitor: { maxEventsPerMinute: 2_000, maxWakesPerHour: 30 },
-      perKey: { maxWakesPerHour: 4 },
-      overflow: "buffer",
-    },
-    retention: { decisions: "30d", dedupe: "7d" },
-    metadata: {
-      owner: "engineering-productivity",
-      useCase: "ambient-slack-incidents",
-    },
-  });
-
-  return compileMonitor(definition, "example:incident-escalation:v1");
-}
+      },
+    };
+  },
+});

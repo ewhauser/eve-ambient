@@ -1,42 +1,69 @@
 import {
-  defineChannelEvent,
-  defineInboundChannel,
-  type ChannelEvent,
-  type PublishEventInput,
+  defineChannelCanonicalization,
+  type CanonicalChannelEvent,
 } from "@ewhauser/eve-ambient";
-import type { EveDeliveryTarget } from "@ewhauser/eve-ambient-eve";
 import { z } from "zod";
 
-export const pullRequestChangedSchema = z.object({
-  failingChecks: z.array(z.string().min(1)).max(100),
-  mergeState: z.enum(["clean", "conflicting", "unknown"]),
-  number: z.number().int().positive(),
+export const pullRequestInputSchema = z.object({
+  eventId: z.string().min(1),
+  installationId: z.string().min(1),
+  tenantId: z.string().min(1),
   repository: z.string().min(1),
-  reviewDecision: z.enum(["approved", "changes-requested", "review-required"]),
-  state: z.enum(["open", "closed"]),
+  number: z.number().int().positive(),
   title: z.string().min(1),
+  state: z.enum(["open", "closed"]),
+  mergeState: z.enum(["clean", "conflicting", "unknown"]),
+  reviewDecision: z.enum(["approved", "changes-requested", "review-required"]),
+  failingChecks: z.array(z.string().min(1)).max(100),
   updatedAt: z.string().datetime(),
 });
 
-export type PullRequestChangedData = z.infer<typeof pullRequestChangedSchema>;
-export type PullRequestChangedEvent = ChannelEvent<
-  "pull-request-changed",
-  PullRequestChangedData,
-  EveDeliveryTarget
->;
-export type PullRequestChangedInput = PublishEventInput<
-  PullRequestChangedData,
-  EveDeliveryTarget
+export type PullRequestInput = z.infer<typeof pullRequestInputSchema>;
+export type PullRequestEvent = CanonicalChannelEvent<
+  "github.pull-request.changed",
+  {
+    readonly repository: string;
+    readonly number: number;
+    readonly title: string;
+    readonly state: "open" | "closed";
+    readonly mergeState: "clean" | "conflicting" | "unknown";
+    readonly reviewDecision: "approved" | "changes-requested" | "review-required";
+    readonly failingChecks: readonly string[];
+    readonly updatedAt: string;
+  },
+  { readonly address: string }
 >;
 
-/** Canonical GitHub events emitted after webhook verification and normalization. */
-export const githubChannel = defineInboundChannel({
-  id: "github",
-  replyTarget: z.object({ address: z.string().min(1) }),
-  inbound: {
-    "pull-request-changed": defineChannelEvent({
-      maxBytes: 256_000,
-      schema: pullRequestChangedSchema,
-    }),
+export const githubChannel = defineChannelCanonicalization({
+  version: 1,
+  canonicalize(raw: PullRequestInput): PullRequestEvent {
+    const input = pullRequestInputSchema.parse(raw);
+    return {
+      id: input.eventId,
+      type: "github.pull-request.changed",
+      version: 1,
+      occurredAt: input.updatedAt,
+      data: {
+        repository: input.repository,
+        number: input.number,
+        title: input.title,
+        state: input.state,
+        mergeState: input.mergeState,
+        reviewDecision: input.reviewDecision,
+        failingChecks: input.failingChecks,
+        updatedAt: input.updatedAt,
+      },
+      source: {
+        channelId: "github",
+        installationId: input.installationId,
+        tenantId: input.tenantId,
+      },
+      replyTarget: { address: `github:${input.repository}#${input.number}` },
+      subjects: [
+        { namespace: "repository", key: input.repository },
+        { namespace: "pull-request", key: `${input.repository}#${input.number}` },
+      ],
+      origin: { kind: "external", depth: 0 },
+    };
   },
 });

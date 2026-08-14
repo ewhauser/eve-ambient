@@ -3,6 +3,7 @@ import {
   assertIdempotencyInput,
   canonicalizeChannelDelivery,
   deriveAttentionBranchKey,
+  deriveAttentionWakeKey,
   deriveFanoutManifestHash,
   deriveOccurrenceKey,
   hashIdempotencyInput,
@@ -71,6 +72,8 @@ export interface FullAttentionBranch<
   readonly tenantId: string;
   readonly eventKey: EventKey;
   readonly occurrenceKey: OccurrenceKey;
+  readonly sourceInputHash: InputHash;
+  readonly canonicalizationVersion: number;
   readonly branchKey: BranchKey;
   readonly inputHash: InputHash;
   readonly monitorId: string;
@@ -109,7 +112,9 @@ export interface AttentionAcceptanceReceipt {
   readonly dedupeExpiresAt: string;
 }
 
-export interface FrozenAttentionBatch {
+export interface FrozenAttentionBatch<
+  TEvent extends CanonicalChannelEvent = CanonicalChannelEvent,
+> {
   readonly instanceKey: AttentionInstanceKey;
   readonly batchKey: BatchKey;
   readonly runKey: RunKey;
@@ -122,7 +127,7 @@ export interface FrozenAttentionBatch {
   readonly frozenAt: string;
   readonly closedBy: MonitorBatchClosedBy;
   readonly bytes: number;
-  readonly branches: readonly FullAttentionBranch[];
+  readonly branches: readonly FullAttentionBranch<TEvent>[];
 }
 
 export type PreparedAttentionOutcome =
@@ -225,6 +230,8 @@ export async function compileAcceptedFanout<
         tenantId,
         eventKey,
         occurrenceKey,
+        sourceInputHash,
+        canonicalizationVersion: input.source.payload.canonicalizationVersion,
         monitorId: plan.monitorId,
         definitionVersion: plan.definitionVersion,
         ...(plan.phase === undefined ? {} : { phase: plan.phase }),
@@ -326,6 +333,7 @@ export async function validateAcceptedFanout(
       [
         "applicationId",
         "branchKey",
+        "canonicalizationVersion",
         "correlationKey",
         "definitionVersion",
         "event",
@@ -337,6 +345,7 @@ export async function validateAcceptedFanout(
         "orderKey",
         "phase",
         "policy",
+        "sourceInputHash",
         "tenantId",
       ],
       "full attention branch",
@@ -352,6 +361,8 @@ export async function validateAcceptedFanout(
       branch.tenantId !== detached.tenantId ||
       branch.eventKey !== detached.eventKey ||
       branch.occurrenceKey !== detached.occurrenceKey ||
+      branch.sourceInputHash !== detached.inputHash ||
+      branch.canonicalizationVersion !== detached.canonicalizationVersion ||
       canonicalJson(branch.event) !== canonicalEvent
     ) {
       throw new TypeError("attention branch does not match its complete source value");
@@ -385,6 +396,158 @@ export async function validateAcceptedFanout(
   if (detached.manifestHash !== manifestHash) {
     throw new TypeError("manifestHash does not match the frozen branch membership");
   }
+  return deepFreeze(detached);
+}
+
+/** Recomputes one by-value branch at a durable handoff boundary. */
+export async function validateFullAttentionBranch(
+  input: FullAttentionBranch,
+): Promise<FullAttentionBranch> {
+  const branch = cloneCanonical(input, "full attention branch");
+  assertRecord(branch, "full attention branch");
+  assertExactKeys(
+    branch,
+    [
+      "applicationId",
+      "branchKey",
+      "canonicalizationVersion",
+      "correlationKey",
+      "definitionVersion",
+      "event",
+      "eventKey",
+      "inputHash",
+      "mode",
+      "monitorId",
+      "occurrenceKey",
+      "orderKey",
+      "phase",
+      "policy",
+      "sourceInputHash",
+      "tenantId",
+    ],
+    "full attention branch",
+  );
+  validateBranchPlan(branch);
+  const verifiedSource = await canonicalizeChannelDelivery(
+    { version: branch.canonicalizationVersion, canonicalize: () => branch.event },
+    null,
+    { applicationId: branch.applicationId },
+  );
+  if (branch.tenantId !== branch.event.source.tenantId) {
+    throw new TypeError("attention branch tenantId does not match the canonical event");
+  }
+  if (branch.eventKey !== verifiedSource.idempotency.key) {
+    throw new TypeError("attention branch eventKey does not match the canonical event");
+  }
+  assertIdempotencyInput({
+    namespace: "attention-source",
+    key: branch.eventKey,
+    existingInputHash: verifiedSource.idempotency.inputHash,
+    receivedInputHash: parseInputHash(branch.sourceInputHash),
+  });
+  const occurrenceKey = await deriveOccurrenceKey({
+    eventKey: branch.eventKey,
+    inputHash: branch.sourceInputHash,
+  });
+  if (branch.occurrenceKey !== occurrenceKey) {
+    throw new TypeError("attention branch occurrenceKey does not match its source lineage");
+  }
+  const expectedKey = await deriveAttentionBranchKey({
+    occurrenceKey,
+    monitorId: branch.monitorId,
+    definitionVersion: branch.definitionVersion,
+    ...(branch.phase === undefined ? {} : { phase: branch.phase }),
+    correlationKey: branch.correlationKey,
+  });
+  if (branch.branchKey !== expectedKey) {
+    throw new TypeError("branchKey does not match its attention lineage");
+  }
+  const expectedHash = await hashIdempotencyInput(branchLogicalInput(branch));
+  assertIdempotencyInput({
+    namespace: "attention-branch",
+    key: branch.branchKey,
+    existingInputHash: expectedHash,
+    receivedInputHash: parseInputHash(branch.inputHash),
+  });
+  assertBranchFitsPolicy(branch);
+  return deepFreeze(branch);
+}
+
+export async function createPreparedAttentionWake(
+  batch: FrozenAttentionBatch,
+  prepared: Extract<PreparedAttentionOutcome, { readonly kind: "wake" }>,
+): Promise<PreparedAttentionWake> {
+  const rootEventKeys = [...new Set(batch.branches.map((branch) => branch.eventKey))];
+  const payload = {
+    runKey: batch.runKey,
+    batchKey: batch.batchKey,
+    instanceKey: batch.instanceKey,
+    applicationId: batch.applicationId,
+    tenantId: batch.tenantId,
+    monitorId: batch.monitorId,
+    definitionVersion: batch.definitionVersion,
+    correlationKey: batch.correlationKey,
+    rootEventKeys,
+    routeId: prepared.routeId,
+    instruction: prepared.instruction,
+    decision: prepared.decision,
+    evidence: prepared.evidence,
+  };
+  const inputHash = await hashIdempotencyInput(payload);
+  const wakeKey = await deriveAttentionWakeKey({
+    runKey: batch.runKey,
+    routeId: prepared.routeId,
+  });
+  return deepFreeze({ wakeKey, ...payload, inputHash });
+}
+
+export function validatePreparedAttentionOutcome(
+  outcome: PreparedAttentionOutcome,
+): PreparedAttentionOutcome {
+  const detached = cloneCanonical(outcome, "prepared outcome");
+  assertRecord(detached, "prepared outcome");
+  if (detached.kind === "ignore") {
+    assertExactKeys(detached, ["decision", "kind"], "prepared ignore outcome");
+    canonicalJson(detached.decision, "prepared decision");
+    return deepFreeze(detached);
+  }
+  if (detached.kind !== "wake") throw new TypeError("prepared outcome kind is invalid");
+  assertExactKeys(
+    detached,
+    ["decision", "evidence", "instruction", "kind", "routeId"],
+    "prepared wake outcome",
+  );
+  nonEmpty(detached.routeId, "prepared routeId");
+  nonEmpty(detached.instruction, "prepared instruction");
+  canonicalJson(detached.decision, "prepared decision");
+  canonicalJson(detached.evidence, "prepared evidence");
+  return deepFreeze(detached);
+}
+
+export function validateAttentionDeliveryReceipt(
+  receipt: AttentionDeliveryReceipt,
+  wake: PreparedAttentionWake,
+): AttentionDeliveryReceipt {
+  const detached = cloneCanonical(receipt, "attention delivery receipt");
+  assertRecord(detached, "attention delivery receipt");
+  assertExactKeys(
+    detached,
+    ["deliveredAt", "inputHash", "result", "wakeKey"],
+    "attention delivery receipt",
+  );
+  parseIdempotencyKey("wake", detached.wakeKey);
+  parseInputHash(detached.inputHash);
+  if (detached.wakeKey !== wake.wakeKey) {
+    throw new TypeError("delivery receipt wakeKey does not match the prepared wake");
+  }
+  assertIdempotencyInput({
+    namespace: "attention-delivery",
+    key: wake.wakeKey,
+    existingInputHash: wake.inputHash,
+    receivedInputHash: detached.inputHash,
+  });
+  canonicalTimestamp(detached.deliveredAt, "delivery receipt deliveredAt");
+  canonicalJson(detached.result, "delivery receipt result");
   return deepFreeze(detached);
 }
 
@@ -447,6 +610,8 @@ function branchLogicalInput<TEvent extends CanonicalChannelEvent>(input: {
   readonly tenantId: string;
   readonly eventKey: EventKey;
   readonly occurrenceKey: OccurrenceKey;
+  readonly sourceInputHash: InputHash;
+  readonly canonicalizationVersion: number;
   readonly monitorId: string;
   readonly definitionVersion: string;
   readonly phase?: MonitorPhase | undefined;
@@ -461,6 +626,8 @@ function branchLogicalInput<TEvent extends CanonicalChannelEvent>(input: {
     tenantId: input.tenantId,
     eventKey: input.eventKey,
     occurrenceKey: input.occurrenceKey,
+    sourceInputHash: input.sourceInputHash,
+    canonicalizationVersion: input.canonicalizationVersion,
     monitorId: input.monitorId,
     definitionVersion: input.definitionVersion,
     ...(input.phase === undefined ? {} : { phase: input.phase }),
@@ -510,6 +677,13 @@ function nonEmpty(value: string, name: string): void {
 function positiveInteger(value: number, name: string): void {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new TypeError(`${name} must be a positive safe integer`);
+  }
+}
+
+function canonicalTimestamp(value: string, name: string): void {
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds) || new Date(milliseconds).toISOString() !== value) {
+    throw new TypeError(`${name} must be a canonical ISO timestamp`);
   }
 }
 

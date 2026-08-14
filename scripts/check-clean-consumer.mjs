@@ -39,9 +39,7 @@ try {
         dependencies: {
           "@ewhauser/eve-ambient": `file:${core.tarball}`,
           "@ewhauser/eve-ambient-eve": `file:${adapter.tarball}`,
-          ai: "7.0.62",
           eve: "0.38.1",
-          zod: "4.4.3",
         },
       },
       null,
@@ -64,7 +62,7 @@ try {
     [
       "--input-type=module",
       "--eval",
-      'const core = await import("@ewhauser/eve-ambient"); const adapter = await import("@ewhauser/eve-ambient-eve"); if (typeof core.MonitorRuntime !== "function") throw new Error("missing core runtime"); if (adapter.SUPPORTED_EVE_VERSION !== "0.38.1") throw new Error("wrong Eve support version");',
+      'const core = await import("@ewhauser/eve-ambient"); const postgres = await import("@ewhauser/eve-ambient/postgres"); const celld = await import("@ewhauser/eve-ambient/celld"); const memory = await import("@ewhauser/eve-ambient/memory"); const adapter = await import("@ewhauser/eve-ambient-eve"); if (typeof core.createAmbientPublisher !== "function") throw new Error("missing ambient publisher"); if (typeof postgres.PostgresAttentionEngine !== "function") throw new Error("missing Postgres engine"); if (typeof celld.CelldAttentionEngine !== "function") throw new Error("missing celld engine"); if (typeof memory.MemoryAttentionEngine !== "function") throw new Error("missing memory engine"); for (const removed of ["MonitorRuntime", "compileMonitor", "PostgresMonitorStore"]) if (removed in core || removed in postgres) throw new Error(`legacy export remains: ${removed}`); if (typeof adapter.createEveAttentionRoute !== "function") throw new Error("missing Eve attention route"); if (adapter.SUPPORTED_EVE_VERSION !== "0.38.1") throw new Error("wrong Eve support version");',
     ],
     { cwd: consumer, stdio: "pipe" },
   );

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Bundle the mailbox worker locally with exactly the flags `celld deploy`
+// Bundle the AttentionEngine worker locally with exactly the flags `celld deploy`
 // uses, so a bundling failure surfaces here instead of half-way through a
 // fleet deploy. Output: build/index.js, which is never uploaded — celld
 // re-bundles from `main` at deploy time.
@@ -55,9 +55,8 @@ if (result.status !== 0) process.exit(result.status ?? 1);
 
 console.log(`bundled -> ${outfile} (${statSync(outfile).size} bytes)`);
 
-// The whole point of src/time.ts and src/mailbox.ts importing no Node
-// built-ins is that none of these reach the bundle. (esbuild’s own `__require`
-// helper is not a Node import.)
+// The shared attention workflow and cell adapter must remain browser-safe.
+// esbuild's own `__require` helper is not a Node import.
 const bundle = readFileSync(outfile, "utf8");
 if (/from "node:|Buffer\.byteLength/.test(bundle)) {
   console.error("bundle references Node built-ins; the worker will fail in workerd");

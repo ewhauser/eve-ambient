@@ -1,38 +1,23 @@
 {
-  // Deployment template for the @ewhauser/eve-ambient correlation mailbox as a celld
-  // fleet application. Copy it next to your own configuration and change the
-  // two vars; nothing else here is per-deployment.
-  //
-  //   celld deploy --config wrangler.jsonc
-  //
-  // `main` is TypeScript on purpose: celld shells out to esbuild, which
-  // compiles and bundles .ts entry points and resolves the @ewhauser/eve-ambient sources
-  // this worker imports. Point CELLD_ESBUILD at the binary if it is not on
-  // PATH, and run ./build.mjs first to see bundling failures before a deploy.
-  "name": "eve-ambient-mailbox",
+  "name": "eve-ambient-attention",
   "main": "index.ts",
   "compatibility_date": "2026-01-01",
   "durable_objects": {
-    "bindings": [{ "name": "MONITOR", "class_name": "MonitorInstance" }]
+    "bindings": [{ "name": "ATTENTION", "class_name": "AttentionCell" }]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["MonitorInstance"] }],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["AttentionCell"] }],
   "vars": {
-    // Where a claimed batch is evaluated: the route your application mounts
-    // `createEvaluationFetchHandler(runtime, { secret })` on. When set, it
-    // wins over the evaluatorUrl the runtime sends with each append, so the
-    // fleet stays in control of its own callback target.
-    "EVALUATOR_URL": "https://app.internal.example/monitor-evaluations",
-
-    // The shared secret. Cells present it to the evaluator as
-    // `authorization: Bearer <secret>`, and the fleet requires the same header
-    // on every /cells route. It must equal the runtime's `mailbox.secret`.
-    // Deploy it from your secret store, never from a committed file.
-    "EVALUATOR_SECRET": "replace-me",
-
-    // Required full-payload capacity limits. Size these from representative
-    // canonical events and evaluator-outage backlogs before deployment.
-    "MAILBOX_MAX_EVENT_BYTES": "384000",
-    "MAILBOX_MAX_BATCH_BYTES": "1000000",
-    "MAILBOX_MAX_RESIDENT_BYTES": "16000000"
+    "CELLD_FLEET_URL": "https://attention.example.internal",
+    "ATTENTION_PREPARE_URL": "https://app.example.internal/ambient/prepare",
+    "ATTENTION_DELIVER_URL": "https://app.example.internal/ambient/deliver",
+    "ATTENTION_SECRET": "replace-from-secret-store",
+    "ATTENTION_MAX_BRANCHES": "1000",
+    "ATTENTION_MAX_FANOUT_BYTES": "16777216",
+    "ATTENTION_MAX_PREPARED_WAKE_BYTES": "1048576",
+    "ATTENTION_MAX_RESIDENT_BYTES": "33554432",
+    "ATTENTION_DEDUPE_MS": "604800000",
+    "ATTENTION_RETRY_DELAY_MS": "1000",
+    "ATTENTION_CLAIM_LEASE_MS": "30000",
+    "ATTENTION_MAX_ATTEMPTS": "10"
   }
 }

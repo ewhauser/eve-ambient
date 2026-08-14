@@ -1,5 +1,6 @@
 import type {
   ChannelEvent,
+  DirectDispatchReceipt,
   JsonValue,
   MonitorBatchClosedBy,
   MonitorBindingView,
@@ -13,12 +14,14 @@ import type {
 import type {
   BatchKey,
   BranchKey,
+  DirectDispatchKey,
   EventKey,
   InputHash,
   RunKey,
 } from "./idempotency.js";
 
-export interface StoredEvent {
+/** Payload-free source acceptance and atomically frozen fan-out receipt. */
+export interface StoredIngressReceipt {
   readonly ref: string;
   readonly eventKey: EventKey;
   /** Unique durable generation for this post-horizon ingress acceptance. */
@@ -32,28 +35,44 @@ export interface StoredEvent {
   readonly eventId: string;
   readonly eventType: string;
   readonly traceId: string;
+  readonly traceSpanId?: string | undefined;
   /** Monotonic within one tenant/application acceptance domain. */
   readonly ingressSequence: string;
-  /** Removed at payload expiry while the source-dedupe tombstone remains. */
-  readonly event?: ChannelEvent<string, JsonValue, JsonValue> | undefined;
   readonly bytes: number;
   readonly acceptedAt: string;
-  readonly payloadExpiresAt: string;
   readonly dedupeExpiresAt: string;
+  /** Active definitions and conditional paths frozen with source acceptance. */
+  readonly deploymentRevision: InputHash;
+  readonly branches: readonly StoredFanoutBranchReceipt[];
   /** Durable coordination for chat direct-dispatch completion. */
   readonly directDispatch?: StoredDirectDispatch | undefined;
 }
 
+export interface StoredFanoutBranchReceipt {
+  readonly branchKey: BranchKey;
+  readonly inputHash: InputHash;
+  readonly monitorId: string;
+  readonly definitionVersion: string;
+  readonly phase?: MonitorPhase | undefined;
+  readonly condition: "always" | "direct-undispatched";
+  readonly status: "accepted" | "terminal";
+}
+
 export interface StoredDirectDispatch {
+  readonly directDispatchKey: DirectDispatchKey;
+  readonly inputHash: InputHash;
+  readonly bindingGeneration: string;
   readonly status: "pending" | "processing" | "dispatched" | "undispatched" | "failed";
   readonly attempt: number;
   readonly availableAt: string;
   readonly leaseExpiresAt?: string | undefined;
   readonly error?: string | undefined;
+  readonly receipts?: readonly DirectDispatchReceipt[] | undefined;
   readonly updatedAt: string;
 }
 
 export type SubscriptionStatus =
+  | "conditional"
   | "pending"
   | "processing"
   | "ready";
@@ -231,9 +250,7 @@ export interface StoredDeadLetter {
   readonly definitionVersion?: string | undefined;
   readonly eventKey?: EventKey | undefined;
   readonly branchKey?: BranchKey | undefined;
-  /** Transitional celld/direct-dispatch reference removed with the event repository. */
-  readonly eventRef?: string | undefined;
-  readonly subscriptionId?: string | undefined;
+  readonly directDispatchKey?: DirectDispatchKey | undefined;
   readonly instanceId?: string | undefined;
   readonly runId?: string | undefined;
   readonly stage: string;
@@ -269,14 +286,18 @@ export interface UsageReservation {
 }
 
 export interface MonitorStoreTransaction {
-  getEventByDedupeKey(key: string): Promise<StoredEvent | null>;
-  getEvent(ref: string): Promise<StoredEvent | null>;
-  releaseEventDedupe(ref: string): Promise<void>;
-  putEvent(event: StoredEvent): Promise<void>;
+  getIngressReceiptByDedupeKey(key: string): Promise<StoredIngressReceipt | null>;
+  getIngressReceipt(ref: string): Promise<StoredIngressReceipt | null>;
+  releaseIngressDedupe(ref: string): Promise<void>;
+  putIngressReceipt(receipt: StoredIngressReceipt): Promise<void>;
 
   getSubscription(id: string): Promise<StoredSubscription | null>;
   putSubscription(subscription: StoredSubscription): Promise<void>;
   deleteSubscription(id: string): Promise<void>;
+  hasActiveSubscriptionForAcceptance(input: {
+    readonly eventKey: EventKey;
+    readonly acceptanceId: string;
+  }): Promise<boolean>;
 
   getInstance(id: string): Promise<StoredMonitorInstance | null>;
   countInstances(input: {
@@ -356,10 +377,9 @@ export interface MonitorStore {
   }): Promise<readonly StoredDeadLetter[]>;
   listDefinitionPins(applicationId: string): Promise<readonly StoredDefinitionPin[]>;
   getRun(id: string): Promise<StoredMonitorRun | null>;
-  getEvent(ref: string): Promise<StoredEvent | null>;
   getInstance(id: string): Promise<StoredMonitorInstance | null>;
   purgeExpired(now: string): Promise<{
-    readonly events: number;
+    readonly ingressReceipts: number;
     readonly runs: number;
     readonly instances: number;
     readonly usage: number;

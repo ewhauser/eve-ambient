@@ -31,7 +31,8 @@ import type {
   FrozenMonitorBatchSummary,
   MonitorStore,
   MonitorStoreTransaction,
-  StoredEvent,
+  StoredFanoutBranchReceipt,
+  StoredIngressReceipt,
   StoredMonitorBatch,
   StoredMonitorInstance,
   StoredMonitorRun,
@@ -42,6 +43,7 @@ import {
   assertIdempotencyInput,
   deriveBatchKey,
   deriveBranchKey,
+  deriveDirectDispatchKey,
   deriveEventKey,
   deriveRunKey,
   deriveWakeKey,
@@ -59,6 +61,8 @@ import type {
   ChatPublishResult,
   CompiledMonitor,
   DeclaredInboundChannel,
+  DirectDispatchHandler,
+  DirectDispatchOptions,
   DirectDispatchReceipt,
   JsonPrimitive,
   JsonValue,
@@ -344,7 +348,7 @@ export class MonitorRuntime {
     if (definition.chat) {
       throw new TypeError(`chat event ${channel.id}:${type} must use publishChat()`);
     }
-    return this.#acceptEvent(channel, type, input, undefined);
+    return (await this.#acceptEvent(channel, type, input, undefined)).result;
   }
 
   async publishChat<
@@ -355,31 +359,66 @@ export class MonitorRuntime {
     channel: DeclaredInboundChannel<TInbound, TReplyTarget>,
     type: TType,
     input: PublishEventInput<SchemaOutput<TInbound[TType]["schema"]>, TReplyTarget>,
-    directHandlers: readonly (() => Promise<DirectDispatchReceipt | null>)[],
+    direct: DirectDispatchOptions,
   ): Promise<ChatPublishResult> {
     const definition = channel.inbound[type];
     if (definition === undefined || !definition.chat) {
       throw new TypeError(`channel ${channel.id}:${type} is not a chat event`);
     }
-    const accepted = await this.#acceptEvent(channel, type, input, "observed");
-    const directDispatch = await this.#runDirectDispatch(accepted.eventId, directHandlers);
-    return { ...accepted, directDispatch };
+    assertBoundedText(direct.bindingGeneration, "direct dispatch bindingGeneration", 512);
+    if (!Array.isArray(direct.handlers)) {
+      throw new TypeError("direct dispatch handlers must be an array");
+    }
+    if (direct.handlers.some((handler) => typeof handler !== "function")) {
+      throw new TypeError("direct dispatch handlers must contain only functions");
+    }
+    const accepted = await this.#acceptEvent(channel, type, input, {
+      phase: "observed",
+      bindingGeneration: direct.bindingGeneration,
+    });
+    const state = accepted.receipt.directDispatch;
+    if (state === undefined) throw new Error("chat ingress receipt has no direct-dispatch plan");
+    const directDispatch = await this.#runDirectDispatch(
+      accepted.receipt.ref,
+      accepted.event,
+      direct.handlers,
+    );
+    return {
+      ...accepted.result,
+      directDispatchKey: state.directDispatchKey,
+      directDispatch,
+    };
   }
 
   async #runDirectDispatch(
-    eventRef: string,
-    directHandlers: readonly (() => Promise<DirectDispatchReceipt | null>)[],
+    receiptRef: string,
+    event: ChannelEvent<string, JsonValue, JsonValue>,
+    directHandlers: readonly DirectDispatchHandler[],
   ): Promise<ChatPublishResult["directDispatch"]> {
-    const claim = await this.#claimDirectDispatch(eventRef);
+    const claim = await this.#claimDirectDispatch(receiptRef);
     if (claim.kind !== "claimed") return claim.outcome;
     try {
-      const receipts = await Promise.all(directHandlers.map((handler) => handler()));
+      const request = freeze({
+        tenantId: claim.tenantId,
+        applicationId: claim.applicationId,
+        eventKey: claim.eventKey,
+        idempotencyKey: claim.directDispatchKey,
+        inputHash: claim.inputHash,
+        event: structuredClone(event),
+      });
+      const receipts = await Promise.all(directHandlers.map((handler) => handler(request)));
+      for (const receipt of receipts) validateDirectDispatchReceipt(receipt);
       const outcome = receipts.some((receipt) => receipt !== null)
         ? "dispatched" as const
         : "undispatched" as const;
-      return this.#completeDirectDispatch(eventRef, claim.attempt, outcome);
+      return this.#completeDirectDispatch(
+        receiptRef,
+        claim.attempt,
+        outcome,
+        receipts.filter((receipt): receipt is DirectDispatchReceipt => receipt !== null),
+      );
     } catch (error) {
-      return this.#failDirectDispatch(eventRef, claim.attempt, error);
+      return this.#failDirectDispatch(receiptRef, claim.attempt, error);
     }
   }
 
@@ -502,8 +541,17 @@ export class MonitorRuntime {
     channel: DeclaredInboundChannel<TInbound, TReplyTarget>,
     type: TType,
     input: PublishEventInput<SchemaOutput<TInbound[TType]["schema"]>, TReplyTarget>,
-    phase: "observed" | undefined,
-  ): Promise<PublishResult> {
+    direct:
+      | {
+          readonly phase: "observed";
+          readonly bindingGeneration: string;
+        }
+      | undefined,
+  ): Promise<{
+    readonly result: PublishResult;
+    readonly receipt: StoredIngressReceipt;
+    readonly event: ChannelEvent<string, JsonValue, JsonValue>;
+  }> {
     this.#assertInitialized();
     const registered = this.#channels.get(channel.id);
     if (registered !== channel) throw new TypeError(`channel ${channel.id} is not registered with this runtime`);
@@ -560,19 +608,13 @@ export class MonitorRuntime {
       },
     });
     const dedupeKey = eventKey;
+    const phase = direct?.phase;
     const matching = this.#matchingMonitors(channel.id, String(type), phase);
+    const conditional =
+      direct === undefined
+        ? []
+        : this.#matchingMonitors(channel.id, String(type), "undispatched");
     const retentionMonitors = this.#retentionMonitors(channel.id, String(type));
-    const retentionMs =
-      retentionMonitors.length === 0
-        ? durationMs(DEFAULT_RETENTION.payload)
-        : retentionMonitors.reduce(
-            (maximum, monitor) =>
-              Math.max(
-                maximum,
-                durationMs((monitor.definition.retention ?? DEFAULT_RETENTION).payload),
-              ),
-            0,
-          );
     const dedupeMs =
       retentionMonitors.length === 0
         ? durationMs(DEFAULT_RETENTION.dedupe)
@@ -584,6 +626,14 @@ export class MonitorRuntime {
               ),
             0,
           );
+    const deploymentRevision = await hashIdempotencyInput({
+      applicationId: this.#applicationId,
+      definitions: [...this.#activeDefinitions.values()]
+        .map((monitor) => ({ monitorId: monitor.definition.id, version: monitor.version }))
+        .sort((left, right) =>
+          left.monitorId.localeCompare(right.monitorId) || left.version.localeCompare(right.version),
+        ),
+    });
     const ref = this.#id("evt");
     const acceptanceId = this.#id("acceptance");
     const event: ChannelEvent<string, JsonValue, JsonValue> = {
@@ -637,103 +687,194 @@ export class MonitorRuntime {
         ...(input.trace?.spanId === undefined ? {} : { spanId: input.trace.spanId }),
       },
     };
-    const record: Omit<StoredEvent, "ingressSequence"> = {
-      ref,
-      eventKey,
-      acceptanceId,
-      inputHash,
-      dedupeKey,
-      tenantId: input.tenantId,
-      applicationId: this.#applicationId,
-      channelId: channel.id,
-      installationId: input.installationId,
-      eventId: input.id,
-      eventType: String(type),
-      traceId,
-      event,
-      bytes,
-      acceptedAt: now,
-      payloadExpiresAt: addMs(now, retentionMs),
-      dedupeExpiresAt: addMs(now, dedupeMs),
-      ...(phase === undefined
-        ? {}
-        : {
-            directDispatch: {
-              status: "pending" as const,
-              attempt: 0,
-              availableAt: now,
-              updatedAt: now,
-            },
-          }),
+    const directPlan = async (planAcceptanceId: string) => {
+      if (direct === undefined) return undefined;
+      const directDispatchKey = await deriveDirectDispatchKey({
+        eventKey,
+        acceptanceId: planAcceptanceId,
+        bindingGeneration: direct.bindingGeneration,
+      });
+      return {
+        directDispatchKey,
+        inputHash: await hashIdempotencyInput({
+          parentInputHash: inputHash,
+          directDispatchKey,
+          acceptanceId: planAcceptanceId,
+          bindingGeneration: direct.bindingGeneration,
+        }),
+      };
     };
+    const acceptedDirectPlan = await directPlan(acceptanceId);
 
-    const result = await this.#store.transaction(`ingress:${dedupeKey}`, async (tx) => {
-      const duplicate = await tx.getEventByDedupeKey(dedupeKey);
-      if (duplicate !== null && duplicate.dedupeExpiresAt > now) {
+    const accepted = await this.#store.transaction(`ingress:${dedupeKey}`, async (tx) => {
+      const duplicate = await tx.getIngressReceiptByDedupeKey(dedupeKey);
+      const validateDuplicate = async (receipt: StoredIngressReceipt): Promise<void> => {
         assertIdempotencyInput({
           namespace: "ingress",
           key: eventKey,
-          existingInputHash: duplicate.inputHash,
+          existingInputHash: receipt.inputHash,
           receivedInputHash: inputHash,
         });
-        return { status: "duplicate" as const, eventId: duplicate.ref, traceId: duplicate.traceId };
+        const expectedDirectPlan = await directPlan(receipt.acceptanceId);
+        if (expectedDirectPlan !== undefined) {
+          if (receipt.directDispatch === undefined) {
+            throw new Error(`chat ingress receipt ${receipt.ref} has no direct-dispatch plan`);
+          }
+          assertIdempotencyInput({
+            namespace: "direct-dispatch-plan",
+            key: eventKey,
+            existingInputHash: receipt.directDispatch.inputHash,
+            receivedInputHash: expectedDirectPlan.inputHash,
+          });
+        }
+      };
+      if (duplicate !== null && duplicate.dedupeExpiresAt > now) {
+        await validateDuplicate(duplicate);
+        return { status: "duplicate" as const, receipt: duplicate };
       }
       if (duplicate !== null) {
-        let hasActiveBranch = false;
-        for (const monitor of matching) {
-          const activeBranchKey = await deriveBranchKey({
-            eventKey: duplicate.eventKey,
-            acceptanceId: duplicate.acceptanceId,
-            monitorId: monitor.definition.id,
-            definitionVersion: monitor.version,
-            ...(phase === undefined ? {} : { phase }),
-          });
-          if ((await tx.getSubscription(activeBranchKey)) !== null) {
-            hasActiveBranch = true;
-            break;
-          }
-        }
-        if (hasActiveBranch) {
-          assertIdempotencyInput({
-            namespace: "ingress-active-branch",
-            key: eventKey,
-            existingInputHash: duplicate.inputHash,
-            receivedInputHash: inputHash,
-          });
-          return { status: "duplicate" as const, eventId: duplicate.ref, traceId: duplicate.traceId };
+        const hasActiveBranch = await tx.hasActiveSubscriptionForAcceptance({
+          eventKey: duplicate.eventKey,
+          acceptanceId: duplicate.acceptanceId,
+        });
+        const directActive =
+          duplicate.directDispatch !== undefined &&
+          ["pending", "processing"].includes(duplicate.directDispatch.status);
+        if (hasActiveBranch || directActive) {
+          await validateDuplicate(duplicate);
+          return { status: "duplicate" as const, receipt: duplicate };
         }
         // Preserve the expired ingress receipt while freeing
         // the provider dedupe key for this newly accepted delivery.
-        await tx.releaseEventDedupe(duplicate.ref);
+        await tx.releaseIngressDedupe(duplicate.ref);
       }
       const ingressSequence = await tx.nextIngressSequence(
         scopedKey(input.tenantId, this.#applicationId),
       );
-      const acceptedRecord: StoredEvent = { ...record, ingressSequence };
-      await tx.putEvent(acceptedRecord);
+      const envelope: AcceptedIngressEvent = {
+        ref,
+        eventKey,
+        acceptanceId,
+        inputHash,
+        event,
+        bytes,
+        acceptedAt: now,
+        tenantId: input.tenantId,
+        applicationId: this.#applicationId,
+        channelId: channel.id,
+        installationId: input.installationId,
+        eventId: input.id,
+        eventType: String(type),
+        traceId,
+        ingressSequence,
+      };
+      const branchRows: Array<{
+        readonly subscription: StoredSubscription;
+        readonly receipt: StoredFanoutBranchReceipt;
+      }> = [];
       for (const monitor of matching) {
-        await tx.putSubscription(await this.#newSubscription(acceptedRecord, monitor, phase));
+        const subscription = await this.#newSubscription(envelope, monitor, phase, "pending");
+        branchRows.push({
+          subscription,
+          receipt: {
+            branchKey: subscription.branchKey,
+            inputHash: subscription.inputHash,
+            monitorId: subscription.monitorId,
+            definitionVersion: subscription.definitionVersion,
+            ...(subscription.phase === undefined ? {} : { phase: subscription.phase }),
+            condition: "always",
+            status: "accepted",
+          },
+        });
       }
-      return { status: "accepted" as const, eventId: ref, traceId };
+      for (const monitor of conditional) {
+        const subscription = await this.#newSubscription(
+          envelope,
+          monitor,
+          "undispatched",
+          "conditional",
+        );
+        branchRows.push({
+          subscription,
+          receipt: {
+            branchKey: subscription.branchKey,
+            inputHash: subscription.inputHash,
+            monitorId: subscription.monitorId,
+            definitionVersion: subscription.definitionVersion,
+            phase: "undispatched",
+            condition: "direct-undispatched",
+            status: "accepted",
+          },
+        });
+      }
+      const receipt: StoredIngressReceipt = {
+        ref,
+        eventKey,
+        acceptanceId,
+        inputHash,
+        dedupeKey,
+        tenantId: input.tenantId,
+        applicationId: this.#applicationId,
+        channelId: channel.id,
+        installationId: input.installationId,
+        eventId: input.id,
+        eventType: String(type),
+        traceId,
+        ...(input.trace?.spanId === undefined ? {} : { traceSpanId: input.trace.spanId }),
+        ingressSequence,
+        bytes,
+        acceptedAt: now,
+        dedupeExpiresAt: addMs(now, dedupeMs),
+        deploymentRevision,
+        branches: branchRows.map((branch) => branch.receipt),
+        ...(acceptedDirectPlan === undefined
+          ? {}
+          : {
+              directDispatch: {
+                directDispatchKey: acceptedDirectPlan.directDispatchKey,
+                inputHash: acceptedDirectPlan.inputHash,
+                bindingGeneration: direct!.bindingGeneration,
+                status: "pending" as const,
+                attempt: 0,
+                availableAt: now,
+                updatedAt: now,
+              },
+            }),
+      };
+      await tx.putIngressReceipt(receipt);
+      for (const branch of branchRows) await tx.putSubscription(branch.subscription);
+      return { status: "accepted" as const, receipt };
     });
+    const acceptedEvent: ChannelEvent<string, JsonValue, JsonValue> = freeze({
+      ...structuredClone(event),
+      ref: accepted.receipt.ref,
+      receivedAt: accepted.receipt.acceptedAt,
+      trace: {
+        traceId: accepted.receipt.traceId,
+        ...(accepted.receipt.traceSpanId === undefined
+          ? {}
+          : { spanId: accepted.receipt.traceSpanId }),
+      },
+    });
+    const result: PublishResult = {
+      status: accepted.status,
+      eventId: accepted.receipt.ref,
+      traceId: accepted.receipt.traceId,
+    };
     await this.#emit(
-      result.status === "accepted" ? "monitor.event.accepted" : "monitor.event.deduplicated",
-      { tenantId: input.tenantId, eventRef: result.eventId, eventKey },
+      accepted.status === "accepted" ? "monitor.event.accepted" : "monitor.event.deduplicated",
+      { tenantId: input.tenantId, eventRef: accepted.receipt.ref, eventKey },
     );
-    return result;
+    return { result, receipt: accepted.receipt, event: acceptedEvent };
   }
 
-  async #claimDirectDispatch(eventRef: string): Promise<DirectDispatchClaim> {
-    return this.#store.transaction(`chat-dispatch:${eventRef}`, async (tx) => {
-      const event = await tx.getEvent(eventRef);
-      if (event === null) throw new Error(`accepted event ${eventRef} disappeared`);
+  async #claimDirectDispatch(receiptRef: string): Promise<DirectDispatchClaim> {
+    return this.#store.transaction(`chat-dispatch:${receiptRef}`, async (tx) => {
+      let receipt = await tx.getIngressReceipt(receiptRef);
+      if (receipt === null) throw new Error(`ingress receipt ${receiptRef} disappeared`);
       const now = this.#now();
-      const state = event.directDispatch ?? {
-        status: "pending" as const,
-        attempt: 0,
-        availableAt: now,
-        updatedAt: now,
-      };
+      const state = receipt.directDispatch;
+      if (state === undefined) throw new Error(`ingress receipt ${receiptRef} is not a chat event`);
       if (isSettledDirectDispatch(state.status)) {
         return { kind: "settled", outcome: state.status };
       }
@@ -747,8 +888,9 @@ export class MonitorRuntime {
       }
       if (state.attempt >= this.#retry.maxAttempts) {
         const reason = "maximum direct-dispatch retry attempts exceeded";
-        await tx.putEvent({
-          ...event,
+        receipt = await this.#resolveConditionalBranches(tx, receipt, false, now);
+        receipt = {
+          ...receipt,
           directDispatch: {
             ...state,
             status: "failed",
@@ -756,14 +898,16 @@ export class MonitorRuntime {
             error: reason,
             updatedAt: now,
           },
-        });
-        await tx.putDeadLetter(this.#directDispatchDeadLetter(event, reason, now));
+        };
+        await tx.putIngressReceipt(receipt);
+        await tx.putDeadLetter(this.#directDispatchDeadLetter(receipt, reason, now));
         return { kind: "settled", outcome: "failed" };
       }
       const attempt = state.attempt + 1;
-      await tx.putEvent({
-        ...event,
+      await tx.putIngressReceipt({
+        ...receipt,
         directDispatch: {
+          ...state,
           status: "processing",
           attempt,
           availableAt: now,
@@ -771,37 +915,44 @@ export class MonitorRuntime {
           updatedAt: now,
         },
       });
-      return { kind: "claimed", attempt };
+      return {
+        kind: "claimed",
+        attempt,
+        tenantId: receipt.tenantId,
+        applicationId: receipt.applicationId,
+        eventKey: receipt.eventKey,
+        directDispatchKey: state.directDispatchKey,
+        inputHash: state.inputHash,
+      };
     });
   }
 
   async #completeDirectDispatch(
-    eventRef: string,
+    receiptRef: string,
     attempt: number,
     outcome: "dispatched" | "undispatched",
+    directReceipts: readonly DirectDispatchReceipt[],
   ): Promise<ChatPublishResult["directDispatch"]> {
-    return this.#store.transaction(`chat-dispatch:${eventRef}`, async (tx) => {
-      const event = await tx.getEvent(eventRef);
-      if (event === null) throw new Error(`accepted event ${eventRef} disappeared`);
-      const state = event.directDispatch;
+    return this.#store.transaction(`chat-dispatch:${receiptRef}`, async (tx) => {
+      let receipt = await tx.getIngressReceipt(receiptRef);
+      if (receipt === null) throw new Error(`ingress receipt ${receiptRef} disappeared`);
+      const state = receipt.directDispatch;
       if (state !== undefined && isSettledDirectDispatch(state.status)) return state.status;
       if (state?.status !== "processing" || state.attempt !== attempt) return "pending";
       const now = this.#now();
-      if (outcome === "undispatched") {
-        const matching = this.#matchingMonitors(event.channelId, event.eventType, outcome);
-        for (const monitor of matching) {
-          const subscription = await this.#newSubscription(event, monitor, outcome);
-          if ((await tx.getSubscription(subscription.id)) === null) {
-            await tx.putSubscription(subscription);
-          }
-        }
-      }
-      await tx.putEvent({
-        ...event,
+      receipt = await this.#resolveConditionalBranches(
+        tx,
+        receipt,
+        outcome === "undispatched",
+        now,
+      );
+      await tx.putIngressReceipt({
+        ...receipt,
         directDispatch: {
           ...state,
           status: outcome,
           leaseExpiresAt: undefined,
+          ...(outcome === "dispatched" ? { receipts: structuredClone(directReceipts) } : {}),
           updatedAt: now,
         },
       });
@@ -810,15 +961,15 @@ export class MonitorRuntime {
   }
 
   async #failDirectDispatch(
-    eventRef: string,
+    receiptRef: string,
     attempt: number,
     error: unknown,
   ): Promise<ChatPublishResult["directDispatch"]> {
     const transient = error instanceof TransientMonitorError;
-    return this.#store.transaction(`chat-dispatch:${eventRef}`, async (tx) => {
-      const event = await tx.getEvent(eventRef);
-      if (event === null) throw new Error(`accepted event ${eventRef} disappeared`);
-      const state = event.directDispatch;
+    return this.#store.transaction(`chat-dispatch:${receiptRef}`, async (tx) => {
+      let receipt = await tx.getIngressReceipt(receiptRef);
+      if (receipt === null) throw new Error(`ingress receipt ${receiptRef} disappeared`);
+      const state = receipt.directDispatch;
       if (state !== undefined && isSettledDirectDispatch(state.status)) return state.status;
       if (state?.status !== "processing" || state.attempt !== attempt) return "pending";
       const now = this.#now();
@@ -830,8 +981,8 @@ export class MonitorRuntime {
           this.#retry.maxBackoffMs,
           this.#retry.initialBackoffMs * 2 ** Math.max(0, attempt - 1),
         );
-        await tx.putEvent({
-          ...event,
+        await tx.putIngressReceipt({
+          ...receipt,
           directDispatch: {
             ...state,
             status: "pending",
@@ -843,8 +994,9 @@ export class MonitorRuntime {
         });
         return "pending";
       }
-      await tx.putEvent({
-        ...event,
+      receipt = await this.#resolveConditionalBranches(tx, receipt, false, now);
+      receipt = {
+        ...receipt,
         directDispatch: {
           ...state,
           status: "failed",
@@ -852,19 +1004,54 @@ export class MonitorRuntime {
           error: reason,
           updatedAt: now,
         },
-      });
-      await tx.putDeadLetter(this.#directDispatchDeadLetter(event, reason, now));
+      };
+      await tx.putIngressReceipt(receipt);
+      await tx.putDeadLetter(this.#directDispatchDeadLetter(receipt, reason, now));
       return "failed";
     });
   }
 
-  #directDispatchDeadLetter(event: StoredEvent, reason: string, now: string) {
+  async #resolveConditionalBranches(
+    tx: MonitorStoreTransaction,
+    receipt: StoredIngressReceipt,
+    activate: boolean,
+    now: string,
+  ): Promise<StoredIngressReceipt> {
+    const branches: StoredFanoutBranchReceipt[] = [];
+    for (const branch of receipt.branches) {
+      if (branch.condition !== "direct-undispatched") {
+        branches.push(branch);
+        continue;
+      }
+      const subscription = await tx.getSubscription(branch.branchKey);
+      if (activate && subscription?.status === "conditional") {
+        await tx.putSubscription({
+          ...subscription,
+          status: "pending",
+          availableAt: now,
+          updatedAt: now,
+        });
+        branches.push(branch);
+        continue;
+      }
+      if (!activate && subscription?.status === "conditional") {
+        await tx.deleteSubscription(subscription.id);
+        branches.push({ ...branch, status: "terminal" });
+        continue;
+      }
+      branches.push(subscription === null ? { ...branch, status: "terminal" } : branch);
+    }
+    return { ...receipt, branches };
+  }
+
+  #directDispatchDeadLetter(receipt: StoredIngressReceipt, reason: string, now: string) {
+    const directDispatchKey = receipt.directDispatch?.directDispatchKey;
     return {
       id: this.#id("dlq"),
-      tenantId: event.tenantId,
-      applicationId: event.applicationId,
-      eventKey: event.eventKey,
-      eventRef: event.ref,
+      tenantId: receipt.tenantId,
+      applicationId: receipt.applicationId,
+      eventKey: receipt.eventKey,
+      ...(directDispatchKey === undefined ? {} : { directDispatchKey }),
       stage: "direct-dispatch",
       reason,
       createdAt: now,
@@ -872,14 +1059,12 @@ export class MonitorRuntime {
   }
 
   async #newSubscription(
-    event: StoredEvent,
+    event: AcceptedIngressEvent,
     monitor: CompiledMonitor,
     phase?: "observed" | "undispatched",
+    status: "conditional" | "pending" = "pending",
   ): Promise<StoredSubscription> {
     const now = this.#now();
-    if (event.event === undefined) {
-      throw new Error(`accepted event ${event.eventKey} payload disappeared before fan-out`);
-    }
     const branchKey = await deriveBranchKey({
       eventKey: event.eventKey,
       acceptanceId: event.acceptanceId,
@@ -923,7 +1108,7 @@ export class MonitorRuntime {
       definitionVersion: monitor.version,
       ingressSequence: event.ingressSequence,
       ...(phase === undefined ? {} : { phase }),
-      status: "pending",
+      status,
       attempt: 0,
       availableAt: now,
       createdAt: now,
@@ -1081,7 +1266,6 @@ export class MonitorRuntime {
           definitionVersion: current.definitionVersion,
           eventKey: current.eventKey,
           branchKey: current.branchKey,
-          subscriptionId: current.id,
           stage: "retry",
           reason: "maximum retry attempts exceeded",
           createdAt: now,
@@ -2574,7 +2758,6 @@ export class MonitorRuntime {
         definitionVersion: subscription.definitionVersion,
         eventKey: subscription.eventKey,
         branchKey: subscription.branchKey,
-        subscriptionId: subscription.id,
         stage,
         reason,
         createdAt: now,
@@ -2740,6 +2923,11 @@ export class MonitorRuntime {
       this.#store.listInstances({ applicationId: this.#applicationId, monitorId: to }),
     ]);
     for (const subscription of subscriptions) {
+      if (subscription.status === "conditional") {
+        throw new Error(
+          `cannot migrate ${from}; subscription ${subscription.id} is frozen behind direct dispatch`,
+        );
+      }
       if (subscription.status === "processing") {
         throw new Error(`cannot migrate ${from}; subscription ${subscription.id} is processing`);
       }
@@ -3025,11 +3213,39 @@ type LimitResult =
     };
 
 type DirectDispatchClaim =
-  | { readonly kind: "claimed"; readonly attempt: number }
+  | {
+      readonly kind: "claimed";
+      readonly attempt: number;
+      readonly tenantId: string;
+      readonly applicationId: string;
+      readonly eventKey: StoredIngressReceipt["eventKey"];
+      readonly directDispatchKey: NonNullable<
+        StoredIngressReceipt["directDispatch"]
+      >["directDispatchKey"];
+      readonly inputHash: NonNullable<StoredIngressReceipt["directDispatch"]>["inputHash"];
+    }
   | {
       readonly kind: "settled";
       readonly outcome: ChatPublishResult["directDispatch"];
     };
+
+interface AcceptedIngressEvent {
+  readonly ref: string;
+  readonly eventKey: StoredIngressReceipt["eventKey"];
+  readonly acceptanceId: string;
+  readonly inputHash: StoredIngressReceipt["inputHash"];
+  readonly event: ChannelEvent<string, JsonValue, JsonValue>;
+  readonly bytes: number;
+  readonly acceptedAt: string;
+  readonly tenantId: string;
+  readonly applicationId: string;
+  readonly channelId: string;
+  readonly installationId: string;
+  readonly eventId: string;
+  readonly eventType: string;
+  readonly traceId: string;
+  readonly ingressSequence: string;
+}
 
 type BudgetMetric = "events" | "model-calls" | "model-input-tokens" | "wakes";
 
@@ -3204,9 +3420,22 @@ function validateModelUsage(usage: {
 }
 
 function isSettledDirectDispatch(
-  status: NonNullable<StoredEvent["directDispatch"]>["status"],
+  status: NonNullable<StoredIngressReceipt["directDispatch"]>["status"],
 ): status is "dispatched" | "undispatched" | "failed" {
   return status === "dispatched" || status === "undispatched" || status === "failed";
+}
+
+function validateDirectDispatchReceipt(
+  receipt: DirectDispatchReceipt | null,
+): asserts receipt is DirectDispatchReceipt | null {
+  if (
+    receipt !== null &&
+    (typeof receipt !== "object" ||
+      typeof receipt.turnId !== "string" ||
+      receipt.turnId.trim().length === 0)
+  ) {
+    throw new TypeError("direct dispatch receipt must be null or contain a non-empty turnId");
+  }
 }
 
 function budgetProperty(metric: BudgetMetric): keyof MonitorBudgetCeilings {

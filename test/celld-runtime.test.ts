@@ -327,18 +327,18 @@ describe("MonitorRuntime with the celld mailbox", () => {
     expect(state.instance.binding).toBeDefined();
   });
 
-  it("evaluates from cell custody after the ingress payload is deleted", async () => {
+  it("evaluates from cell custody while the ingress receipt remains payload-free", async () => {
     const accepted = await world.runtime.publish(
       slack,
       "message",
       publishInput("1", "please wake me"),
     );
     await world.runtime.drain();
-    await world.store.transaction(`redact:${accepted.eventId}`, async (tx) => {
-      const record = await tx.getEvent(accepted.eventId);
-      if (record === null) throw new Error("accepted event disappeared before test redaction");
-      await tx.putEvent({ ...record, event: undefined });
-    });
+    const receipt = await world.store.transaction(`inspect:${accepted.eventId}`, (tx) =>
+      tx.getIngressReceipt(accepted.eventId)
+    );
+    expect(receipt).not.toBeNull();
+    expect(receipt).not.toHaveProperty("event");
 
     world.clock.advance(1_000);
     const fired = await world.fleet.fireDueAlarms();

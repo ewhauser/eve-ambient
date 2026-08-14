@@ -51,7 +51,7 @@ const DEBOUNCE_CONFIG = {
     maxBytes: 10_000,
   },
   cooldown: { afterWake: "3s" as const, during: "accumulate" as const },
-  retention: { payload: "24h" as const, decisions: "30d" as const, dedupe: "7d" as const },
+  retention: { decisions: "30d" as const, dedupe: "7d" as const },
 };
 
 interface Harness {
@@ -335,7 +335,7 @@ describe("celld mailbox cell", () => {
     const harness = makeHarness();
     const config = {
       ...DEBOUNCE_CONFIG,
-      retention: { payload: "1s" as const, decisions: "2s" as const, dedupe: "3s" as const },
+      retention: { decisions: "2s" as const, dedupe: "3s" as const },
     };
     await harness.append("evt-1", { config });
     harness.clock.advance(1_000);
@@ -359,7 +359,7 @@ describe("celld mailbox cell", () => {
     const harness = makeHarness();
     const config = {
       ...DEBOUNCE_CONFIG,
-      retention: { payload: "1s" as const, decisions: "2s" as const, dedupe: "3s" as const },
+      retention: { decisions: "2s" as const, dedupe: "3s" as const },
     };
     await harness.append("evt-1", { config });
     harness.clock.advance(1_000);
@@ -378,7 +378,7 @@ describe("celld mailbox cell", () => {
     const harness = makeHarness();
     const config = {
       ...DEBOUNCE_CONFIG,
-      retention: { payload: "1s" as const, decisions: "2s" as const, dedupe: "3s" as const },
+      retention: { decisions: "2s" as const, dedupe: "3s" as const },
     };
     await harness.append("evt-1", { config });
     const firstKey = (await harness.instance()).openBatch!.events[0]!.branchKey;

@@ -9,7 +9,9 @@ import {
   defineMonitor,
   ignore,
   MonitorRuntime,
+  TransientMonitorError,
   type ChannelEvent,
+  type PublishResult,
 } from "../src/index.js";
 import { PostgresMonitorStore, type PostgresPool } from "../src/postgres.js";
 import { VirtualMonitorClock } from "../src/testing.js";
@@ -24,6 +26,13 @@ const source = defineInboundChannel({
   },
 });
 type Event = ChannelEvent<"changed", { key: string }>;
+const chat = defineInboundChannel({
+  id: "postgres-chat",
+  inbound: {
+    message: defineChannelEvent({ schema: z.object({ key: z.string() }), chat: true }),
+  },
+});
+type ChatEvent = ChannelEvent<"message", { key: string }>;
 
 postgresDescribe("PostgresMonitorStore integration", () => {
   const schema = `eve_ambient_test_${process.pid}_${Date.now()}`;
@@ -65,7 +74,7 @@ postgresDescribe("PostgresMonitorStore integration", () => {
       decision: () => ignore({ reason: "recorded" }),
       task: { instructions: "Review.", evidence: ({ events }) => ({ count: events.length }) },
       route: () => null,
-      retention: { payload: "1s", decisions: "1h", dedupe: "1s" },
+      retention: { decisions: "1h", dedupe: "1s" },
       metadata: { owner: "test", useCase: "postgres-conformance" },
     });
     const runtime = new MonitorRuntime({
@@ -76,15 +85,21 @@ postgresDescribe("PostgresMonitorStore integration", () => {
       clock,
     });
     await runtime.initialize();
+    const accepted: PublishResult[] = [];
     for (const [id, key] of [["one", "same"], ["two", "same"], ["three", "other"]] as const) {
-      await runtime.publish(source, "changed", {
+      accepted.push(await runtime.publish(source, "changed", {
         tenantId: "tenant",
         installationId: "installation",
         id,
         data: { key },
         origin: { kind: "external" },
-      });
+      }));
     }
+    const ingressReceipt = await store.transaction("inspect:ingress", (tx) =>
+      tx.getIngressReceipt(accepted[0]!.eventId)
+    );
+    expect(ingressReceipt).not.toHaveProperty("event");
+    expect(ingressReceipt?.branches).toHaveLength(1);
     await runtime.drain();
 
     expect(await runtime.listRuns()).toHaveLength(3);
@@ -115,5 +130,93 @@ postgresDescribe("PostgresMonitorStore integration", () => {
       applicationId: "app",
       monitorId: definition.id,
     })).resolves.toEqual([]);
+  }, 20_000);
+
+  it("freezes and resolves chat conditional branches in PostgreSQL", async () => {
+    const clock = new VirtualMonitorClock();
+    const definition = (id: string, phase: "observed" | "undispatched") =>
+      defineMonitor<ChatEvent>({
+        id,
+        sources: [chat.event("message", { phase })],
+        decision: () => ignore({ reason: "recorded" }),
+        task: { instructions: "Review.", evidence: () => ({}) },
+        route: () => null,
+        retention: { decisions: "1h", dedupe: "1s" },
+        metadata: { owner: "test", useCase: "postgres-chat" },
+      });
+    const runtime = new MonitorRuntime({
+      applicationId: "app-chat",
+      deployment: {
+        monitors: [
+          compileMonitor(definition("observed", "observed"), "v1"),
+          compileMonitor(definition("ambient", "undispatched"), "v1"),
+        ],
+      },
+      channels: [chat],
+      store,
+      clock,
+    });
+    await runtime.initialize();
+
+    const dispatched = await runtime.publishChat(
+      chat,
+      "message",
+      {
+        tenantId: "tenant",
+        installationId: "installation",
+        id: "direct",
+        data: { key: "direct" },
+        origin: { kind: "external" },
+      },
+      {
+        bindingGeneration: "postgres-binding-v1",
+        handlers: [async () => ({ turnId: "turn-direct" })],
+      },
+    );
+    await runtime.drain();
+
+    const receipt = await store.transaction(`inspect:${dispatched.eventId}`, (tx) =>
+      tx.getIngressReceipt(dispatched.eventId)
+    );
+    expect(receipt).not.toHaveProperty("event");
+    expect(receipt?.directDispatch).toMatchObject({
+      directDispatchKey: dispatched.directDispatchKey,
+      status: "dispatched",
+      receipts: [{ turnId: "turn-direct" }],
+    });
+    expect(receipt?.branches.find((branch) => branch.condition === "direct-undispatched"))
+      .toMatchObject({ status: "terminal" });
+    expect((await runtime.listRuns()).map((run) => run.monitorId)).toEqual(["observed"]);
+
+    const pending = await runtime.publishChat(
+      chat,
+      "message",
+      {
+        tenantId: "tenant",
+        installationId: "installation",
+        id: "pending",
+        data: { key: "pending" },
+        origin: { kind: "external" },
+      },
+      {
+        bindingGeneration: "postgres-binding-v1",
+        handlers: [async () => {
+          throw new TransientMonitorError("direct target unavailable");
+        }],
+      },
+    );
+    expect(pending.directDispatch).toBe("pending");
+    await runtime.drain();
+    clock.advance(1_000);
+    await expect(runtime.purgeExpired()).resolves.toMatchObject({ ingressReceipts: 2 });
+    expect(await runtime.listDeadLetters()).toMatchObject([{
+      eventKey: expect.stringMatching(/^eve:event:v1:/),
+      directDispatchKey: pending.directDispatchKey,
+      stage: "direct-dispatch",
+    }]);
+    expect(await store.listSubscriptionsForMonitor({
+      applicationId: "app-chat",
+      monitorId: "ambient",
+    })).toEqual([]);
   }, 20_000);
 });

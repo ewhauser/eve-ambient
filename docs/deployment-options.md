@@ -27,7 +27,7 @@ not a runtime toggle.
 | Profile | Ingress and selection | Event and payload storage | Mailbox and timers | Scaling | Operational burden | Maturity |
 |---|---|---|---|---|---|---|
 | **Postgres-first** | Eve channels normalize events; Eve Ambient filters after durable acceptance | Full branch and batch values in PostgreSQL until their next handoff or terminal completion | PostgreSQL instance rows, due scans, and leased claims | Add workers and scale PostgreSQL vertically; validate the actual workload before introducing another stateful tier | One durable system plus workers | Supported; default |
-| **Bring your own signal pipeline** | An external system selects events and calls `publish()` | External system before Eve acceptance; PostgreSQL for accepted events | PostgreSQL unless celld is selected separately | Raw-stream work scales outside Eve; Eve scales with the selected-event rate | External pipeline plus Eve and PostgreSQL | Supported through the publishing API |
+| **Bring your own signal pipeline** | An external system selects events and calls `publish()` | External system before Eve acceptance; full PostgreSQL branch values after acceptance | PostgreSQL unless celld is selected separately | Raw-stream work scales outside Eve; Eve scales with the selected-event rate | External pipeline plus Eve and PostgreSQL | Supported through the publishing API |
 | **External log + distributed mailbox** | A channel gateway writes a durable log; partitioned consumers normalize and may perform coarse selection before publishing | Kafka or a similar log owns the raw stream; PostgreSQL owns accepted branch work until the cell receipt, then celld owns the complete mailbox payload; PostgreSQL keeps runs, decisions, dead letters, and audit | celld cells hold full events, per-key lifecycle state, and alarms | Partition consumers by the upstream log and add celld nodes for mailbox concurrency | Multiple stateful systems and explicit handoff recovery | Supported as a custom `publish()` bridge with experimental celld; a first-class Kafka adapter is not shipped |
 
 No generic events-per-second claim applies to the Postgres-first profile.
@@ -80,7 +80,7 @@ recovery outside the package. See [Prefiltered ingress](prefiltered-ingress.md).
 The high-volume reference topology separates three stateful responsibilities:
 
 ```text
-channel gateway -> Kafka -> consumer -> publish() -> PostgreSQL event and audit
+channel gateway -> Kafka -> consumer -> publish() -> PostgreSQL receipt + branches
                                                    -> filter and correlate
                                                    -> celld mailbox
                                                    -> evaluator -> delivery
@@ -94,9 +94,9 @@ dedupe, deterministic monitor filtering, correlation, and loop prevention.
 Only filter-surviving complete event envelopes are appended to celld. A durable
 append receipt transfers mailbox custody to the cell, after which the branch
 row can be deleted. The cell sends the complete claimed batch to the evaluator;
-evaluation does not read an event repository. PostgreSQL remains the run,
-decision, dead-letter, budget, and audit store and may retain its ingress copy
-according to its own local cleanup policy.
+evaluation does not read an event repository. PostgreSQL retains a payload-free
+ingress/fan-out receipt plus runs, decisions, dead letters, budgets, and audit;
+the active branch or mailbox owns each complete payload.
 
 With today's public API, the upstream consumer may commit its offset after
 `publish()` returns `accepted` or `duplicate`. The complete event and branch are

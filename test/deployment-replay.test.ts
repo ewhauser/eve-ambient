@@ -317,12 +317,12 @@ describe("deployment identity and retention", () => {
     expect((await retained.listRuns())[0]?.definitionVersion).toBe("v1");
   });
 
-  it("redacts ingress payload before dedupe expiry while the frozen run remains self-contained", async () => {
+  it("keeps ingress receipts payload-free while the frozen run remains self-contained", async () => {
     const clock = new VirtualMonitorClock();
     const store = new MemoryMonitorStore();
     const delivery = new RetryOnceConversationChannel({ id: "delivery", clock });
     const definition = monitor("retention", delivery, {
-      retention: { payload: "1s", decisions: "1h", dedupe: "2s" },
+      retention: { decisions: "1h", dedupe: "2s" },
     });
     const runtime = new MonitorRuntime({
       applicationId: "app",
@@ -339,9 +339,13 @@ describe("deployment identity and retention", () => {
     expect(pending.status).toBe("retry");
     if (!("events" in pending.batch)) throw new Error("retry run lost its actionable payload");
     expect(pending.batch.events[0]?.event.data).toEqual({ key: "key", value: "secret" });
+    const receipt = await store.transaction(`inspect:${accepted.eventId}`, (tx) =>
+      tx.getIngressReceipt(accepted.eventId)
+    );
+    expect(receipt).not.toBeNull();
+    expect(receipt).not.toHaveProperty("event");
     clock.advance(1_000);
     await runtime.purgeExpired();
-    expect((await store.getEvent(accepted.eventId))?.event).toBeUndefined();
     await runtime.drain();
     expect(delivery.deliveries[0]?.evidence.projectedEvidence).toEqual({ values: ["secret"] });
     const run = (await runtime.listRuns())[0]!;
@@ -360,7 +364,7 @@ describe("deployment identity and retention", () => {
     const store = new MemoryMonitorStore();
     const delivery = new MemoryConversationChannel({ id: "delivery", clock });
     const definition = monitor("dedupe-reuse", delivery, {
-      retention: { payload: "1s", decisions: "1h", dedupe: "1s" },
+      retention: { decisions: "1h", dedupe: "1s" },
     });
     const runtime = new MonitorRuntime({
       applicationId: "app",
@@ -383,7 +387,11 @@ describe("deployment identity and retention", () => {
 
     expect(second.status).toBe("accepted");
     expect(second.eventId).not.toBe(first.eventId);
-    expect(await store.getEvent(first.eventId)).not.toBeNull();
+    const firstReceipt = await store.transaction(`inspect:${first.eventId}`, (tx) =>
+      tx.getIngressReceipt(first.eventId)
+    );
+    expect(firstReceipt).not.toBeNull();
+    expect(firstReceipt).not.toHaveProperty("event");
     await runtime.drain();
     expect(delivery.deliveries).toHaveLength(2);
     const runs = await runtime.listRuns();
@@ -395,7 +403,7 @@ describe("deployment identity and retention", () => {
     const store = new MemoryMonitorStore();
     const delivery = new MemoryConversationChannel({ id: "delivery", clock });
     const definition = monitor("retention-dead-letter", delivery, {
-      retention: { payload: "1s", decisions: "1h", dedupe: "1s" },
+      retention: { decisions: "1h", dedupe: "1s" },
     });
     const runtime = new MonitorRuntime({
       applicationId: "app",

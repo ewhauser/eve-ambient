@@ -35,6 +35,7 @@ import {
   type ChannelEvent,
 } from "../src/index.js";
 import { createEvaluationFetchHandler } from "../src/celld.js";
+import type { CelldAppendRequest } from "../src/mailbox.js";
 import { MemoryMonitorStore } from "../src/memory.js";
 import { MemoryConversationChannel } from "../src/testing.js";
 import { compareCellState, type PublishedEvent } from "./celld-oracle.js";
@@ -66,6 +67,7 @@ describe.skipIf(!enabled)("celld fleet integration", () => {
   const applicationId = `app-it-${randomUUID().slice(0, 8)}`;
   let runtime: MonitorRuntime;
   let server: Server;
+  const appends: CelldAppendRequest[] = [];
 
   const monitor = defineMonitor<MessageEvent>({
     id: "ambient",
@@ -107,6 +109,13 @@ describe.skipIf(!enabled)("celld fleet integration", () => {
         fleetUrl: FLEET_URL!,
         evaluatorUrl: EVALUATOR_URL!,
         secret: SECRET,
+        fetch: async (input, init) => {
+          const request = new Request(input, init);
+          if (new URL(request.url).pathname.endsWith("/append")) {
+            appends.push((await request.clone().json()) as CelldAppendRequest);
+          }
+          return fetch(request);
+        },
       },
     });
     await runtime.initialize();
@@ -149,30 +158,15 @@ describe.skipIf(!enabled)("celld fleet integration", () => {
     ).json()) as Record<string, any>;
 
     const published = new Map<string, PublishedEvent>();
-    for (const entry of state.log as {
-      kind: string;
-      eventRef?: string;
-      branchKey?: PublishedEvent["branchKey"];
-      eventKey?: PublishedEvent["eventKey"];
-      inputHash?: PublishedEvent["inputHash"];
-    }[]) {
-      if (
-        entry.kind !== "append" ||
-        entry.eventRef === undefined ||
-        entry.branchKey === undefined ||
-        entry.eventKey === undefined ||
-        entry.inputHash === undefined
-      ) continue;
-      const record = (await store.getEvent(entry.eventRef))!;
-      if (record.event === undefined) throw new Error(`missing integration event ${entry.eventRef}`);
+    for (const entry of appends) {
       published.set(entry.branchKey, {
         branchKey: entry.branchKey,
         eventKey: entry.eventKey,
         inputHash: entry.inputHash,
-        event: record.event,
-        bytes: record.bytes,
-        acceptedAt: record.acceptedAt,
-        ingressSequence: record.ingressSequence,
+        event: entry.event,
+        bytes: entry.bytes,
+        acceptedAt: entry.acceptedAt,
+        ingressSequence: entry.ingressSequence,
       });
     }
     const verdict = compareCellState(state as never, { ...state.pin, cellName, published });

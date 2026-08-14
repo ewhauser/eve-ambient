@@ -1,4 +1,6 @@
 /** A JSON value that can be copied into durable records without custom codecs. */
+import type { DirectDispatchKey, EventKey, InputHash } from "./idempotency.js";
+
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | { readonly [key: string]: JsonValue } | readonly JsonValue[];
 
@@ -334,7 +336,6 @@ export interface MonitorRoute<TTarget extends JsonValue = JsonValue> {
 }
 
 export interface MonitorRetention {
-  readonly payload: Duration;
   readonly decisions: Duration;
   readonly dedupe: Duration;
 }
@@ -460,7 +461,28 @@ export interface DirectDispatchReceipt {
   readonly turnId: string;
 }
 
+export interface DirectDispatchRequest {
+  readonly tenantId: string;
+  readonly applicationId: string;
+  readonly eventKey: EventKey;
+  readonly idempotencyKey: DirectDispatchKey;
+  readonly inputHash: InputHash;
+  /** Complete canonical event; direct dispatch never resolves an Eve reference. */
+  readonly event: ChannelEvent<string, JsonValue, JsonValue>;
+}
+
+export type DirectDispatchHandler = (
+  request: DirectDispatchRequest,
+) => Promise<DirectDispatchReceipt | null>;
+
+export interface DirectDispatchOptions {
+  /** Stable generation of the direct conversation binding/handler set. */
+  readonly bindingGeneration: string;
+  readonly handlers: readonly DirectDispatchHandler[];
+}
+
 export type ChatPublishResult = PublishResult & {
+  readonly directDispatchKey: DirectDispatchKey;
   readonly directDispatch: "dispatched" | "undispatched" | "failed" | "pending";
 };
 

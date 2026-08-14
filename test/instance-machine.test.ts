@@ -15,6 +15,7 @@ import {
   wake,
   type ChannelEvent,
   type BufferedEvent,
+  type DirectDispatchOptions,
   type LifecycleEvent,
   type MonitorDefinition,
   type MonitorDeliveryChannel,
@@ -33,6 +34,12 @@ const channel = defineInboundChannel({
   inbound: { message: defineChannelEvent({ schema, chat: true }) },
 });
 type TestEvent = ChannelEvent<"message", z.infer<typeof schema>, z.infer<typeof targetSchema>>;
+
+function direct(
+  handlers: DirectDispatchOptions["handlers"] = [],
+): DirectDispatchOptions {
+  return { bindingGeneration: "test-binding-v1", handlers };
+}
 
 function makeDefinition(
   overrides: Partial<MonitorDefinition<TestEvent, unknown, unknown>>,
@@ -624,7 +631,7 @@ async function runScenario(
 
   for (const step of scenario.steps) {
     if (step.kind === "publish") {
-      await runtime.publishChat(channel, "message", scenarioInput(step.id, step.key, step.text), []);
+      await runtime.publishChat(channel, "message", scenarioInput(step.id, step.key, step.text), direct());
     } else if (step.kind === "advance") {
       clock.advance(step.ms);
     } else {

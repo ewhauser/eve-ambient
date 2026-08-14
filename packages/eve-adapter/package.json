@@ -1,0 +1,54 @@
+{
+  "name": "@ewhauser/eve-ambient-eve",
+  "version": "0.0.0",
+  "description": "Official Eve channel adapter for @ewhauser/eve-ambient.",
+  "license": "MIT",
+  "type": "module",
+  "files": [
+    "dist",
+    "patches",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "pnpm run clean && tsc -p tsconfig.build.json",
+    "clean": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\"",
+    "prepare": "pnpm run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ewhauser/eve-ambient.git",
+    "directory": "packages/eve-adapter"
+  },
+  "bugs": {
+    "url": "https://github.com/ewhauser/eve-ambient/issues"
+  },
+  "homepage": "https://github.com/ewhauser/eve-ambient/tree/main/packages/eve-adapter#readme",
+  "peerDependencies": {
+    "@ewhauser/eve-ambient": ">=0.4.0 <1",
+    "eve": "0.38.1"
+  },
+  "devDependencies": {
+    "@ewhauser/eve-ambient": "workspace:*",
+    "eve": "0.38.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}

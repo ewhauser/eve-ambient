@@ -7,8 +7,9 @@ monitor is running.
 ## Durability
 
 - The correlation-instance lifecycle—idle, collecting, evaluating, and
-  cooldown—is an explicit XState statechart in `src/instance-machine.ts`. It is
-  a pure transition table with no live actor or in-process timer requirement.
+  cooldown—is an explicit XState statechart in
+  `packages/ambient/src/instance-machine.ts`. It is a pure transition table
+  with no live actor or in-process timer requirement.
 - Ingress receipts, active branch handoffs, mailboxes, timer generations,
   actionable runs, evidence snapshots, quotas, dead letters, and deployment
   identity are durable.

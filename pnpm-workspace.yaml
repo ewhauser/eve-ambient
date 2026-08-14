@@ -1,5 +1,7 @@
 packages:
-  - "."
+  - "packages/*"
+  - "examples/*"
+  - "integration/*"
 
 allowBuilds:
   esbuild: true
@@ -7,3 +9,12 @@ allowBuilds:
 # Hold new direct and transitive releases for one day. Security updates can
 # still be selected explicitly when a faster upgrade is required.
 minimumReleaseAge: 1440
+
+# The official Eve adapter targets this exact release because it carries a
+# package patch for vercel/eve#1842. Consumers must apply the same patch in
+# their own workspace; a dependency cannot activate pnpm patches for its host.
+minimumReleaseAgeExclude:
+  - "eve@0.38.1"
+
+patchedDependencies:
+  "eve@0.38.1": packages/eve-adapter/patches/eve@0.38.1.patch

@@ -1,7 +1,7 @@
 # RFC: Full-Payload, End-to-End Idempotent Event Handoffs
 
 - Status: Accepted
-- Implementation: Eve Ambient identity, both mailbox tiers, and central-ingress cleanup implemented; Eve session admission tracked by `vercel/eve#1842`; Kafka pending; SQS deferred
+- Implementation: Eve Ambient identity, both mailbox tiers, central-ingress cleanup, and the official Eve adapter with a carried `eve@0.38.1` patch are implemented; Kafka pending; SQS deferred
 - Scope: Eve Ambient implementation through `wakeKey` delivery, plus a conditional conformance profile through final actions
 - Related: `ewhauser/eve-ambient` issue #3
 
@@ -505,13 +505,25 @@ If the decision is `ignore`, the run records a terminal receipt and no session w
 
 ### 5. Eve session admission and optional turn lineage
 
-The only planned upstream Eve change required by this RFC is
-[`vercel/eve#1842`](https://github.com/vercel/eve/issues/1842). An Eve delivery
-adapter supplies `wakeKey` (or `directDispatchKey` for direct chat dispatch) as
-the channel `send()` idempotency key and sends the complete delivery payload.
-Eve durably admits that key with the turn or returns the previously recorded
-disposition. A lost response therefore causes the adapter to retry the same
-admission rather than create a second turn.
+The official adapter implements the behavior tracked by
+[`vercel/eve#1842`](https://github.com/vercel/eve/issues/1842) without making an
+upstream merge a deployment prerequisite. This repository carries an exact
+package patch for `eve@0.38.1`, publishes that patch inside
+`@ewhauser/eve-ambient-eve`, and requires each consuming application to
+register it in its own pnpm workspace.
+
+The adapter supplies `wakeKey` (or `directDispatchKey` for direct chat
+dispatch) as the channel `send()` idempotency key and sends the complete
+delivery payload. The patch maps that key into Eve's replay-stable durable
+delivery ledger for both an existing address owner and the initial workflow
+turn. A lost response therefore causes the adapter to retry the same admission
+rather than create a second turn while that address is owned.
+
+The supported admission horizon is the lifetime of the durable Eve
+conversation that owns the channel address. A retry after that owner has
+expired may create a new session and is outside this integration's guarantee.
+Applications MUST configure Eve session lifetime and upstream retry lifetime
+so the declared idempotency horizon is no longer than that ownership window.
 
 That issue intentionally does not define ordering or coalescing between
 distinct delivery keys, and Eve Ambient does not require either behavior. An
@@ -572,9 +584,11 @@ Eve Ambient owns:
 - Batch membership freeze, `batchKey`, and `runKey`.
 - Complete self-contained monitor delivery with `wakeKey` and root lineage.
 
-The only planned upstream Eve dependency is
-[`vercel/eve#1842`](https://github.com/vercel/eve/issues/1842). It owns the
-minimum session-admission contract needed by Eve Ambient:
+The only Eve behavior required by this integration is tracked by
+[`vercel/eve#1842`](https://github.com/vercel/eve/issues/1842). The repository
+currently owns that behavior through its carried exact-version patch; an
+upstream release may replace the patch after conformance is revalidated. The
+minimum session-admission contract is:
 
 - Accept `wakeKey` or `directDispatchKey` as the channel-delivery idempotency
   key.
@@ -597,8 +611,8 @@ Action adapters and destinations own:
 - Reconciliation after unknown remote outcomes.
 
 Eve Ambient guarantees stable identity and complete-payload custody through the
-`wakeKey` delivery request. With `vercel/eve#1842`, its Eve adapter can make
-session admission idempotent as well. The stronger effectively-once
+`wakeKey` delivery request. Its patched Eve adapter makes session admission
+idempotent within the documented address-ownership horizon. The stronger effectively-once
 final-action guarantee exists only when an integration and the selected action
 adapter implement the conditional downstream profile. No companion Eve-core
 RFC or additional upstream Eve issue is required to complete Eve Ambient.
@@ -894,8 +908,9 @@ worker harness cannot measure them.
 
 ### Eve integration boundary
 
-The only planned upstream Eve change is
-[`vercel/eve#1842`](https://github.com/vercel/eve/issues/1842):
+The repository carries the only required Eve change, tracked by
+[`vercel/eve#1842`](https://github.com/vercel/eve/issues/1842), against one
+exact Eve release:
 
 - Pass `wakeKey` or `directDispatchKey` to channel `send()` as its idempotency
   key.
@@ -904,6 +919,12 @@ The only planned upstream Eve change is
 - Do not depend on ordering or coalescing between distinct delivery keys.
 - Do not require another upstream Eve issue or companion RFC to complete this
   Eve Ambient design.
+
+End users MUST copy and register the published patch in their own workspace.
+The adapter pins Eve exactly, exposes the supported version as a constant, and
+its package, example, and conformance builds fail when the patched public type
+is absent. Upgrading Eve requires regenerating the patch from the matching
+source tag and rerunning conformance; no semver-range fallback is supported.
 
 An integration may additionally implement turn/action lineage and claim the
 conditional full-stack conformance profile. That extension does not change the
@@ -947,7 +968,7 @@ ingress -> fan-out -> mailbox -> evaluator -> session -> action adapter -> desti
 ```
 
 Tests 1-17 and 23-25 are owned by Eve Ambient and its backends. Test 19 is also
-required of the Eve delivery adapter once `vercel/eve#1842` is available. Tests
+required of the official patched Eve delivery adapter. Tests
 18 and 20-22 apply only to integrations advertising coalescing or final-action
 conformance. For such a full-stack deployment, the primary acceptance scenario
 is:
@@ -986,7 +1007,7 @@ Eve Ambient will use full-payload, idempotent handoffs.
 - Every stateful or side-effecting boundary durably deduplicates a stable key and binds it to an input hash.
 - Every Eve Ambient multi-input operation performs one atomic membership freeze before receiving a derived operation key; optional downstream coalescing follows the same rule.
 - Every receiver gets complete custody before its sender acknowledges or discards the payload.
-- Eve Ambient carries stable lineage through `wakeKey`; `vercel/eve#1842` is the sole planned upstream dependency for keyed Eve session admission.
+- Eve Ambient carries stable lineage through `wakeKey`; the official adapter carries the exact-version patch tracked by `vercel/eve#1842`, so an upstream merge is not a deployment dependency.
 - Eve Ambient assumes no ordering or coalescing between distinct Eve delivery keys.
 - Integrations claiming the conditional final-action guarantee continue lineage through `turnKey` and `actionKey`, which the destination or a reconcilable durable adapter enforces.
 - Existing ref-based and replay code is replaced directly; no migration or compatibility path is required.

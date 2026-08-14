@@ -80,7 +80,7 @@ rejected by `initialize()` today.
 ### 1. Deploy the worker
 
 The package ships a worker under `celld-worker/`; see the
-[worker deployment guide](../celld-worker/README.md). It carries no monitor
+[worker deployment guide](../packages/ambient/celld-worker/README.md). It carries no monitor
 configuration. Cells learn their configuration from the first append, so one
 deployment can serve every monitor.
 

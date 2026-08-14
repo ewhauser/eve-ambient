@@ -27,6 +27,12 @@
     // `authorization: Bearer <secret>`, and the fleet requires the same header
     // on every /cells route. It must equal the runtime's `mailbox.secret`.
     // Deploy it from your secret store, never from a committed file.
-    "EVALUATOR_SECRET": "replace-me"
+    "EVALUATOR_SECRET": "replace-me",
+
+    // Required full-payload capacity limits. Size these from representative
+    // canonical events and evaluator-outage backlogs before deployment.
+    "MAILBOX_MAX_EVENT_BYTES": "384000",
+    "MAILBOX_MAX_BATCH_BYTES": "1000000",
+    "MAILBOX_MAX_RESIDENT_BYTES": "16000000"
   }
 }

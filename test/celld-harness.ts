@@ -87,6 +87,11 @@ export interface FakeFleetOptions {
   readonly secret: string;
   readonly clock: MonitorClock;
   readonly evaluator: EvaluatorHandler;
+  readonly capacity?: Partial<{
+    readonly maxEventBytes: number;
+    readonly maxBatchBytes: number;
+    readonly maxResidentBytes: number;
+  }>;
 }
 
 export interface FiredAlarm {
@@ -107,6 +112,9 @@ export class FakeCelldFleet {
   readonly #cells = new Map<string, Placement>();
   /** Every evaluator request body, in order, for idempotency assertions. */
   readonly evaluations: Record<string, unknown>[] = [];
+  /** Every attempted append request body, in order, for conformance replay. */
+  readonly appends: Record<string, unknown>[] = [];
+  readonly #capacity: Required<NonNullable<FakeFleetOptions["capacity"]>>;
   #evaluator: EvaluatorHandler;
 
   constructor(options: FakeFleetOptions) {
@@ -114,6 +122,11 @@ export class FakeCelldFleet {
     this.#secret = options.secret;
     this.#clock = options.clock;
     this.#evaluator = options.evaluator;
+    this.#capacity = {
+      maxEventBytes: options.capacity?.maxEventBytes ?? 100_000,
+      maxBatchBytes: options.capacity?.maxBatchBytes ?? 500_000,
+      maxResidentBytes: options.capacity?.maxResidentBytes ?? 2_000_000,
+    };
   }
 
   /** Swaps the evaluator, for outage simulations. */
@@ -144,6 +157,9 @@ export class FakeCelldFleet {
     }
     const name = decodeURIComponent(parts[1]!);
     const action = parts[2] ?? "state";
+    if (action === "append") {
+      this.appends.push((await request.clone().json()) as Record<string, unknown>);
+    }
     const placement = this.#place(name);
     const inner = new Request(`${this.baseUrl}/${action}`, request);
     inner.headers.set("x-cell-name", name);
@@ -184,6 +200,9 @@ export class FakeCelldFleet {
       const state = createFakeDurableObjectState(name);
       const env = {
         EVALUATOR_SECRET: this.#secret,
+        MAILBOX_MAX_EVENT_BYTES: String(this.#capacity.maxEventBytes),
+        MAILBOX_MAX_BATCH_BYTES: String(this.#capacity.maxBatchBytes),
+        MAILBOX_MAX_RESIDENT_BYTES: String(this.#capacity.maxResidentBytes),
         clock: this.#clock,
         fetch: async (input: string, init: RequestInit): Promise<Response> => {
           const request = new Request(input, init);

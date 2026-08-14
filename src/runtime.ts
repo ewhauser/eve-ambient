@@ -1220,7 +1220,7 @@ export class MonitorRuntime {
   }
 
   /**
-   * The celld-mode append: the buffered ref is forwarded to the cell named by
+   * The celld-mode append: the complete buffered event is forwarded to the cell named by
    * the instance key instead of being written into an instance row. The cell
    * holds the `StoredMonitorInstance`, runs the same statechart over it, and
    * arms its own durable alarm for `nextEvaluationAt`.
@@ -1253,12 +1253,12 @@ export class MonitorRuntime {
       applicationId: subscription.applicationId,
       correlationKey,
       correlationKeyHash: keyHash,
-      subscriptionId: subscription.id,
       branchKey: subscription.branchKey,
       eventKey: subscription.eventKey,
+      acceptanceId: subscription.acceptanceId,
+      eventInputHash: subscription.eventInputHash,
       inputHash: subscription.inputHash,
-      ...(subscription.phase === undefined ? {} : { phase: subscription.phase }),
-      ref: subscription.event.ref,
+      event: structuredClone(subscription.event),
       bytes: subscription.bytes,
       ingressSequence: subscription.ingressSequence,
       acceptedAt: subscription.acceptedAt,
@@ -1331,8 +1331,29 @@ export class MonitorRuntime {
       );
     }
     if (response.ok) {
-      const parsed = (await response.json()) as CelldAppendResponse;
-      return parsed.outcome ?? "updated";
+      let parsed: CelldAppendResponse;
+      try {
+        parsed = (await response.json()) as CelldAppendResponse;
+      } catch {
+        throw new TransientMonitorError(
+          `celld append for ${instanceId} returned a malformed append receipt`,
+        );
+      }
+      if (
+        parsed?.ok !== true ||
+        !["opened", "updated", "flushed"].includes(parsed.outcome) ||
+        parsed.receipt?.branchKey !== body.branchKey ||
+        parsed.receipt.inputHash !== body.inputHash ||
+        parsed.receipt.outcome !== parsed.outcome ||
+        parsed.receipt.flushed !== parsed.flushed ||
+        typeof parsed.receipt.recordedAt !== "string" ||
+        !Number.isFinite(Date.parse(parsed.receipt.recordedAt))
+      ) {
+        throw new TransientMonitorError(
+          `celld append for ${instanceId} returned a malformed append receipt`,
+        );
+      }
+      return parsed.outcome;
     }
     const detail = await readCellError(response);
     if (response.status >= 500 || response.status === 408 || response.status === 429) {
@@ -1436,42 +1457,11 @@ export class MonitorRuntime {
     const retention = monitor.definition.retention ?? DEFAULT_RETENTION;
     let run: StoredMonitorRun;
     if (existing === null) {
-      const events: BufferedEvent[] = [];
-      for (const reference of request.batch.events) {
-        const record = await this.#store.getEvent(reference.ref);
-        if (record === null || record.event === undefined) {
-          throw new EvaluationRequestError(
-            `celld source event ${reference.eventKey} is unavailable`,
-            "source-unavailable",
-          );
-        }
-        if (record.eventKey !== reference.eventKey) {
-          throw new EvaluationRequestError(
-            `celld source event ${reference.ref} does not match ${reference.eventKey}`,
-            "event-conflict",
-          );
-        }
-        events.push({
-          branchKey: reference.branchKey,
-          eventKey: reference.eventKey,
-          inputHash: reference.inputHash,
-          event: freeze({
-            ...structuredClone(record.event),
-            source: {
-              ...structuredClone(record.event.source),
-              ...(reference.phase === undefined ? {} : { phase: reference.phase }),
-            },
-          }),
-          bytes: reference.bytes,
-          acceptedAt: reference.acceptedAt,
-          ingressSequence: reference.ingressSequence,
-        });
-      }
       const batch = await this.#freezeMonitorBatch({
         instanceId: request.instanceId,
         monitorId: request.monitorId,
         definitionVersion: request.definitionVersion,
-        batch: { ...structuredClone(request.batch), events },
+        batch: structuredClone(request.batch),
         frozenAt: request.claimedAt,
       });
       const identity = await this.#runIdentity({
@@ -1574,9 +1564,10 @@ export class MonitorRuntime {
     readonly instanceId: string;
     readonly monitorId: string;
     readonly definitionVersion: string;
-    readonly batch: Pick<StoredMonitorBatch, "bytes" | "openedAt" | "closedAt" | "closedBy"> & {
-      readonly events: readonly Pick<BufferedEvent, "branchKey" | "eventKey" | "inputHash">[];
-    };
+    readonly batch: Pick<
+      StoredMonitorBatch<BufferedEvent>,
+      "bytes" | "openedAt" | "closedAt" | "closedBy" | "events"
+    >;
     readonly frozenAt: string;
   }) {
     const membership = await freezeMembership({
@@ -1602,6 +1593,7 @@ export class MonitorRuntime {
       openedAt: input.batch.openedAt,
       closedAt: input.batch.closedAt,
       closedBy: input.batch.closedBy,
+      events: input.batch.events,
       eventCount: input.batch.events.length,
       bytes: input.batch.bytes,
     });
@@ -3163,6 +3155,27 @@ function validateEvaluationRequest(request: EvaluationRequest): void {
   }
   if (batch.events.length === 0) {
     throw new EvaluationRequestError("evaluation batch must not be empty");
+  }
+  for (const [index, event] of batch.events.entries()) {
+    if (
+      event === null ||
+      typeof event !== "object" ||
+      typeof event.branchKey !== "string" ||
+      typeof event.eventKey !== "string" ||
+      typeof event.inputHash !== "string" ||
+      event.event === null ||
+      typeof event.event !== "object"
+    ) {
+      throw new EvaluationRequestError(
+        `evaluation batch event ${index} must be a complete buffered event`,
+      );
+    }
+    if (!Number.isSafeInteger(event.bytes) || event.bytes <= 0) {
+      throw new EvaluationRequestError(`evaluation batch event ${index} has invalid bytes`);
+    }
+  }
+  if (batch.events.reduce((sum, event) => sum + event.bytes, 0) !== batch.bytes) {
+    throw new EvaluationRequestError("evaluation batch bytes do not match its events");
   }
   if (request.instanceView === null || typeof request.instanceView !== "object") {
     throw new EvaluationRequestError("evaluation instanceView must be an object");

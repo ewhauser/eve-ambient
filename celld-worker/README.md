@@ -42,7 +42,7 @@ rewritten by a deploy.
 |---|---|
 | `GET /health` | liveness |
 | `POST /cells/<instanceKey>/append` | the runtime's `CelldAppendRequest` |
-| `GET /cells/<instanceKey>/state` | stored instance, pin, alarm, buffered refs, transition log |
+| `GET /cells/<instanceKey>/state` | stored full-value instance, pin, alarm, resident bytes, branch keys, transition log |
 | `POST /cells/<instanceKey>/rearm` | recompute `nextEvaluationAt` and re-arm the alarm |
 | `GET /cells/<instanceKey>/whoami` | owning Durable Object id, for placement tracing |
 
@@ -74,3 +74,12 @@ the remediation for both.
 |---|---|
 | `EVALUATOR_URL` | where claimed batches are evaluated. Overrides the URL the runtime sends with each append. |
 | `EVALUATOR_SECRET` | shared bearer secret, equal to the runtime's `mailbox.secret`. |
+| `MAILBOX_MAX_EVENT_BYTES` | maximum serialized `BufferedEvent` envelope accepted by a cell. |
+| `MAILBOX_MAX_BATCH_BYTES` | maximum serialized provisional or claimed batch. Must be at least the event limit. |
+| `MAILBOX_MAX_RESIDENT_BYTES` | maximum serialized open, sealed, and claimed batches plus append receipts in one cell. Must be at least the batch limit. |
+
+All three byte limits are required positive integers. Missing or inconsistent
+limits fail appends closed with `503`. An event or batch that can never fit is
+rejected with `413`; resident-cell pressure returns `429`, so the runtime keeps
+the branch payload and retries with backoff. There is no reference-only
+fallback.

@@ -1,11 +1,18 @@
 import { describe, expect, it, vi, type Mock } from "vitest";
 import worker, { MonitorInstance } from "../src/celld-worker.js";
 import {
+  CELLD_APPEND_CONFLICT,
+  CELLD_BATCH_TOO_LARGE,
+  CELLD_CELL_IDENTITY_MISMATCH,
   CELLD_DEFINITION_VERSION_MISMATCH,
+  CELLD_EVENT_TOO_LARGE,
+  CELLD_RESIDENT_CAPACITY_EXCEEDED,
   CELLD_MALFORMED_APPEND,
 } from "../src/mailbox.js";
 import type { CelldAppendRequest, EvaluationResponse } from "../src/mailbox.js";
-import type { BufferedEventRef, StoredMonitorInstance } from "../src/storage.js";
+import { deriveBranchKey, deriveEventKey, hashIdempotencyInput } from "../src/idempotency.js";
+import type { BufferedEvent, StoredMonitorInstance } from "../src/storage.js";
+import type { ChannelEvent, JsonValue } from "../src/types.js";
 import { VirtualMonitorClock } from "../src/testing.js";
 import {
   createFakeDurableObjectState,
@@ -17,12 +24,21 @@ type EvaluatorMock = Mock<(input: string, init: RequestInit) => Promise<Response
 
 const CELL = "instance-key-alpha";
 
-function identity(ref: string) {
-  const digit = ref.endsWith("2") ? "2" : "1";
+function event(ref: string, acceptedAt: string, text = `payload for ${ref}`): ChannelEvent<string, JsonValue, JsonValue> {
   return {
-    branchKey: `eve:branch:v1:${digit.repeat(64)}` as CelldAppendRequest["branchKey"],
-    eventKey: `eve:event:v1:${digit.repeat(64)}` as CelldAppendRequest["eventKey"],
-    inputHash: `eve:input:v1:${digit.repeat(64)}` as CelldAppendRequest["inputHash"],
+    ref,
+    id: ref,
+    type: "message",
+    version: 1,
+    receivedAt: acceptedAt,
+    data: { text },
+    source: {
+      channelId: "slack",
+      installationId: "workspace-a",
+      tenantId: "tenant-a",
+    },
+    origin: { kind: "external", depth: 0 },
+    trace: { traceId: `trace-${ref}` },
   };
 }
 
@@ -46,7 +62,7 @@ interface Harness {
   append(ref: string, overrides?: Partial<CelldAppendRequest>): Promise<Response>;
   route(action: string, method?: string): Promise<Response>;
   fireAlarm(retryCount?: number): Promise<unknown>;
-  instance(): Promise<StoredMonitorInstance<BufferedEventRef>>;
+  instance(): Promise<StoredMonitorInstance<BufferedEvent>>;
 }
 
 function wake(runId: string, status: "delivered" | "ignored" = "delivered"): EvaluationResponse {
@@ -66,13 +82,23 @@ function unreachableEvaluator(): EvaluatorMock {
   return vi.fn(async () => jsonResponse({ error: "evaluator unreachable" }, 503));
 }
 
-function makeHarness(options: { evaluator?: EvaluatorMock } = {}): Harness {
+function makeHarness(options: {
+  evaluator?: EvaluatorMock;
+  capacity?: Partial<{
+    maxEventBytes: number;
+    maxBatchBytes: number;
+    maxResidentBytes: number;
+  }>;
+} = {}): Harness {
   const clock = new VirtualMonitorClock();
   const state = createFakeDurableObjectState(CELL);
   const evaluator: EvaluatorMock =
     options.evaluator ?? vi.fn(async (_input, init) => jsonResponse(wake(requestedRunId(init)), 200));
   const cell = new MonitorInstance(state, {
     EVALUATOR_SECRET: "s3cret",
+    MAILBOX_MAX_EVENT_BYTES: String(options.capacity?.maxEventBytes ?? 100_000),
+    MAILBOX_MAX_BATCH_BYTES: String(options.capacity?.maxBatchBytes ?? 500_000),
+    MAILBOX_MAX_RESIDENT_BYTES: String(options.capacity?.maxResidentBytes ?? 2_000_000),
     clock,
     fetch: (input: string, init: RequestInit) => evaluator(input, init),
   });
@@ -82,7 +108,43 @@ function makeHarness(options: { evaluator?: EvaluatorMock } = {}): Harness {
     clock,
     evaluator,
     async append(ref, overrides = {}) {
-      const eventIdentity = identity(ref);
+      const acceptedAt = overrides.acceptedAt ?? clock.now().toISOString();
+      const completeEvent = overrides.event ?? event(ref, acceptedAt);
+      const eventKey = overrides.eventKey ?? await deriveEventKey({
+        tenantId: "tenant-a",
+        applicationId: "app-a",
+        channelId: completeEvent.source.channelId,
+        installationId: completeEvent.source.installationId,
+        sourceEventId: completeEvent.id,
+      });
+      const acceptanceId = overrides.acceptanceId ?? `acceptance-${ref}`;
+      const { ref: _ref, receivedAt: _receivedAt, trace: _trace, source, ...canonical } = completeEvent;
+      const { phase, ...canonicalSource } = source;
+      const eventInputHash = overrides.eventInputHash ?? await hashIdempotencyInput({
+        applicationId: "app-a",
+        canonicalizationVersion: 1,
+        event: { ...canonical, source: canonicalSource },
+      });
+      const branchKey = overrides.branchKey ?? await deriveBranchKey({
+        eventKey,
+        acceptanceId,
+        monitorId: "ambient",
+        definitionVersion: overrides.definitionVersion ?? "v1",
+        ...(phase === undefined ? {} : { phase }),
+      });
+      const inputHash = overrides.inputHash ?? await hashIdempotencyInput({
+        parentInputHash: eventInputHash,
+        eventKey,
+        acceptanceId,
+        branchKey,
+        tenantId: "tenant-a",
+        applicationId: "app-a",
+        monitorId: "ambient",
+        definitionVersion: overrides.definitionVersion ?? "v1",
+        phase: phase ?? null,
+        acceptedAt,
+        orderingKey: overrides.ingressSequence ?? "1",
+      });
       const body: CelldAppendRequest = {
         monitorId: "ambient",
         definitionVersion: "v1",
@@ -92,12 +154,15 @@ function makeHarness(options: { evaluator?: EvaluatorMock } = {}): Harness {
         applicationId: "app-a",
         correlationKey: "C1",
         correlationKeyHash: "hash-C1",
-        subscriptionId: eventIdentity.branchKey,
-        ref,
-        ...eventIdentity,
-        bytes: 32,
+        branchKey,
+        eventKey,
+        acceptanceId,
+        eventInputHash,
+        inputHash,
+        event: completeEvent,
+        bytes: new TextEncoder().encode(JSON.stringify(completeEvent.data)).byteLength,
         ingressSequence: "1",
-        acceptedAt: clock.now().toISOString(),
+        acceptedAt,
         ...overrides,
       };
       return cell.fetch(
@@ -125,7 +190,7 @@ function makeHarness(options: { evaluator?: EvaluatorMock } = {}): Harness {
       }
     },
     async instance() {
-      return JSON.parse(state.map.get("instance") as string) as StoredMonitorInstance<BufferedEventRef>;
+      return JSON.parse(state.map.get("instance") as string) as StoredMonitorInstance<BufferedEvent>;
     },
   };
 }
@@ -152,61 +217,74 @@ describe("celld mailbox cell", () => {
   it("deduplicates a retried append across the HTTP/store commit gap", async () => {
     const harness = makeHarness();
 
-    expect(((await (await harness.append("evt-1")).json()) as any).outcome).toBe("opened");
+    const first = (await (await harness.append("evt-1")).json()) as any;
+    expect(first.outcome).toBe("opened");
     const retry = await harness.append("evt-1");
 
     expect(retry.status).toBe(200);
-    expect(((await retry.json()) as any).outcome).toBe("opened");
+    const retried = (await retry.json()) as any;
+    expect(retried.outcome).toBe("opened");
+    expect(retried.receipt).toEqual(first.receipt);
     const instance = await harness.instance();
-    expect(instance.openBatch?.events.map((event) => event.ref)).toEqual(["evt-1"]);
+    expect(instance.openBatch?.events.map((member) => member.event.ref)).toEqual(["evt-1"]);
     expect(instance.eventsSinceLastWake).toBe(1);
     const state = (await (await harness.route("state")).json()) as Record<string, any>;
     expect(state.log.filter((entry: any) => entry.kind === "append")).toHaveLength(1);
     expect(state.log.filter((entry: any) => entry.kind === "append-duplicate")).toHaveLength(1);
-    const marker = JSON.parse(harness.state.map.get("evt:evt-1") as string) as Record<string, unknown>;
-    expect(marker).not.toHaveProperty("payload");
+    expect(instance.openBatch?.events[0]?.event.data).toEqual({ text: "payload for evt-1" });
   });
 
   it("rejects reuse of a branch key with a different input hash", async () => {
     const harness = makeHarness();
     await harness.append("evt-1");
 
+    const acceptedAt = (await harness.instance()).openBatch!.events[0]!.acceptedAt;
     const conflict = await harness.append("evt-1", {
-      inputHash: `eve:input:v1:${"9".repeat(64)}` as CelldAppendRequest["inputHash"],
+      acceptedAt,
+      event: event("evt-1", acceptedAt, "changed payload"),
     });
 
     expect(conflict.status).toBe(409);
-    expect(await conflict.json()).toMatchObject({ code: "append-conflict" });
+    expect(await conflict.json()).toMatchObject({ code: CELLD_APPEND_CONFLICT });
     expect((await harness.instance()).eventsSinceLastWake).toBe(1);
   });
 
   it("recovers a missing append receipt from the persisted instance", async () => {
     const harness = makeHarness();
-    await harness.append("evt-1");
+    const accepted = (await (await harness.append("evt-1")).json()) as any;
     // The instance write committed, but the response/receipt did not.
-    harness.state.map.delete(`append:${identity("evt-1").branchKey}`);
+    const branchKey = (await harness.instance()).openBatch!.events[0]!.branchKey;
+    const committedReceipt = harness.state.map.get(`append:${branchKey}`)!;
+    harness.state.map.delete(`append:${branchKey}`);
+    harness.state.map.set(`append-recovery:${branchKey}`, committedReceipt);
+    harness.state.map.set("log", "[]");
 
-    await harness.append("evt-1");
+    const recovered = await harness.append("evt-1");
 
     expect((await harness.instance()).openBatch?.events).toHaveLength(1);
-    expect(harness.state.map.has(`append:${identity("evt-1").branchKey}`)).toBe(true);
+    expect(((await recovered.json()) as any).receipt).toEqual(accepted.receipt);
+    expect(harness.state.map.has(`append:${branchKey}`)).toBe(true);
+    expect(harness.state.map.has(`append-recovery:${branchKey}`)).toBe(false);
   });
 
   it("rejects conflicting input while recovering a missing append receipt", async () => {
     const harness = makeHarness();
     await harness.append("evt-1");
-    const receiptKey = `append:${identity("evt-1").branchKey}`;
+    const first = (await harness.instance()).openBatch!.events[0]!;
+    const receiptKey = `append:${first.branchKey}`;
     harness.state.map.delete(receiptKey);
 
+    const changed = event("evt-1", first.acceptedAt, "changed payload");
     const conflict = await harness.append("evt-1", {
-      inputHash: `eve:input:v1:${"9".repeat(64)}` as CelldAppendRequest["inputHash"],
+      acceptedAt: first.acceptedAt,
+      event: changed,
     });
 
     expect(conflict.status).toBe(409);
-    expect(await conflict.json()).toMatchObject({ code: "append-conflict" });
+    expect(await conflict.json()).toMatchObject({ code: CELLD_APPEND_CONFLICT });
     expect(harness.state.map.has(receiptKey)).toBe(false);
     expect((await harness.instance()).openBatch?.events[0]?.inputHash).toBe(
-      identity("evt-1").inputHash,
+      first.inputHash,
     );
   });
 
@@ -230,15 +308,14 @@ describe("celld mailbox cell", () => {
     expect(harness.evaluator).toHaveBeenCalledOnce();
     const request = harness.evaluator.mock.calls[0]![1];
     const sent = JSON.parse(String(request.body)) as Record<string, any>;
-    expect(sent.batch.events.map((event: { ref: string }) => event.ref)).toEqual([
+    expect(sent.batch.events.map((member: { event: { ref: string } }) => member.event.ref)).toEqual([
       "evt-1",
       "evt-2",
     ]);
     expect(sent.batch.closedBy).toBe("quiet-period");
     expect(sent.instanceId).toBe(CELL);
     expect(sent.correlationKey).toBe("C1");
-    // Refs, never payloads: the evaluator reads the event store.
-    expect(JSON.stringify(sent)).not.toContain("payload for evt-1");
+    expect(sent.batch.events[0].event.data).toEqual({ text: "payload for evt-1" });
     expect((request.headers as Record<string, string>).authorization).toBe("Bearer s3cret");
 
     const instance = await harness.instance();
@@ -250,7 +327,6 @@ describe("celld mailbox cell", () => {
     expect(instance.eventsSinceLastWake).toBe(0);
     // No buffered work and no run: the timer now owns retention cleanup.
     expect(harness.state.alarmAt).toBe(Date.parse(instance.expiresAt));
-    expect(harness.state.map.has("evt:evt-1")).toBe(false);
     expect(harness.state.map.has("run")).toBe(false);
     expect(harness.state.blockedSections).toBe(1);
   });
@@ -293,9 +369,27 @@ describe("celld mailbox cell", () => {
     expect(await harness.fireAlarm()).toBeNull();
 
     expect(harness.state.map.has("instance")).toBe(false);
-    expect(harness.state.map.has("evt:evt-1")).toBe(false);
-    expect(harness.state.map.has(`append:${identity("evt-1").branchKey}`)).toBe(false);
+    const receipts = [...harness.state.map.keys()].filter((key) => key.startsWith("append:"));
+    expect(receipts).toHaveLength(0);
     expect(harness.state.alarmAt).toBeNull();
+  });
+
+  it("purges expired append receipts while a hot cell remains active", async () => {
+    const harness = makeHarness();
+    const config = {
+      ...DEBOUNCE_CONFIG,
+      retention: { payload: "1s" as const, decisions: "2s" as const, dedupe: "3s" as const },
+    };
+    await harness.append("evt-1", { config });
+    const firstKey = (await harness.instance()).openBatch!.events[0]!.branchKey;
+    expect(harness.state.map.has(`append:${firstKey}`)).toBe(true);
+    harness.clock.advance(3_000);
+
+    const second = await harness.append("evt-2", { config });
+
+    expect(second.status).toBe(200);
+    expect(harness.state.map.has(`append:${firstKey}`)).toBe(false);
+    expect([...harness.state.map.keys()].filter((key) => key.startsWith("append:"))).toHaveLength(1);
   });
 
   it("schedules evaluator retry responses without throwing or completing the run", async () => {
@@ -393,6 +487,17 @@ describe("celld mailbox cell", () => {
     expect(instance.openBatch?.events).toHaveLength(1);
   });
 
+  it("rejects an append addressed to a different pinned correlation instance", async () => {
+    const harness = makeHarness();
+    await harness.append("evt-1");
+
+    const response = await harness.append("evt-2", { correlationKey: "C2" });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: CELLD_CELL_IDENTITY_MISMATCH });
+    expect((await harness.instance()).openBatch?.events).toHaveLength(1);
+  });
+
   it("rejects a malformed append without touching the instance", async () => {
     const harness = makeHarness();
 
@@ -409,6 +514,85 @@ describe("celld mailbox cell", () => {
       CELLD_MALFORMED_APPEND,
     );
     expect(harness.state.map.has("instance")).toBe(false);
+  });
+
+  it("fails closed when mailbox capacity limits are missing", async () => {
+    const harness = makeHarness();
+    delete harness.cell.env.MAILBOX_MAX_EVENT_BYTES;
+
+    const response = await harness.append("evt-1");
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ code: "invalid-capacity-config" });
+    expect(harness.state.map.has("cell")).toBe(false);
+    expect(harness.state.map.has("instance")).toBe(false);
+  });
+
+  it("rejects an oversized full event before pinning the cell", async () => {
+    const harness = makeHarness({
+      capacity: { maxEventBytes: 400, maxBatchBytes: 800, maxResidentBytes: 1_600 },
+    });
+
+    const response = await harness.append("evt-1");
+
+    expect(response.status).toBe(413);
+    expect(await response.json()).toMatchObject({ code: CELLD_EVENT_TOO_LARGE });
+    expect(harness.state.map.has("cell")).toBe(false);
+    expect(harness.state.map.has("instance")).toBe(false);
+  });
+
+  it("rejects a batch whose full envelopes exceed the fleet batch limit", async () => {
+    const harness = makeHarness();
+    await harness.append("evt-1");
+    const instance = await harness.instance();
+    const open = instance.openBatch!;
+    const envelopeBytes = new TextEncoder().encode(JSON.stringify(open.events[0])).byteLength;
+    const oneBatchBytes = new TextEncoder().encode(JSON.stringify({
+      ...open,
+      closedAt: "9999-12-31T23:59:59.999Z",
+      closedBy: "cooldown-expired",
+    })).byteLength;
+    harness.cell.env.MAILBOX_MAX_EVENT_BYTES = String(envelopeBytes + 16);
+    harness.cell.env.MAILBOX_MAX_BATCH_BYTES = String(oneBatchBytes + 16);
+    harness.cell.env.MAILBOX_MAX_RESIDENT_BYTES = "100000";
+
+    const response = await harness.append("evt-2");
+
+    expect(response.status).toBe(413);
+    expect(await response.json()).toMatchObject({ code: CELLD_BATCH_TOO_LARGE });
+    expect((await harness.instance()).openBatch?.events).toHaveLength(1);
+  });
+
+  it("backpressures an evaluator-outage backlog at the resident payload limit", async () => {
+    const harness = makeHarness({ evaluator: unreachableEvaluator() });
+    await harness.append("evt-1");
+    const original = (await harness.instance()).openBatch!.events[0]!;
+    harness.clock.advance(1_000);
+    expect(await harness.fireAlarm()).toBeInstanceOf(Error);
+    const checkpoint = JSON.parse(harness.state.map.get("run") as string) as {
+      batch: { events: readonly BufferedEvent[] };
+    };
+    const envelopeBytes = new TextEncoder().encode(
+      JSON.stringify(checkpoint.batch.events[0]),
+    ).byteLength;
+    const batchBytes = new TextEncoder().encode(JSON.stringify(checkpoint.batch)).byteLength;
+    const state = (await (await harness.route("state")).json()) as { residentBytes: number };
+    harness.cell.env.MAILBOX_MAX_EVENT_BYTES = String(envelopeBytes + 16);
+    const residentLimit = Math.max(state.residentBytes, batchBytes + 64);
+    harness.cell.env.MAILBOX_MAX_BATCH_BYTES = String(residentLimit);
+    harness.cell.env.MAILBOX_MAX_RESIDENT_BYTES = String(residentLimit);
+
+    const duplicate = await harness.append("evt-1", {
+      acceptedAt: original.acceptedAt,
+      event: original.event,
+    });
+    const overflow = await harness.append("evt-2");
+
+    expect(duplicate.status).toBe(200);
+    expect(overflow.status).toBe(429);
+    expect(await overflow.json()).toMatchObject({ code: CELLD_RESIDENT_CAPACITY_EXCEEDED });
+    expect((await harness.instance()).openBatch).toBeUndefined();
+    expect(JSON.parse(harness.state.map.get("run") as string).batch.events).toHaveLength(1);
   });
 
   it("resumes an interrupted evaluation on the same run instead of re-claiming", async () => {

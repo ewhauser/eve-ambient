@@ -17,8 +17,14 @@ import {
 import type { EvaluationRequest, EvaluationResponse } from "./mailbox.js";
 
 export {
+  CELLD_APPEND_CONFLICT,
+  CELLD_BATCH_TOO_LARGE,
+  CELLD_CELL_IDENTITY_MISMATCH,
   CELLD_DEFINITION_VERSION_MISMATCH,
+  CELLD_EVENT_TOO_LARGE,
+  CELLD_INVALID_CAPACITY_CONFIG,
   CELLD_MALFORMED_APPEND,
+  CELLD_RESIDENT_CAPACITY_EXCEEDED,
   CELLD_UNPINNED_CELL,
   EvaluationAuthError,
   EvaluationRequestError,
@@ -28,6 +34,7 @@ export {
 } from "./mailbox.js";
 export type {
   CelldAppendOutcome,
+  CelldAppendReceipt,
   CelldAppendRequest,
   CelldAppendResponse,
   CelldCellConfig,

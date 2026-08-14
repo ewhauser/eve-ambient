@@ -1,5 +1,5 @@
 /**
- * The Phase 2 conformance oracle, ported for the shipped cell.
+ * The full-payload celld conformance oracle, ported for the shipped cell.
  *
  * The cell's transition log is treated as an *observation* of which lifecycle
  * events happened and when. Every consequence — which batch a claim selects,
@@ -14,7 +14,7 @@
 
 import { dispatchLifecycle } from "../src/instance-machine.js";
 import type { CelldCellConfig } from "../src/mailbox.js";
-import type { BufferedEventRef, StoredMonitorInstance } from "../src/storage.js";
+import type { BufferedEvent, StoredMonitorInstance } from "../src/storage.js";
 import { addMs, durationMs } from "../src/time.js";
 import type { ChannelEvent, MonitorDefinition } from "../src/types.js";
 
@@ -22,10 +22,10 @@ import type { ChannelEvent, MonitorDefinition } from "../src/types.js";
 const LOG_LIMIT = 60;
 
 export interface PublishedEvent {
-  readonly branchKey: BufferedEventRef["branchKey"];
-  readonly eventKey: BufferedEventRef["eventKey"];
-  readonly inputHash: BufferedEventRef["inputHash"];
-  readonly phase?: BufferedEventRef["phase"];
+  readonly branchKey: BufferedEvent["branchKey"];
+  readonly eventKey: BufferedEvent["eventKey"];
+  readonly inputHash: BufferedEvent["inputHash"];
+  readonly event: BufferedEvent["event"];
   readonly bytes: number;
   readonly acceptedAt: string;
   readonly ingressSequence: string;
@@ -51,7 +51,7 @@ export interface CellLogEntry {
 
 export interface OracleVerdict {
   /** What the machine says the instance must be after the observed timeline. */
-  readonly instance: StoredMonitorInstance<BufferedEventRef>;
+  readonly instance: StoredMonitorInstance<BufferedEvent>;
   /** Disagreements between the cell's log metadata and the machine. */
   readonly mismatches: readonly string[];
   /** Field-level differences between the cell's record and the machine's. */
@@ -59,7 +59,7 @@ export interface OracleVerdict {
 }
 
 /** Mirrors the worker's `#newInstance`. */
-function newInstance(options: OracleOptions, now: string): StoredMonitorInstance<BufferedEventRef> {
+function newInstance(options: OracleOptions, now: string): StoredMonitorInstance<BufferedEvent> {
   return {
     id: options.cellName,
     tenantId: options.tenantId,
@@ -87,7 +87,7 @@ function newInstance(options: OracleOptions, now: string): StoredMonitorInstance
 export function replayCellLog(
   log: readonly CellLogEntry[],
   options: OracleOptions,
-): { readonly instance: StoredMonitorInstance<BufferedEventRef>; readonly mismatches: readonly string[] } {
+): { readonly instance: StoredMonitorInstance<BufferedEvent>; readonly mismatches: readonly string[] } {
   const first = log[0];
   if (first === undefined) throw new Error("cannot replay an empty cell log");
   if (first.kind !== "append") {
@@ -105,20 +105,19 @@ export function replayCellLog(
     const now = entry.at;
     switch (entry.kind) {
       case "append": {
-        const ref = String(entry.ref);
-        const published = options.published.get(ref);
+        const branchKey = String(entry.branchKey);
+        const published = options.published.get(branchKey);
         if (published === undefined) {
-          mismatches.push(`${where}: appended ${ref} was never published`);
+          mismatches.push(`${where}: appended ${branchKey} was never published`);
           return;
         }
         const result = dispatchLifecycle(instance, definition, {
           type: "APPEND",
           event: {
-            ref,
             branchKey: published.branchKey,
             eventKey: published.eventKey,
             inputHash: published.inputHash,
-            ...(published.phase === undefined ? {} : { phase: published.phase }),
+            event: published.event,
             bytes: published.bytes,
             acceptedAt: published.acceptedAt,
             ingressSequence: published.ingressSequence,
@@ -154,10 +153,10 @@ export function replayCellLog(
               `${where}: log closedBy=${String(entry.closedBy)}, machine ${result.claimedBatch.closedBy}`,
             );
           }
-          const refs = result.claimedBatch.events.map((event) => event.ref);
-          if (JSON.stringify(refs) !== JSON.stringify(entry.refs)) {
+          const branchKeys = result.claimedBatch.events.map((event) => event.branchKey);
+          if (JSON.stringify(branchKeys) !== JSON.stringify(entry.branchKeys)) {
             mismatches.push(
-              `${where}: log refs ${JSON.stringify(entry.refs)}, machine ${JSON.stringify(refs)}`,
+              `${where}: log branchKeys ${JSON.stringify(entry.branchKeys)}, machine ${JSON.stringify(branchKeys)}`,
             );
           }
         }
@@ -168,7 +167,7 @@ export function replayCellLog(
         const decision = entry.decision as
           | { action: "ignore" | "wake"; confidence?: number; reasonClass: string }
           | null;
-        const binding = entry.binding as StoredMonitorInstance<BufferedEventRef>["binding"] | null;
+        const binding = entry.binding as StoredMonitorInstance<BufferedEvent>["binding"] | null;
         const result = dispatchLifecycle(instance, definition, {
           type: "RUN_COMPLETED",
           status: entry.status as "ignored" | "shadowed" | "suppressed" | "delivered" | "unroutable",

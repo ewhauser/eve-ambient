@@ -92,21 +92,12 @@ export interface BufferedEventValue {
   readonly ingressSequence: string;
 }
 
-/** Complete event envelope owned by a store mailbox. */
+/** Complete event envelope owned by a mailbox. */
 export interface BufferedEvent extends BufferedEventValue {
   readonly branchKey: BranchKey;
   readonly eventKey: EventKey;
   readonly inputHash: InputHash;
   readonly event: ChannelEvent<string, JsonValue, JsonValue>;
-}
-
-/** Transitional celld-only value removed by the full-payload celld phase. */
-export interface BufferedEventRef extends BufferedEventValue {
-  readonly ref: string;
-  readonly branchKey: BranchKey;
-  readonly eventKey: EventKey;
-  readonly inputHash: InputHash;
-  readonly phase?: MonitorPhase | undefined;
 }
 
 export interface OpenMonitorBatch<TEvent extends BufferedEventValue = BufferedEvent> {

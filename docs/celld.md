@@ -11,14 +11,12 @@ and decides when a batch is due—can run in
 rows.
 
 One cell owns each correlation instance. It holds the same
-`StoredMonitorInstance` record and runs the same lifecycle statechart, with a
-durable cell alarm replacing the PostgreSQL `nextEvaluationAt` due scan.
-Nothing else moves: PostgreSQL remains the system of record for event payloads,
-runs, decisions, dead letters, budgets, and audit.
-
-This reference-only celld boundary is transitional. RFC 0001 Phase 3 replaces
-cell appends and evaluator callbacks with complete event envelopes; applications
-should not build a new payload-repository interface around the temporary shape.
+`StoredMonitorInstance` record with complete event envelopes and runs the same
+lifecycle statechart, with a durable cell alarm replacing the PostgreSQL
+`nextEvaluationAt` due scan. PostgreSQL remains the system of record for runs,
+decisions, dead letters, budgets, and audit. It may retain an ingress payload
+copy under its own local cleanup policy, but celld evaluation never depends on
+that copy.
 
 ## Architecture
 
@@ -28,25 +26,28 @@ channels
     v
 ingress pipeline                    schema, dedupe, ingress sequence, filter,
     |                               correlate, loop prevention, event budgets
-    |  append {subscriptionId, ref, bytes, seq, config}
+    |  append {branchKey, inputHash, event, bytes, seq, config}
     v
-celld cells                         statechart, buffer, cooldown, alarms
-    |                               no payloads or model credentials
-    |  alarm -> evaluation {runId, batch refs, instanceView}
+celld cells                         full events, statechart, buffer, cooldown,
+    |                               alarms; no model credentials
+    |  alarm -> evaluation {runId, complete batch, instanceView}
     v
-runtime evaluator                   payload loading, decision, budgets,
+runtime evaluator                   decision, budgets,
     |                               evidence, route, delivery, run record
     |  terminal result or durable retryAt
     v
 delivery channels                   idempotency, bindings, coalescing
 ```
 
-Filtering does not run in celld. Only post-filter event references leave the
-runtime. Payloads remain exclusively in the event store and are loaded by
-reference for evaluation; cells persist references and scheduling metadata.
+Filtering does not run in celld. Only post-filter complete event envelopes
+leave the runtime. Cells persist those envelopes in open, sealed, and claimed
+batches, then send the complete claimed batch to the evaluator. No event
+repository or payload lookup participates in the handoff.
 
-Appends are idempotent by durable subscription ID, including the case where a
-cell commits but its HTTP response is lost. Runs are written in the same format
+Appends are idempotent by durable `branchKey` and `inputHash`, including the
+case where a cell commits but its HTTP response is lost. The cell validates the
+event and branch identity chain and rejects key reuse with different full input.
+Runs are written in the same format
 in both mailbox tiers, so `listRuns()` and `listDeadLetters()` keep the same
 behavior. An idle cell arms cleanup for the monitor's decision
 retention expiry and then removes its instance record and expired append
@@ -108,10 +109,10 @@ const evaluate = createEvaluationFetchHandler(runtime, {
 `handleEvaluation(request)` is available directly when the host is not
 fetch-shaped; it accepts and returns plain objects.
 
-The evaluator authenticates the request, loads authoritative payloads from
-PostgreSQL by reference, reserves budgets, runs the normal decision and
-delivery pipeline, records the run, and returns either a terminal outcome or a
-durable future `retryAt`.
+The evaluator authenticates the request, validates and freezes the complete
+batch, reserves budgets, runs the normal decision and delivery pipeline,
+records the run, and returns either a terminal outcome or a durable future
+`retryAt`.
 
 ### 3. Select the mailbox
 
@@ -133,6 +134,19 @@ them would race the cells.
 
 `EVALUATOR_SECRET` is mandatory on the worker. When absent, every `/cells`
 route fails closed with `503` instead of forwarding unauthenticated traffic.
+
+Three fleet capacity settings are also mandatory:
+
+| Setting | Meaning |
+|---|---|
+| `MAILBOX_MAX_EVENT_BYTES` | Maximum serialized full `BufferedEvent` envelope. |
+| `MAILBOX_MAX_BATCH_BYTES` | Maximum serialized provisional or claimed batch; must be at least the event limit. |
+| `MAILBOX_MAX_RESIDENT_BYTES` | Maximum serialized open, sealed, and claimed batches plus append receipts in one cell; must be at least the batch limit. |
+
+Missing or inconsistent limits fail closed with `503`. A full event or batch
+that can never fit returns `413` and is terminal for that branch. Resident
+pressure returns `429`; the runtime retains the full branch payload and retries
+with backoff. Limits never trigger a reference-only fallback.
 
 ## Tuning
 
@@ -179,7 +193,10 @@ treating them as universal service levels.
 - **celld is alpha and this tier is experimental.** Production adoption is
   gated on target-infrastructure latency measurements, formal acceptance or
   removal of the celld#144 workaround, a governance strategy for the
-  dependency, and a measured throughput ceiling.
+  dependency, and a measured full-payload throughput ceiling. Rerun capacity
+  measurements with representative event distributions and evaluator-outage
+  backlogs; the in-process regression suite proves the limit semantics, not
+  target-fleet LTX or object-store costs.
 
 ## External event logs
 
@@ -187,9 +204,11 @@ celld is a mailbox, not an event log. Kafka or another durable log can own the
 raw ingress stream independently, but the package does not ship a first-class
 Kafka adapter today. A consumer using `publish()` may commit after `accepted`
 or `duplicate` because PostgreSQL has durably recorded the subscription and
-will retry the cell append. A custom external-reference adapter that bypasses
-that acceptance boundary must wait for a durable mailbox append instead.
+will retry the cell append. An adapter that bypasses that acceptance boundary
+is not conformant. A custom external-ingress adapter
+must carry the complete event and wait for the next durable full-payload
+handoff before acknowledging its own input.
 
-See [Deployment options](deployment-options.md) for the combined reference
+See [Deployment options](deployment-options.md) for the combined full-value
 topology and [Operations and security](operations-and-security.md) for the
 trust and delivery boundaries.

@@ -151,25 +151,25 @@ describe.skipIf(!enabled)("celld fleet integration", () => {
     const published = new Map<string, PublishedEvent>();
     for (const entry of state.log as {
       kind: string;
-      ref?: string;
+      eventRef?: string;
       branchKey?: PublishedEvent["branchKey"];
       eventKey?: PublishedEvent["eventKey"];
       inputHash?: PublishedEvent["inputHash"];
-      phase?: PublishedEvent["phase"] | null;
     }[]) {
       if (
         entry.kind !== "append" ||
-        entry.ref === undefined ||
+        entry.eventRef === undefined ||
         entry.branchKey === undefined ||
         entry.eventKey === undefined ||
         entry.inputHash === undefined
       ) continue;
-      const record = (await store.getEvent(entry.ref))!;
-      published.set(entry.ref, {
+      const record = (await store.getEvent(entry.eventRef))!;
+      if (record.event === undefined) throw new Error(`missing integration event ${entry.eventRef}`);
+      published.set(entry.branchKey, {
         branchKey: entry.branchKey,
         eventKey: entry.eventKey,
         inputHash: entry.inputHash,
-        ...(entry.phase === undefined || entry.phase === null ? {} : { phase: entry.phase }),
+        event: record.event,
         bytes: record.bytes,
         acceptedAt: record.acceptedAt,
         ingressSequence: record.ingressSequence,

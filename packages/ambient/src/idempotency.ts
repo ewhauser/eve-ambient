@@ -9,21 +9,27 @@ import type {
 
 declare const idempotencyKeyBrand: unique symbol;
 declare const inputHashBrand: unique symbol;
+declare const fanoutManifestHashBrand: unique symbol;
 
 export type IdempotencyKey<TKind extends string = string> = string & {
   readonly [idempotencyKeyBrand]: TKind;
 };
 export type EventKey = IdempotencyKey<"event">;
+export type OccurrenceKey = IdempotencyKey<"occurrence">;
 export type DirectDispatchKey = IdempotencyKey<"direct-dispatch">;
 export type BranchKey = IdempotencyKey<"branch">;
+export type AttentionInstanceKey = IdempotencyKey<"instance">;
 export type BatchKey = IdempotencyKey<"batch">;
 export type RunKey = IdempotencyKey<"run">;
 export type WakeKey = IdempotencyKey<"wake">;
 export type InputHash = string & { readonly [inputHashBrand]: true };
+export type FanoutManifestHash = string & { readonly [fanoutManifestHashBrand]: true };
 export type IdempotencyKeyKind =
   | "event"
+  | "occurrence"
   | "direct-dispatch"
   | "branch"
+  | "instance"
   | "batch"
   | "run"
   | "wake";
@@ -167,6 +173,129 @@ export async function deriveEventKey(input: EventKeyInput): Promise<EventKey> {
     nonEmpty(input.sourceEventId, "sourceEventId"),
   ];
   return domainHash("eve:event:v1", parts) as Promise<EventKey>;
+}
+
+/** Deterministic accepted occurrence for the canonical source input. */
+export async function deriveOccurrenceKey(input: {
+  readonly eventKey: EventKey;
+  readonly inputHash: InputHash;
+}): Promise<OccurrenceKey> {
+  assertKeyKind(input.eventKey, "event");
+  assertInputHash(input.inputHash);
+  return domainHash("eve:occurrence:v1", [
+    input.eventKey,
+    input.inputHash,
+  ]) as Promise<OccurrenceKey>;
+}
+
+/** RFC 0002 direct-dispatch identity. Legacy runtime identity remains below. */
+export async function deriveAttentionDirectDispatchKey(input: {
+  readonly occurrenceKey: OccurrenceKey;
+  readonly bindingGeneration: string;
+}): Promise<DirectDispatchKey> {
+  assertKeyKind(input.occurrenceKey, "occurrence");
+  return domainHash("eve:direct-dispatch:v2", [
+    input.occurrenceKey,
+    nonEmpty(input.bindingGeneration, "bindingGeneration"),
+  ]) as Promise<DirectDispatchKey>;
+}
+
+/** RFC 0002 full-branch identity. */
+export async function deriveAttentionBranchKey(input: {
+  readonly occurrenceKey: OccurrenceKey;
+  readonly monitorId: string;
+  readonly definitionVersion: string;
+  readonly phase?: MonitorPhase | undefined;
+  readonly correlationKey: string;
+}): Promise<BranchKey> {
+  assertKeyKind(input.occurrenceKey, "occurrence");
+  return domainHash("eve:branch:v2", [
+    input.occurrenceKey,
+    nonEmpty(input.monitorId, "monitorId"),
+    nonEmpty(input.definitionVersion, "definitionVersion"),
+    input.phase ?? null,
+    nonEmpty(input.correlationKey, "correlationKey"),
+  ]) as Promise<BranchKey>;
+}
+
+/** RFC 0002 serialized correlation-workflow identity. */
+export async function deriveAttentionInstanceKey(input: {
+  readonly applicationId: string;
+  readonly tenantId: string;
+  readonly monitorId: string;
+  readonly definitionVersion: string;
+  readonly correlationKey: string;
+}): Promise<AttentionInstanceKey> {
+  return domainHash("eve:instance:v2", [
+    nonEmpty(input.applicationId, "applicationId"),
+    nonEmpty(input.tenantId, "tenantId"),
+    nonEmpty(input.monitorId, "monitorId"),
+    nonEmpty(input.definitionVersion, "definitionVersion"),
+    nonEmpty(input.correlationKey, "correlationKey"),
+  ]) as Promise<AttentionInstanceKey>;
+}
+
+/** RFC 0002 batch identity from canonical frozen membership. */
+export async function deriveAttentionBatchKey(input: {
+  readonly instanceKey: AttentionInstanceKey;
+  readonly orderedBranchKeys: readonly BranchKey[];
+}): Promise<BatchKey> {
+  assertKeyKind(input.instanceKey, "instance");
+  const keys = distinctKeys(input.orderedBranchKeys, "orderedBranchKeys", "branch");
+  if (keys.length === 0) throw new TypeError("orderedBranchKeys must not be empty");
+  return domainHash("eve:batch:v2", [input.instanceKey, keys]) as Promise<BatchKey>;
+}
+
+export async function deriveAttentionRunKey(input: {
+  readonly batchKey: BatchKey;
+  readonly purpose?: string | undefined;
+}): Promise<RunKey> {
+  assertKeyKind(input.batchKey, "batch");
+  return domainHash("eve:run:v2", [
+    input.batchKey,
+    nonEmpty(input.purpose ?? "primary", "purpose"),
+  ]) as Promise<RunKey>;
+}
+
+export async function deriveAttentionWakeKey(input: {
+  readonly runKey: RunKey;
+  readonly routeId: string;
+}): Promise<WakeKey> {
+  assertKeyKind(input.runKey, "run");
+  return domainHash("eve:wake:v2", [
+    input.runKey,
+    nonEmpty(input.routeId, "routeId"),
+  ]) as Promise<WakeKey>;
+}
+
+/** Hashes a complete ordered fan-out, including the empty-manifest outcome. */
+export async function deriveFanoutManifestHash(input: {
+  readonly occurrenceKey: OccurrenceKey;
+  readonly orderedBranches: readonly {
+    readonly branchKey: BranchKey;
+    readonly inputHash: InputHash;
+  }[];
+}): Promise<FanoutManifestHash> {
+  assertKeyKind(input.occurrenceKey, "occurrence");
+  const seen = new Set<string>();
+  let previousBranchKey: string | undefined;
+  const branches = input.orderedBranches.map((branch) => {
+    assertKeyKind(branch.branchKey, "branch");
+    assertInputHash(branch.inputHash);
+    if (seen.has(branch.branchKey)) {
+      throw new TypeError("orderedBranches must contain distinct branch keys");
+    }
+    seen.add(branch.branchKey);
+    if (previousBranchKey !== undefined && previousBranchKey > branch.branchKey) {
+      throw new TypeError("orderedBranches must be ordered by branchKey");
+    }
+    previousBranchKey = branch.branchKey;
+    return [branch.branchKey, branch.inputHash] as const;
+  });
+  return domainHash("eve:fanout:v1", [
+    input.occurrenceKey,
+    branches,
+  ]) as Promise<FanoutManifestHash>;
 }
 
 export async function deriveDirectDispatchKey(input: {
@@ -568,8 +697,21 @@ function distinctKeys<TKey extends string>(
 }
 
 function assertKeyKind(value: string, kind: string): void {
-  const prefix = `eve:${kind}:v1:`;
-  if (!new RegExp(`^${escapeRegExp(prefix)}[0-9a-f]{64}$`).test(value)) {
+  const versions: Readonly<Record<string, readonly number[]>> = {
+    event: [1],
+    occurrence: [1],
+    "direct-dispatch": [1, 2],
+    branch: [1, 2],
+    instance: [2],
+    batch: [1, 2],
+    run: [1, 2],
+    wake: [1, 2],
+    input: [1],
+  };
+  const allowed = versions[kind] ?? [1];
+  const version = allowed.map(String).join("|");
+  const prefix = `eve:${kind}:v`;
+  if (!new RegExp(`^${escapeRegExp(prefix)}(?:${version}):[0-9a-f]{64}$`).test(value)) {
     throw new TypeError(`expected ${kind} idempotency key`);
   }
 }

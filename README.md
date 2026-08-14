@@ -134,6 +134,7 @@ for the experimental distributed mailbox.
 
 - [Full-payload idempotent handoffs RFC](docs/rfcs/0001-full-payload-idempotent-handoffs.md)
 - [Durable attention engine RFC](docs/rfcs/0002-durable-attention-engine.md)
+- [Attention engine protocol](docs/attention-engine.md)
 - [Deployment options](docs/deployment-options.md)
 - [Monitoring model](docs/monitoring-model.md)
 - [Persistence responsibilities](docs/storage-responsibilities.md)

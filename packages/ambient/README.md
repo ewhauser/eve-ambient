@@ -62,7 +62,8 @@ for a complete production setup. Local tests can use `MemoryMonitorStore` from
 ## Documentation
 
 - [RFC 0001: Full-payload idempotent handoffs](https://github.com/ewhauser/eve-ambient/blob/main/docs/rfcs/0001-full-payload-idempotent-handoffs.md) — accepted direction for payload-by-value custody and end-to-end idempotency lineage.
-- [RFC 0002: Durable attention engine](https://github.com/ewhauser/eve-ambient/blob/main/docs/rfcs/0002-durable-attention-engine.md) — proposed replacement of the public store model with one engine command and two callback stages.
+- [RFC 0002: Durable attention engine](https://github.com/ewhauser/eve-ambient/blob/main/docs/rfcs/0002-durable-attention-engine.md) — accepted replacement of the public store model with one engine command and two callback stages.
+- [Attention engine protocol](https://github.com/ewhauser/eve-ambient/blob/main/docs/attention-engine.md) — use the v2 lineage, complete fan-out contract, callbacks, and memory reference engine during the backend transition.
 - [Deployment options](https://github.com/ewhauser/eve-ambient/blob/main/docs/deployment-options.md) — choose an ingestion, event-log, and mailbox topology.
 - [Monitoring model](https://github.com/ewhauser/eve-ambient/blob/main/docs/monitoring-model.md) — define channel events and monitors, then wire decisions and delivery.
 - [Persistence responsibilities](https://github.com/ewhauser/eve-ambient/blob/main/docs/storage-responsibilities.md) — understand ingress, branch, mailbox, run, deployment, budget, and retention ownership.

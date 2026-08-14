@@ -22,10 +22,16 @@ importers:
       eve:
         specifier: 0.38.1
         version: 0.38.1(patch_hash=d32bd74253cdb621fa7401a045a43bfc505a9d5906211932ff0c38cc741085f0)(ai@7.0.62(zod@4.4.3))(vite@8.2.1(@types/node@24.13.3))
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
     devDependencies:
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
+      vitest:
+        specifier: ^4.1.10
+        version: 4.1.10(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3))
 
   examples/eve-postgres:
     dependencies:
@@ -41,6 +47,9 @@ importers:
       pg:
         specifier: ^8.16.3
         version: 8.23.0
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
     devDependencies:
       '@types/pg':
         specifier: ^8.15.6
@@ -48,6 +57,9 @@ importers:
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
+      vitest:
+        specifier: ^4.1.10
+        version: 4.1.10(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3))
 
   integration/eve-conformance:
     dependencies:

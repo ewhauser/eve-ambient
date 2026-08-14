@@ -10,8 +10,8 @@ integration conformance tests.
 |---|---|---|
 | [`packages/ambient`](packages/ambient) | Typed monitors, idempotency lineage, PostgreSQL and celld mailboxes | `@ewhauser/eve-ambient` |
 | [`packages/eve-adapter`](packages/eve-adapter) | Eve channel delivery with the carried `vercel/eve#1842` patch | `@ewhauser/eve-ambient-eve` |
-| [`examples/eve-postgres`](examples/eve-postgres) | Eve delivery with the supported PostgreSQL-first runtime | No |
-| [`examples/eve-celld`](examples/eve-celld) | Eve delivery with the experimental full-payload celld mailbox | No |
+| [`examples/eve-postgres`](examples/eve-postgres) | Slack incident rule with Eve delivery and the supported PostgreSQL-first runtime | No |
+| [`examples/eve-celld`](examples/eve-celld) | GitHub pull-request rule with Eve delivery and the experimental full-payload celld mailbox | No |
 | [`integration/eve-conformance`](integration/eve-conformance) | Exact-version patch and adapter conformance | No |
 
 ## Install

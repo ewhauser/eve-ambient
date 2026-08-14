@@ -182,7 +182,9 @@ await runtime.initialize();
 
 See [Postgres-first deployment](postgres.md) for publishing and worker
 operation. See [Prefiltered ingress](prefiltered-ingress.md) when an external
-system selects events before they enter the runtime.
+system selects events before they enter the runtime. See
+[Persistence responsibilities](storage-responsibilities.md) for the store
+facets behind ingress, branch custody, mailboxes, runs, budgets, and retention.
 
 ## Chat phases and direct dispatch
 

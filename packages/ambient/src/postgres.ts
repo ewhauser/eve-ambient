@@ -39,7 +39,10 @@ export interface PostgresPool extends PostgresQueryable {
   connect(): Promise<PostgresClient>;
 }
 
-/** Store backed by row data plus advisory-locked PostgreSQL transactions. */
+/**
+ * Co-located PostgreSQL implementation of every `MonitorStore` responsibility,
+ * using row data plus advisory-locked transactions for cross-facet atomicity.
+ */
 export class PostgresMonitorStore implements MonitorStore {
   readonly #pool: PostgresPool;
   readonly #schema: string;

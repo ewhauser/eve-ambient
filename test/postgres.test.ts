@@ -17,6 +17,7 @@ function subscription(
     id: branchKey,
     branchKey,
     eventKey: `eve:event:v1:${digest}` as StoredSubscription["eventKey"],
+    acceptanceId: `acceptance_${id}`,
     eventInputHash: `eve:input:v1:${"0".repeat(64)}` as StoredSubscription["eventInputHash"],
     inputHash: `eve:input:v1:${"1".repeat(64)}` as StoredSubscription["inputHash"],
     event: {

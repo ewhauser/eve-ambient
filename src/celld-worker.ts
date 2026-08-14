@@ -451,7 +451,7 @@ export class MonitorInstance {
       );
     }
     if (receipt !== undefined) {
-      if (await this.#containsBranch(instance, body.branchKey)) {
+      if ((await this.#findBranch(instance, body.branchKey)) !== undefined) {
         await this.#ensureEventMarker(body, bytes, acceptedAt, now);
       }
       const alarmAt = await this.#arm(instance);
@@ -470,7 +470,27 @@ export class MonitorInstance {
     // written before the receipt. A retry that lands in that window can see
     // the branch in either the buffered instance or the active run checkpoint,
     // record the missing receipt, and must not dispatch APPEND again.
-    if (await this.#containsBranch(instance, body.branchKey)) {
+    const storedBranch = await this.#findBranch(instance, body.branchKey);
+    if (storedBranch !== undefined) {
+      if (
+        storedBranch.ref !== body.ref ||
+        storedBranch.eventKey !== body.eventKey ||
+        storedBranch.inputHash !== body.inputHash ||
+        storedBranch.phase !== body.phase ||
+        storedBranch.bytes !== bytes ||
+        storedBranch.acceptedAt !== acceptedAt ||
+        storedBranch.ingressSequence !== body.ingressSequence
+      ) {
+        return json(
+          {
+            ok: false,
+            code: "append-conflict",
+            error:
+              `subscription ${body.subscriptionId} was already appended with different identity`,
+          },
+          409,
+        );
+      }
       const recovered: AppendReceipt = {
         subscriptionId: body.subscriptionId,
         ref: body.ref,
@@ -555,17 +575,18 @@ export class MonitorInstance {
     return json(this.#appendResponse(name, pin, instance, outcome, result.flushed, alarmAt, now));
   }
 
-  async #containsBranch(
+  async #findBranch(
     instance: CelldMonitorInstance,
     branchKey: BufferedEventRef["branchKey"],
-  ): Promise<boolean> {
-    if (instance.openBatch?.events.some((event) => event.branchKey === branchKey) === true) return true;
-    if (instance.sealedBatches.some((batch) =>
-      batch.events.some((event) => event.branchKey === branchKey))) {
-      return true;
+  ): Promise<BufferedEventRef | undefined> {
+    const open = instance.openBatch?.events.find((event) => event.branchKey === branchKey);
+    if (open !== undefined) return open;
+    for (const batch of instance.sealedBatches) {
+      const sealed = batch.events.find((event) => event.branchKey === branchKey);
+      if (sealed !== undefined) return sealed;
     }
     const run = await this.#readJson<RunCheckpoint>("run");
-    return run?.batch.events.some((event) => event.branchKey === branchKey) === true;
+    return run?.batch.events.find((event) => event.branchKey === branchKey);
   }
 
   async #ensureEventMarker(

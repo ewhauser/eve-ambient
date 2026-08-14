@@ -47,12 +47,21 @@ describe("idempotency identity", () => {
     });
     const branchKey = await deriveBranchKey({
       eventKey,
+      acceptanceId: "acceptance-1",
+      monitorId: "ambient-engineering",
+      definitionVersion: "v1",
+      phase: "observed",
+    });
+    const nextAcceptanceBranchKey = await deriveBranchKey({
+      eventKey,
+      acceptanceId: "acceptance-2",
       monitorId: "ambient-engineering",
       definitionVersion: "v1",
       phase: "observed",
     });
     expect(directDispatchKey).toMatch(/^eve:direct-dispatch:v1:[0-9a-f]{64}$/);
     expect(branchKey).toMatch(/^eve:branch:v1:[0-9a-f]{64}$/);
+    expect(nextAcceptanceBranchKey).not.toBe(branchKey);
     expect(directDispatchKey).not.toBe(branchKey);
     expect(parseIdempotencyKey("event", eventKey)).toBe(eventKey);
     expect(() => parseIdempotencyKey("branch", eventKey)).toThrow(
@@ -120,11 +129,13 @@ describe("idempotency identity", () => {
     });
     const first = await deriveBranchKey({
       eventKey,
+      acceptanceId: "acceptance-1",
       monitorId: "monitor",
       definitionVersion: "v1",
     });
     const second = await deriveBranchKey({
       eventKey,
+      acceptanceId: "acceptance-1",
       monitorId: "monitor",
       definitionVersion: "v2",
     });
@@ -242,11 +253,13 @@ describe("idempotency identity", () => {
     });
     const first = await deriveBranchKey({
       eventKey,
+      acceptanceId: "acceptance-1",
       monitorId: "monitor-a",
       definitionVersion: "v1",
     });
     const second = await deriveBranchKey({
       eventKey,
+      acceptanceId: "acceptance-1",
       monitorId: "monitor-b",
       definitionVersion: "v1",
     });
@@ -297,6 +310,7 @@ describe("idempotency identity", () => {
     });
     const branchKey = await deriveBranchKey({
       eventKey,
+      acceptanceId: "acceptance-1",
       monitorId: "monitor",
       definitionVersion: "v1",
     });
@@ -327,6 +341,7 @@ describe("idempotency identity", () => {
     });
     const branchKey = await deriveBranchKey({
       eventKey,
+      acceptanceId: "acceptance-1",
       monitorId: "monitor",
       definitionVersion: "v1",
     });

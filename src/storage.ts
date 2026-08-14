@@ -21,6 +21,8 @@ import type {
 export interface StoredEvent {
   readonly ref: string;
   readonly eventKey: EventKey;
+  /** Unique durable generation for this post-horizon ingress acceptance. */
+  readonly acceptanceId: string;
   readonly inputHash: InputHash;
   readonly dedupeKey: string;
   readonly tenantId: string;
@@ -60,6 +62,7 @@ export interface StoredSubscription {
   readonly id: string;
   readonly branchKey: BranchKey;
   readonly eventKey: EventKey;
+  readonly acceptanceId: string;
   readonly eventInputHash: InputHash;
   readonly inputHash: InputHash;
   /** Complete branch-owned input; store-mode processing never loads it elsewhere. */

@@ -384,6 +384,10 @@ describe("deployment identity and retention", () => {
     expect(second.status).toBe("accepted");
     expect(second.eventId).not.toBe(first.eventId);
     expect(await store.getEvent(first.eventId)).not.toBeNull();
+    await runtime.drain();
+    expect(delivery.deliveries).toHaveLength(2);
+    const runs = await runtime.listRuns();
+    expect(new Set(runs.map((run) => run.runKey)).size).toBe(2);
   });
 
   it("keeps an unfinished branch self-contained after ingress dedupe retention expires", async () => {

@@ -253,7 +253,7 @@ Keys SHOULD use domain-separated SHA-256 over a versioned canonical encoding. Ex
 ```text
 eventKey  = H("eve:event:v1", tenant, application, channel, installation, sourceEventId)
 
-branchKey = H("eve:branch:v1", eventKey, monitorId, definitionVersion, phase)
+branchKey = H("eve:branch:v1", eventKey, acceptanceId, monitorId, definitionVersion, phase)
 
 batchKey  = H("eve:batch:v1", instanceId, orderedDistinctBranchKeys)
 
@@ -265,6 +265,12 @@ turnKey   = H("eve:turn:v1", bindingGeneration, orderedDistinctIngressKeys)
 
 actionKey = H("eve:action:v1", turnKey, durableActionCallId)
 ```
+
+`acceptanceId` is the durable ingress-receipt generation. Matching retries
+reuse it. If the source receipt horizon has ended and the provider identity is
+accepted as new work, ingress mints a new generation so descendant keys cannot
+collide with still-retained receipts from an earlier acceptance. It is not a
+transport attempt or payload reference.
 
 Canonical encoding MUST be unambiguous and versioned. Concatenating strings with a delimiter is insufficient unless escaping and type boundaries are formally defined.
 

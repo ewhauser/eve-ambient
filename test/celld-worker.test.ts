@@ -192,6 +192,24 @@ describe("celld mailbox cell", () => {
     expect(harness.state.map.has(`append:${identity("evt-1").branchKey}`)).toBe(true);
   });
 
+  it("rejects conflicting input while recovering a missing append receipt", async () => {
+    const harness = makeHarness();
+    await harness.append("evt-1");
+    const receiptKey = `append:${identity("evt-1").branchKey}`;
+    harness.state.map.delete(receiptKey);
+
+    const conflict = await harness.append("evt-1", {
+      inputHash: `eve:input:v1:${"9".repeat(64)}` as CelldAppendRequest["inputHash"],
+    });
+
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({ code: "append-conflict" });
+    expect(harness.state.map.has(receiptKey)).toBe(false);
+    expect((await harness.instance()).openBatch?.events[0]?.inputHash).toBe(
+      identity("evt-1").inputHash,
+    );
+  });
+
   it("appends, claims on the quiet period, evaluates, and enters cooldown", async () => {
     const harness = makeHarness();
 

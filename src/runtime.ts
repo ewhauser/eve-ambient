@@ -585,6 +585,7 @@ export class MonitorRuntime {
             0,
           );
     const ref = this.#id("evt");
+    const acceptanceId = this.#id("acceptance");
     const event: ChannelEvent<string, JsonValue, JsonValue> = {
       ref,
       id: input.id,
@@ -639,6 +640,7 @@ export class MonitorRuntime {
     const record: Omit<StoredEvent, "ingressSequence"> = {
       ref,
       eventKey,
+      acceptanceId,
       inputHash,
       dedupeKey,
       tenantId: input.tenantId,
@@ -677,6 +679,29 @@ export class MonitorRuntime {
         return { status: "duplicate" as const, eventId: duplicate.ref, traceId: duplicate.traceId };
       }
       if (duplicate !== null) {
+        let hasActiveBranch = false;
+        for (const monitor of matching) {
+          const activeBranchKey = await deriveBranchKey({
+            eventKey: duplicate.eventKey,
+            acceptanceId: duplicate.acceptanceId,
+            monitorId: monitor.definition.id,
+            definitionVersion: monitor.version,
+            ...(phase === undefined ? {} : { phase }),
+          });
+          if ((await tx.getSubscription(activeBranchKey)) !== null) {
+            hasActiveBranch = true;
+            break;
+          }
+        }
+        if (hasActiveBranch) {
+          assertIdempotencyInput({
+            namespace: "ingress-active-branch",
+            key: eventKey,
+            existingInputHash: duplicate.inputHash,
+            receivedInputHash: inputHash,
+          });
+          return { status: "duplicate" as const, eventId: duplicate.ref, traceId: duplicate.traceId };
+        }
         // Preserve the expired ingress receipt while freeing
         // the provider dedupe key for this newly accepted delivery.
         await tx.releaseEventDedupe(duplicate.ref);
@@ -857,6 +882,7 @@ export class MonitorRuntime {
     }
     const branchKey = await deriveBranchKey({
       eventKey: event.eventKey,
+      acceptanceId: event.acceptanceId,
       monitorId: monitor.definition.id,
       definitionVersion: monitor.version,
       ...(phase === undefined ? {} : { phase }),
@@ -871,6 +897,7 @@ export class MonitorRuntime {
     const inputHash = await hashIdempotencyInput({
       parentInputHash: event.inputHash,
       eventKey: event.eventKey,
+      acceptanceId: event.acceptanceId,
       branchKey,
       tenantId: event.tenantId,
       applicationId: event.applicationId,
@@ -884,6 +911,7 @@ export class MonitorRuntime {
       id: branchKey,
       branchKey,
       eventKey: event.eventKey,
+      acceptanceId: event.acceptanceId,
       eventInputHash: event.inputHash,
       inputHash,
       event: branchEvent,
@@ -2748,6 +2776,7 @@ export class MonitorRuntime {
           if (current === null || current.status === "processing") return;
           const branchKey = await deriveBranchKey({
             eventKey: current.eventKey,
+            acceptanceId: current.acceptanceId,
             monitorId: to,
             definitionVersion: target.version,
             ...(current.phase === undefined ? {} : { phase: current.phase }),
@@ -2755,6 +2784,7 @@ export class MonitorRuntime {
           const inputHash = await hashIdempotencyInput({
             parentInputHash: current.eventInputHash,
             eventKey: current.eventKey,
+            acceptanceId: current.acceptanceId,
             branchKey,
             tenantId: current.tenantId,
             applicationId: current.applicationId,

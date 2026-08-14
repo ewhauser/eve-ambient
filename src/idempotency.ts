@@ -182,6 +182,8 @@ export async function deriveDirectDispatchKey(input: {
 
 export async function deriveBranchKey(input: {
   readonly eventKey: EventKey;
+  /** Durable ingress-receipt generation; matching retries reuse it. */
+  readonly acceptanceId: string;
   readonly monitorId: string;
   readonly definitionVersion: string;
   readonly phase?: MonitorPhase | undefined;
@@ -189,6 +191,7 @@ export async function deriveBranchKey(input: {
   assertKeyKind(input.eventKey, "event");
   return domainHash("eve:branch:v1", [
     input.eventKey,
+    nonEmpty(input.acceptanceId, "acceptanceId"),
     nonEmpty(input.monitorId, "monitorId"),
     nonEmpty(input.definitionVersion, "definitionVersion"),
     input.phase ?? null,

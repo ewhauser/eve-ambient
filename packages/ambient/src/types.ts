@@ -314,7 +314,6 @@ export interface MonitorDeliveryRequest<TTarget extends JsonValue = JsonValue> {
   /** Untrusted structured evidence; adapters must preserve this boundary. */
   readonly evidence: MonitorEvidenceSnapshot;
   readonly trigger: MonitorSessionTrigger;
-  readonly concurrency: "coalesce";
 }
 
 export interface MonitorDeliveryReceipt {

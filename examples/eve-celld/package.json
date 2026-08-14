@@ -1,0 +1,18 @@
+{
+  "name": "eve-ambient-example-celld",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@ewhauser/eve-ambient": "workspace:*",
+    "@ewhauser/eve-ambient-eve": "workspace:*",
+    "eve": "0.38.1"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  }
+}

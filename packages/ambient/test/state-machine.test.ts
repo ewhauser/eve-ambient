@@ -621,6 +621,5 @@ function deliveryRequest(id: string): MonitorDeliveryRequest<{ room: string; thr
       evidenceSnapshotId: `evidence-${id}`,
       sourceTypes: ["message"],
     },
-    concurrency: "coalesce",
   };
 }

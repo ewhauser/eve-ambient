@@ -2107,7 +2107,6 @@ export class MonitorRuntime {
       taskInstructions: monitor.definition.task.instructions,
       evidence: run.snapshot!,
       trigger: this.#trigger(run, run.snapshot!, events),
-      concurrency: "coalesce",
     });
     run = await this.#checkpointRun(run, { receipt, stage: "complete" });
     await this.#completeRun(run, "delivered", undefined, context);

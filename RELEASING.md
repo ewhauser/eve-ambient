@@ -1,52 +1,70 @@
 # Releasing
 
-This repository uses Release Please and conventional commits. Merging a release
-pull request creates a `vX.Y.Z` tag and a draft GitHub release.
+This repository uses manifest-mode Release Please and conventional commits.
+The two public packages release independently:
 
-The same workflow then:
+| Path | npm package | GitHub tag |
+|---|---|---|
+| `.` (artifact in `packages/ambient`) | `@ewhauser/eve-ambient` | `vX.Y.Z` |
+| `packages/eve-adapter` | `@ewhauser/eve-ambient-eve` | `eve-ambient-eve-vX.Y.Z` |
 
-1. installs from the frozen pnpm lockfile without a dependency cache;
-2. runs type checking, the complete test suite (including PostgreSQL), the
-   build, package-content checks, and a high-severity dependency audit;
-3. packs the package in a job with no publish credentials;
-4. waits for the protected `release` environment;
-5. publishes the exact tarball to npm with short-lived OIDC credentials and npm
+The core retains its existing standalone `vX.Y.Z` tag series. The adapter uses
+a component-prefixed tag so its independent versions cannot collide. The
+initial workspace release bootstraps from the `v0.4.0` commit, preserving every
+unreleased core change that preceded the directory migration.
+
+The private workspace root mirrors the core version only so Release Please can
+retain the pre-migration root history. Its `extra-files` updater changes the
+real `packages/ambient/package.json` version in the same release commit, and
+the packer maps release path `.` to that package. Adapter-only paths are
+excluded from core version calculation.
+
+Merging a release pull request creates one draft GitHub release per changed
+package. The same workflow then:
+
+1. installs the frozen pnpm workspace, including the exact Eve patch;
+2. builds and tests all packages, examples, and conformance fixtures against
+   PostgreSQL;
+3. verifies the installed Eve patch and both package contents;
+4. packs only the release paths in a job with no publish credentials;
+5. waits for the protected `release` environment;
+6. publishes those exact tarballs to npm with short-lived OIDC credentials and
    provenance; and
-6. attaches that tarball and its checksum to the draft GitHub release before
-   publishing the immutable release.
+7. attaches each tarball and checksum to its matching draft GitHub release
+   before publishing that immutable release.
 
 All actions are pinned to full commit SHAs. Workflow permissions default to
-none and are granted per job. The OIDC-enabled job does not check out or execute
-repository code, and release jobs do not use dependency caches.
+none and are granted per job. The OIDC-enabled job does not check out or
+execute repository code, and release jobs do not use dependency caches.
 
-## One-time scoped-package bootstrap
+## One-time Eve adapter bootstrap
 
-npm requires a package name to exist before a trusted publisher can be
-configured. `@ewhauser/eve-ambient@0.3.0` is therefore bootstrapped from the
-same reviewed artifact used to initialize this standalone repository:
+`@ewhauser/eve-ambient` is already published and has a trusted publisher. npm
+requires the new adapter package name to exist before its trusted publisher can
+be configured. For the adapter's first Release Please release, download the
+reviewed `npm-release-packages` artifact from the blocked release workflow and
+verify it locally:
 
 ```sh
-pnpm install --frozen-lockfile
-EVE_AMBIENT_POSTGRES_URL='postgresql:///eve_ambient_test?host=/var/run/postgresql' pnpm check
-pnpm audit --audit-level high
-pnpm pack:release
-npm publish release-artifacts/ewhauser-eve-ambient-0.3.0.tgz --access public --ignore-scripts
+sha256sum --check ewhauser-eve-ambient-eve-*.tgz.sha256
+tar -xOf ewhauser-eve-ambient-eve-*.tgz package/package.json
+npm publish ewhauser-eve-ambient-eve-*.tgz --access public --ignore-scripts
 ```
 
-Create a draft `v0.3.0` GitHub release at the exact source commit, attach the
-tarball and checksum, and publish it only after the npm publication succeeds.
-Then configure this workflow as the package's trusted publisher:
+Then configure the normal workflow as the trusted publisher:
 
 ```sh
-npm trust github @ewhauser/eve-ambient \
+npm trust github @ewhauser/eve-ambient-eve \
   --repo ewhauser/eve-ambient \
   --file release.yml \
   --env release \
   --allow-publish
 ```
 
-After verifying the trusted publisher, require two-factor authentication for
-publishing and disallow bypass tokens. Log out of npm after the bootstrap.
+Rerun the failed workflow. Its immutable-integrity check accepts the existing
+publication only if it is byte-identical, then publishes the draft GitHub
+release. Require two-factor authentication for publishing, disallow bypass
+tokens, and log out of npm after the bootstrap.
 
 ## Required GitHub settings
 

@@ -206,10 +206,11 @@ It must:
 - resolve the canonical target through its own conversation-binding registry;
 - reject a non-terminal binding or target conflict;
 - refresh a stale reference only after the old generation is terminal;
-- idempotently return the same receipt for `monitor:<run-id>:0`;
+- idempotently admit the provided `wakeKey` and return a stable receipt;
 - put human and monitor requests on the same durable session ingress queue;
-- coalesce monitor evidence into at most one pending follow-up while a turn is
-  active, without merging or dropping human input; and
+- choose and document its policy for distinct delivery keys without merging or
+  dropping human input; if it coalesces, it must freeze membership before the
+  derived turn starts; and
 - execute only as the application principal.
 
 `MemoryConversationChannel` in `@ewhauser/eve-ambient/testing` is a binding and

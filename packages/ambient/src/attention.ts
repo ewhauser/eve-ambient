@@ -4,7 +4,6 @@ import {
   canonicalizeChannelDelivery,
   deriveAttentionBranchKey,
   deriveAttentionWakeKey,
-  deriveFanoutManifestHash,
   deriveOccurrenceKey,
   hashIdempotencyInput,
   parseIdempotencyKey,
@@ -15,7 +14,6 @@ import {
   type BranchKey,
   type CanonicalChannelEvent,
   type EventKey,
-  type FanoutManifestHash,
   type IdempotentEnvelope,
   type InputHash,
   type OccurrenceKey,
@@ -141,7 +139,6 @@ export interface AcceptedFanout<
   readonly inputHash: InputHash;
   readonly canonicalizationVersion: number;
   readonly event: TEvent;
-  readonly manifestHash: FanoutManifestHash;
   readonly branches: readonly FullAttentionBranch<TEvent>[];
 }
 
@@ -150,7 +147,6 @@ export interface AttentionAcceptanceReceipt {
   readonly eventKey: EventKey;
   readonly occurrenceKey: OccurrenceKey;
   readonly inputHash: InputHash;
-  readonly manifestHash: FanoutManifestHash;
   readonly branchKeys: readonly BranchKey[];
   readonly acceptedAt: string;
 }
@@ -256,7 +252,7 @@ export interface AttentionEngine {
 /**
  * Compiles deterministic filters/correlation output into the complete value
  * accepted by every backend. Declaration order is erased by sorting branches
- * by their derived key before the manifest is hashed.
+ * by their derived key before admission.
  */
 export async function compileAcceptedFanout<
   TEvent extends CanonicalChannelEvent,
@@ -326,13 +322,6 @@ export async function compileAcceptedFanout<
   );
   branches.sort((left, right) => compareCanonicalText(left.branchKey, right.branchKey));
   assertDistinctBranchKeys(branches);
-  const manifestHash = await deriveFanoutManifestHash({
-    occurrenceKey,
-    orderedBranches: branches.map((branch) => ({
-      branchKey: branch.branchKey,
-      inputHash: branch.inputHash,
-    })),
-  });
   return deepFreeze({
     applicationId,
     tenantId,
@@ -342,7 +331,6 @@ export async function compileAcceptedFanout<
     inputHash: sourceInputHash,
     canonicalizationVersion: input.source.payload.canonicalizationVersion,
     event,
-    manifestHash,
     branches,
   });
 }
@@ -362,7 +350,6 @@ export async function validateAcceptedFanout(
       "event",
       "eventKey",
       "inputHash",
-      "manifestHash",
       "occurrenceKey",
       "partitionKey",
       "tenantId",
@@ -464,16 +451,6 @@ export async function validateAcceptedFanout(
       receivedInputHash: parseInputHash(branch.inputHash),
     });
     assertBranchFitsPolicy(branch);
-  }
-  const manifestHash = await deriveFanoutManifestHash({
-    occurrenceKey: detached.occurrenceKey,
-    orderedBranches: detached.branches.map((branch) => ({
-      branchKey: branch.branchKey,
-      inputHash: branch.inputHash,
-    })),
-  });
-  if (detached.manifestHash !== manifestHash) {
-    throw new TypeError("manifestHash does not match the frozen branch membership");
   }
   return deepFreeze(detached);
 }

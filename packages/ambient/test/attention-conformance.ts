@@ -42,8 +42,6 @@ export interface AttentionConformanceDiagnostics {
   readonly activeBatchPayloads: number;
   readonly preparedWakePayloads: number;
   readonly inFlightBranches: number;
-  readonly deliveryReceipts: number;
-  readonly terminalFailures: number;
 }
 
 export interface AttentionConformanceFactoryOptions {
@@ -499,7 +497,6 @@ export function defineAttentionEngineConformance(
       await expect(harness.runDue()).resolves.toMatchObject({ terminalFailures: 1 });
       expect(await harness.diagnostics()).toMatchObject({
         activeBatchPayloads: 0,
-        terminalFailures: 1,
       });
     });
 
@@ -543,7 +540,6 @@ export function defineAttentionEngineConformance(
         preparedWakePayloads: 0,
         recentMessages: 1,
         inFlightBranches: 0,
-        deliveryReceipts: 1,
       });
     });
 
@@ -582,7 +578,6 @@ export function defineAttentionEngineConformance(
       expect(await harness.diagnostics()).toMatchObject({
         activeBatchPayloads: 0,
         preparedWakePayloads: 0,
-        terminalFailures: 1,
       });
     });
 
@@ -601,7 +596,6 @@ export function defineAttentionEngineConformance(
       expect(await harness.diagnostics()).toMatchObject({
         activeBatchPayloads: 0,
         preparedWakePayloads: 0,
-        terminalFailures: 1,
       });
     });
 
@@ -680,7 +674,6 @@ export function defineAttentionEngineConformance(
         correlationStreams: 1,
         recentMessages: 2,
         inFlightBranches: 0,
-        deliveryReceipts: 2,
       });
 
       await harness.engine.accept(
@@ -694,7 +687,7 @@ export function defineAttentionEngineConformance(
       expect((await harness.diagnostics()).bufferedBranchPayloads).toBe(1);
     });
 
-    it("bounds retained terminal outcomes without deleting the stream", async () => {
+    it("does not retain terminal callback output history", async () => {
       const clock = new VirtualMonitorClock();
       const callbacks = new ControlledAttentionCallbacks(clock);
       callbacks.outcome = { kind: "invalid" } as unknown as PreparedAttentionOutcome;
@@ -707,8 +700,8 @@ export function defineAttentionEngineConformance(
         correlationStreams: 1,
         recentMessages: 2,
         inFlightBranches: 0,
-        deliveryReceipts: 0,
-        terminalFailures: 2,
+        bufferedBranchPayloads: 0,
+        activeBatchPayloads: 0,
       });
     });
   });

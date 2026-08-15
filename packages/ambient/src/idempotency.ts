@@ -9,7 +9,6 @@ import type {
 
 declare const idempotencyKeyBrand: unique symbol;
 declare const inputHashBrand: unique symbol;
-declare const fanoutManifestHashBrand: unique symbol;
 
 export type IdempotencyKey<TKind extends string = string> = string & {
   readonly [idempotencyKeyBrand]: TKind;
@@ -24,7 +23,6 @@ export type BatchKey = IdempotencyKey<"batch">;
 export type RunKey = IdempotencyKey<"run">;
 export type WakeKey = IdempotencyKey<"wake">;
 export type InputHash = string & { readonly [inputHashBrand]: true };
-export type FanoutManifestHash = string & { readonly [fanoutManifestHashBrand]: true };
 export type IdempotencyKeyKind =
   | "event"
   | "occurrence"
@@ -403,36 +401,6 @@ export async function deriveAttentionWakeKey(input: {
   ]) as Promise<WakeKey>;
 }
 
-/** Hashes a complete ordered fan-out, including the empty-manifest outcome. */
-export async function deriveFanoutManifestHash(input: {
-  readonly occurrenceKey: OccurrenceKey;
-  readonly orderedBranches: readonly {
-    readonly branchKey: BranchKey;
-    readonly inputHash: InputHash;
-  }[];
-}): Promise<FanoutManifestHash> {
-  assertKeyKind(input.occurrenceKey, "occurrence");
-  const seen = new Set<string>();
-  let previousBranchKey: string | undefined;
-  const branches = input.orderedBranches.map((branch) => {
-    assertKeyKind(branch.branchKey, "branch");
-    assertInputHash(branch.inputHash);
-    if (seen.has(branch.branchKey)) {
-      throw new TypeError("orderedBranches must contain distinct branch keys");
-    }
-    seen.add(branch.branchKey);
-    if (previousBranchKey !== undefined && previousBranchKey > branch.branchKey) {
-      throw new TypeError("orderedBranches must be ordered by branchKey");
-    }
-    previousBranchKey = branch.branchKey;
-    return [branch.branchKey, branch.inputHash] as const;
-  });
-  return domainHash("eve:fanout:v1", [
-    input.occurrenceKey,
-    branches,
-  ]) as Promise<FanoutManifestHash>;
-}
-
 export function createIdempotencyContext<TKey extends IdempotencyKey>(input: {
   readonly key: TKey;
   readonly inputHash: InputHash;
@@ -453,62 +421,6 @@ export function createIdempotencyContext<TKey extends IdempotencyKey>(input: {
     parentKeys,
     eventKeys,
   });
-}
-
-export interface MembershipMember<TKey extends IdempotencyKey = IdempotencyKey> {
-  readonly key: TKey;
-  readonly inputHash: InputHash;
-}
-
-export interface FrozenMembership<
-  TOperationKey extends IdempotencyKey = IdempotencyKey,
-  TMemberKey extends IdempotencyKey = IdempotencyKey,
-> {
-  readonly operationKey: TOperationKey;
-  readonly members: readonly MembershipMember<TMemberKey>[];
-  readonly frozenAt: string;
-}
-
-/**
- * Builds the immutable value a caller persists during its membership-freeze
- * transaction. The caller is responsible for selecting the durable order and
- * atomically storing this record with the transition to claimed/running.
- *
- * Matching duplicate members collapse to their first position. Reusing one
- * member key with a different input hash fails closed.
- */
-export async function freezeMembership<
-  TOperationKey extends IdempotencyKey,
-  TMemberKey extends IdempotencyKey,
->(input: {
-  readonly namespace: string;
-  readonly orderedMembers: readonly MembershipMember<TMemberKey>[];
-  readonly frozenAt: string;
-  readonly deriveOperationKey: (orderedKeys: readonly TMemberKey[]) => TOperationKey | Promise<TOperationKey>;
-}): Promise<FrozenMembership<TOperationKey, TMemberKey>> {
-  assertNonEmpty(input.namespace, "membership namespace");
-  assertTimestamp(input.frozenAt, "frozenAt");
-  const byKey = new Map<string, MembershipMember<TMemberKey>>();
-  for (const member of input.orderedMembers) {
-    assertNonEmpty(member.key, "membership key");
-    assertInputHash(member.inputHash);
-    const existing = byKey.get(member.key);
-    if (existing === undefined) {
-      byKey.set(member.key, { key: member.key, inputHash: member.inputHash });
-    } else {
-      assertIdempotencyInput({
-        namespace: input.namespace,
-        key: member.key,
-        existingInputHash: existing.inputHash,
-        receivedInputHash: member.inputHash,
-      });
-    }
-  }
-  const members = [...byKey.values()];
-  if (members.length === 0) throw new TypeError("membership must not be empty");
-  const operationKey = await input.deriveOperationKey(members.map((member) => member.key));
-  assertNonEmpty(operationKey, "membership operation key");
-  return deepFreeze({ operationKey, members, frozenAt: input.frozenAt });
 }
 
 export class IdempotencyConflictError extends Error {

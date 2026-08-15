@@ -133,7 +133,6 @@ export class WorldAttentionEngine implements AttentionEngine {
       eventKey: fanout.eventKey,
       occurrenceKey: fanout.occurrenceKey,
       inputHash: fanout.inputHash,
-      manifestHash: fanout.manifestHash,
       branchKeys: Object.freeze(fanout.branches.map((branch) => branch.branchKey)),
       acceptedAt,
     });

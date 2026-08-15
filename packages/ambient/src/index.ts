@@ -40,6 +40,7 @@ export {
   type StandardChannelSchema,
   type DirectDispatchKey,
   type EventKey,
+  type AttentionPartitionKey,
   type InputHash,
   type OccurrenceKey,
   type WakeKey,

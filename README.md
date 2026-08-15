@@ -8,11 +8,12 @@ records a decision before delivery, and wakes Eve only when attention is
 warranted.
 
 ```text
+channel partition ──────────────────────────────┐
 channel event → eventKey → occurrenceKey → branchKey
-                                      ↓
-                         correlate → batchKey → runKey
-                                      ↓
-                                  wakeKey → Eve
+                                      ↓         │
+                         correlate → batchKey   │
+                                      ↓         │
+                              runKey → wakeKey → Eve
 ```
 
 Every durable handoff carries the complete payload by value. Keys express
@@ -49,7 +50,7 @@ response therefore retries the exact same bytes and `wakeKey`.
 |---|---|---|
 | Memory | Executable reference implementation and deterministic tests | Explicit `runDue()` |
 | PostgreSQL | Private per-event coordinators and per-correlation workflows | Poll `runOnce()` from one or more workers |
-| celld | Event-key coordinator cells and instance-key correlation cells | Cell alarms; no PostgreSQL dependency |
+| celld | One custody cell per channel-defined partition | Cell alarms; no PostgreSQL dependency |
 
 PostgreSQL and celld pass the same failure-oriented conformance suite as the
 memory engine. Backend persistence is private implementation detail, not a
@@ -97,7 +98,7 @@ for `vercel/eve#1842`.
 | [`packages/ambient`](packages/ambient) | Protocol, rules, publisher, shared workflow reducer, and three backends | `@ewhauser/eve-ambient` |
 | [`packages/eve-adapter`](packages/eve-adapter) | Eve GitHub ingress, attention delivery, and direct dispatch | `@ewhauser/eve-ambient-eve` |
 | [`examples/eve-postgres`](examples/eve-postgres) | Slack incident rule on PostgreSQL | No |
-| [`examples/eve-celld`](examples/eve-celld) | Eve GitHub PR/CI shepherd on celld, without PostgreSQL | No |
+| [`examples/eve-celld`](examples/eve-celld) | Eve GitHub PR/CI shepherd on celld, with a runnable console demo and no PostgreSQL | No |
 | [`integration/eve-conformance`](integration/eve-conformance) | Exact Eve patch and adapter conformance | No |
 
 ## Documentation
@@ -118,6 +119,12 @@ for `vercel/eve#1842`.
 corepack enable pnpm
 pnpm install
 pnpm check
+```
+
+Run the credential-free Eve GitHub and celld example with:
+
+```sh
+pnpm --filter eve-ambient-example-celld demo
 ```
 
 Set `EVE_AMBIENT_POSTGRES_URL` to run the PostgreSQL conformance suite against a

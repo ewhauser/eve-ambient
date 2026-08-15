@@ -22,6 +22,7 @@ import {
   type EventCoordinatorState,
 } from "./coordinator.js";
 import {
+  deriveAttentionPartitionKey,
   deriveAttentionInstanceKey,
   hashIdempotencyInput,
   IdempotencyConflictError,
@@ -284,7 +285,7 @@ export class PostgresAttentionEngine implements AttentionEngine {
       const eventStates = coordinators.rows.map((row) => parseState<EventCoordinatorState>(row.state));
       return {
         eventCoordinators: eventStates.length,
-        pendingFanoutPayloads: eventStates.filter((state) => state.fanout !== undefined).length,
+        pendingFanoutPayloads: eventStates.filter((state) => state.pendingFanout !== undefined).length,
         acceptanceReceipts: eventStates.filter((state) => state.receipt !== undefined).length,
         correlationWorkflows: workflows.length,
         bufferedBranchPayloads: workflows.reduce(
@@ -363,9 +364,15 @@ export class PostgresAttentionEngine implements AttentionEngine {
 
   async #appendBranch(client: PostgresClient, input: FullAttentionBranch): Promise<void> {
     const branch = await validateFullAttentionBranch(input);
-    const instanceKey = await deriveAttentionInstanceKey({
+    const partitionCellKey = await deriveAttentionPartitionKey({
       applicationId: branch.applicationId,
       tenantId: branch.tenantId,
+      channelId: branch.event.source.channelId,
+      installationId: branch.event.source.installationId,
+      partitionKey: branch.partitionKey,
+    });
+    const instanceKey = await deriveAttentionInstanceKey({
+      partitionCellKey,
       monitorId: branch.monitorId,
       definitionVersion: branch.definitionVersion,
       correlationKey: branch.correlationKey,

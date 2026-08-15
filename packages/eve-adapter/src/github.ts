@@ -106,6 +106,9 @@ export const eveGitHubPullRequestActivity = defineChannelCanonicalization<
   EveGitHubActivityEvent
 >({
   version: 1,
+  partitionKey(event) {
+    return `repository:${event.data.repository.id}:pull-request:${event.data.pullRequestNumber}`;
+  },
   canonicalize(input) {
     const installationId = input.context.github.installationId;
     if (installationId === undefined) {

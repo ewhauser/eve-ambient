@@ -151,6 +151,7 @@ may change during implementation.
 type EventKey = string;
 type OccurrenceKey = string;
 type BranchKey = string;
+type AttentionPartitionKey = string;
 type BatchKey = string;
 type RunKey = string;
 type WakeKey = string;
@@ -158,6 +159,8 @@ type WakeKey = string;
 interface AcceptedFanout {
   readonly applicationId: string;
   readonly tenantId: string;
+  /** Channel-owned bounded outer correlation and custody boundary. */
+  readonly partitionKey: string;
   /** Stable source identity. */
   readonly eventKey: EventKey;
   /** Derived from eventKey and the canonical source input hash. */
@@ -177,6 +180,7 @@ interface AcceptedFanout {
 interface FullBranch {
   readonly applicationId: string;
   readonly tenantId: string;
+  readonly partitionKey: string;
   readonly eventKey: EventKey;
   readonly occurrenceKey: OccurrenceKey;
   readonly branchKey: BranchKey;
@@ -290,6 +294,12 @@ The protocol does not require callbacks to be in the same process as the
 engine. A PostgreSQL worker may call local functions. A celld workflow may call
 an authenticated application endpoint carrying the same values.
 
+Every channel MUST deterministically derive `partitionKey` from its canonical
+event. Equivalent provider retries must select the same value. The key names
+the smallest bounded domain entity across which rules may correlate, such as a
+pull request, thread, incident, or conversation. Changing the partition
+algorithm is a canonicalization change and requires a new version.
+
 The engine MUST recompute and verify the source `eventKey`, source `inputHash`,
 `occurrenceKey`, every branch key and input hash, and the ordered manifest hash.
 It MUST also verify that application, tenant, and complete canonical event
@@ -327,7 +337,9 @@ branchKey         = H("eve:branch:v2", occurrenceKey, monitorId,
                       definitionVersion, phase, correlationKey)
 manifestHash      = H("eve:fanout:v1", occurrenceKey,
                       ordered [branchKey, branchInputHash] pairs)
-instanceKey       = H("eve:instance:v2", applicationId, tenantId, monitorId,
+partitionCellKey  = H("eve:partition:v1", applicationId, tenantId, channelId,
+                      installationId, partitionKey)
+instanceKey       = H("eve:instance:v3", partitionCellKey, monitorId,
                       definitionVersion, correlationKey)
 batchKey          = H("eve:batch:v2", instanceKey, ordered branchKeys)
 runKey            = H("eve:run:v2", batchKey, "primary")
@@ -337,7 +349,8 @@ wakeKey           = H("eve:wake:v2", runKey, routeId)
 An empty manifest has a real `manifestHash`; it is not represented by a
 missing value.
 
-The input hash MUST include the canonicalization version. A `branchKey` MUST
+The source input hash MUST include the canonicalization version and raw channel
+`partitionKey`. A `branchKey` MUST
 include the occurrence, immutable monitor definition identity, phase, and
 correlation key. A branch input hash MUST bind the complete event, routing
 identity, ordering value, and mailbox policy. Transport attempts, timestamps
@@ -367,6 +380,7 @@ The first accepted call freezes all of the following atomically:
 
 - source `eventKey`, `occurrenceKey`, and `inputHash`;
 - canonicalization version;
+- channel partition key;
 - ordered branch keys and their input hashes; and
 - the fact that the manifest is empty, when no rule matched.
 
@@ -393,15 +407,19 @@ receipts. Once all branch handoffs are complete, the event coordinator removes
 the full fan-out payload and retains only its bounded receipt.
 
 This coordinator is not a central event repository. It is a backend-local
-workflow addressed by source `eventKey`, exposes no event retrieval interface,
-and retains full values only while the current occurrence's handoff is
-incomplete.
+workflow keyed by source `eventKey` inside the channel partition, exposes no
+event retrieval interface, and retains full values only while the current
+occurrence's handoff is incomplete. `eventKey` does not imply a separate cell
+or process.
 
 ## Correlation workflow
 
-Each immutable tuple of application, tenant, monitor definition, and
-correlation key owns one serialized workflow. Its backend performs this state
-machine:
+Each immutable tuple of application, tenant, channel partition, monitor
+definition, and correlation key owns one serialized workflow. Correlation is
+bounded by the channel partition; a requirement to correlate more broadly
+requires choosing a broader partition. When a rule omits `correlationKey`, the
+compiler uses one default workflow for that rule inside each partition. Its
+backend performs this state machine:
 
 1. Validate `branchKey` and `inputHash` and return a prior append receipt for a
    matching duplicate.
@@ -444,11 +462,11 @@ the only value eligible for idempotent delivery.
 
 Full payload storage is workflow custody, not a system feature.
 
-The event coordinator retains its complete frozen branches until every branch
-is terminal or durably appended. A correlation workflow retains complete
-events until the batch is ignored or its prepared wake is durably delivered.
-It may remove superseded lifecycle copies whenever the remaining state is
-self-contained.
+An event coordinator inside the partition retains its complete frozen branches
+until every branch is terminal or durably appended. A correlation workflow
+retains complete events until the batch is ignored or its prepared wake is
+durably delivered. It may remove superseded lifecycle copies whenever the
+remaining state is self-contained.
 
 After a terminal outcome, a backend SHOULD retain only bounded data such as:
 
@@ -603,18 +621,18 @@ durability.
 
 ### celld
 
-The celld backend uses:
+The celld backend uses one cell per derived `partitionCellKey`. That cell owns
+all event coordinators and rule correlation workflows for the channel-defined
+partition. An event coordinator detects same-event/different-input conflicts,
+freezes the occurrence's fan-out, and appends complete branches locally. Each
+instance workflow owns its buffering, batch freezes, prepared outcomes,
+delivery receipts, and retention. One alarm schedules the earliest work in the
+partition and is re-armed while more workflows are due. Cell class layout and
+internal keys are implementation details.
 
-- one event-admission/coordinator cell per `eventKey`; and
-- one serialized correlation cell per application, tenant, monitor definition,
-  and correlation key.
-
-The event cell detects same-event/different-input conflicts, freezes the current
-occurrence's fan-out, and retries complete branch appends. When its receipt
-horizon expires, it may admit a later occurrence for the same source identity.
-The correlation cell owns buffering, alarms, batch freezes, prepared outcomes,
-delivery receipts, and retention. Cell class layout and internal keys are
-implementation details.
+Cell cardinality is therefore proportional to active domain partitions, not
+source deliveries or deployed rules. A partition must remain bounded to avoid
+creating a global hot cell or an unbounded resident record.
 
 The celld worker holds no model-provider, Eve-session, or application secrets.
 It calls authenticated application-owned `prepare` and `deliver` endpoints.
@@ -680,29 +698,31 @@ admission cases, MUST pass the same failure-oriented oracle:
 5. A crash after some branch appends resumes only missing handoffs.
 6. A lost append response returns the original branch receipt without
    duplicating membership.
-7. Every event coordinator, branch append, and frozen batch has the complete
+7. Stable channel partitioning places multiple events for the same domain
+   entity in one custody cell while distinct partitions remain isolated.
+8. Every event coordinator, branch append, and frozen batch has the complete
    canonical event.
-8. Concurrent append and freeze places a branch in exactly the current or next
+9. Concurrent append and freeze places a branch in exactly the current or next
    batch.
-9. A lost `prepare()` response may repeat computation but cannot invoke
+10. A lost `prepare()` response may repeat computation but cannot invoke
    delivery before an outcome is recorded.
-10. A recorded prepared outcome is immutable.
-11. A lost `deliver()` response retries the exact same wake payload and key and
+11. A recorded prepared outcome is immutable.
+12. A lost `deliver()` response retries the exact same wake payload and key and
     produces one stable receipt.
-12. Terminal workflows remove source event payloads while retaining the
+13. Terminal workflows remove source event payloads while retaining the
     declared receipt.
-13. Receipt expiry behavior matches the backend's documented horizon.
-14. celld conformance runs with no PostgreSQL service, driver, or network
+14. Receipt expiry behavior matches the backend's documented horizon.
+15. celld conformance runs with no PostgreSQL service, driver, or network
     connection.
-15. Memory, celld, and PostgreSQL produce the same semantic results under the
+16. Memory, celld, and PostgreSQL produce the same semantic results under the
     same clock and injected failures.
-16. A source adapter acknowledges only after its required direct and attention
+17. A source adapter acknowledges only after its required direct and attention
     receipts exist.
-17. A crash between direct dispatch and attention acceptance recovers through
+18. A crash between direct dispatch and attention acceptance recovers through
     source redelivery without changing keys.
-18. Same event and different source input conflicts before any direct session
+19. Same event and different source input conflicts before any direct session
     delivery occurs.
-19. A retry after binding deployment drift recovers the original frozen direct
+20. A retry after binding deployment drift recovers the original frozen direct
     plan and cannot dispatch to a newly selected binding.
 
 The RFC 0001 downstream conformance profile remains required for deployments
@@ -733,8 +753,9 @@ This design deliberately accepts several costs:
 - Operators lose a portable SQL-like view of every run and event. Diagnostics
   become backend-specific or observer-driven.
 - Applications must retain old definition code until accepted work drains.
-- Per-event coordination still exists to freeze fan-out. It is deliberately
-  narrow, ephemeral, and non-queryable rather than a central event store.
+- Per-event coordination still exists inside a bounded channel partition to
+  freeze fan-out. It is deliberately narrow, ephemeral, and non-queryable
+  rather than a separate cell or central event store.
 - The API break is large. The absence of production users makes a clean break
   preferable to preserving accidental abstractions.
 
@@ -750,9 +771,9 @@ the optional final-action profile remain normative.
 
 This RFC supersedes only RFC 0001 implementation language that assumes Ambient
 must publish a shared ingress/subscription/run store or a particular PostgreSQL
-topology. The event coordinator described here is a backend-internal custody
-workflow, not a global event object: it has no lookup API, does not support
-replay, and deletes full payloads after branch handoff.
+topology. The partition and its nested event coordinators are backend-internal
+custody workflows, not global event objects: they have no lookup API, do not
+support replay, and delete full payloads after branch handoff.
 
 If the two RFCs appear to conflict about a concrete Ambient storage or runtime
 API, this RFC controls. If they appear to conflict about idempotency, payload
@@ -765,9 +786,10 @@ This RFC was implemented in reviewable stages:
 1. **Protocol and reference model.** Added `occurrenceKey`, the pure fan-out
    compiler, `AttentionEngine`, callback types, a memory engine, and the shared
    conformance suite.
-2. **celld engine.** Added event-coordinator and correlation workflows, the
-   two-stage authenticated callback protocol, failure tests, and a celld-only
-   example with no PostgreSQL dependency.
+2. **celld engine.** Added channel-partition cells containing event
+   coordinators and correlation workflows, the two-stage authenticated callback
+   protocol, failure tests, and a celld-only example with no PostgreSQL
+   dependency.
 3. **PostgreSQL engine.** Implemented the same protocol with private schema and
    worker APIs and run the shared conformance suite.
 4. **Clean replacement.** Removed `MonitorStore`, `MonitorRuntime`, public
@@ -787,6 +809,8 @@ This RFC is complete when:
 - the core package exports no `MonitorStore`, store transaction, or `Stored*`
   persistence record;
 - no system interface can retrieve or replay a stored event;
+- every channel defines a stable bounded partition and celld allocates one
+  custody cell per partition rather than per event;
 - memory, PostgreSQL, and celld pass the same conformance suite;
 - every active branch and batch is self-contained by value;
 - the backend records a prepared result before any delivery attempt;

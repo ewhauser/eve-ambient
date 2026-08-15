@@ -896,6 +896,9 @@ worker harness cannot measure them.
 - **Implemented.**
 - Replace the generic ingress/store/runtime architecture with
   `AttentionEngine.accept()` and a backend-private event coordinator.
+- Require each channel to choose a stable, bounded custody partition; celld
+  nests event coordinators and rule workflows in one cell per partition rather
+  than allocating one cell per delivery.
 - Freeze the complete manifest and hand every branch to its workflow before
   returning the payload-free acceptance receipt.
 - Split direct dispatch into an independent adapter-owned idempotent boundary.

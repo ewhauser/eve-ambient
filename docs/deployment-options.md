@@ -7,7 +7,7 @@ to one attention backend. Payload lineage and the final Eve route stay the same.
 |---|---|---|---|
 | Memory | Process memory | Explicit `runDue()` | Tests and executable reference behavior |
 | PostgreSQL | Private event/workflow rows | Workers poll `runOnce()` | Existing PostgreSQL deployments and simple operations |
-| celld | Event-key and instance-key cells | Cell alarms | Distributed per-key serialization without PostgreSQL |
+| celld | Channel-partition custody cells | Cell alarms | Distributed domain-entity serialization without PostgreSQL |
 
 Backend state is not portable. Switching an active installation requires an
 application-specific cutover because no public storage or state-migration
@@ -33,8 +33,7 @@ workload can be served by its due index plus per-key advisory locks.
 ## celld
 
 ```text
-provider -> publisher -> event cell -> correlation cell alarm
-                                      -> prepare -> checkpoint -> deliver
+provider -> publisher -> partition cell alarm -> prepare -> checkpoint -> deliver
 ```
 
 Create the packaged worker with `eve-ambient init celld`, bind the application
@@ -42,8 +41,10 @@ with `celld({ url, secret })`, and expose its authenticated `fetch` handler.
 celld owns all attention persistence; the application and example need no
 PostgreSQL pool, schema, or worker.
 
-Choose it when distributed per-correlation-key workflows and durable alarms
-fit the operating environment better than a database poller.
+Choose it when channel-defined domain partitions and durable alarms fit the
+operating environment better than a database poller. A partition must be
+bounded: for example, one pull request or Slack thread, not an entire busy
+installation unless cross-installation serialization is truly required.
 
 ## External ingress pipelines
 

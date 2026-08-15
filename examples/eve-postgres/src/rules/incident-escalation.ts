@@ -7,7 +7,6 @@ export const incidentEscalationRule = defineAmbientRule({
   channel: slackChannel,
   policy: debounce({ quiet: "30s", maxWait: "2m", cooldown: "5m" }),
   matches: (event) => event.type === "slack.message" && event.data.severity !== "info",
-  correlationKey: (event) => event.data.incidentId,
   decide({ events, latest, eventKeys }) {
     const critical = events.some((event) => event.data.severity === "critical");
     if (!critical) {

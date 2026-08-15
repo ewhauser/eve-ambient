@@ -18,6 +18,7 @@ export type EventKey = IdempotencyKey<"event">;
 export type OccurrenceKey = IdempotencyKey<"occurrence">;
 export type DirectDispatchKey = IdempotencyKey<"direct-dispatch">;
 export type BranchKey = IdempotencyKey<"branch">;
+export type AttentionPartitionKey = IdempotencyKey<"partition">;
 export type AttentionInstanceKey = IdempotencyKey<"instance">;
 export type BatchKey = IdempotencyKey<"batch">;
 export type RunKey = IdempotencyKey<"run">;
@@ -29,6 +30,7 @@ export type IdempotencyKeyKind =
   | "occurrence"
   | "direct-dispatch"
   | "branch"
+  | "partition"
   | "instance"
   | "batch"
   | "run"
@@ -79,6 +81,8 @@ export interface CanonicalChannelEvent<
 export interface AcceptedChannelEvent<TEvent extends CanonicalChannelEvent = CanonicalChannelEvent> {
   readonly applicationId: string;
   readonly canonicalizationVersion: number;
+  /** Stable channel-owned outer serialization boundary, independent of rules. */
+  readonly partitionKey: string;
   readonly event: TEvent;
 }
 
@@ -96,6 +100,8 @@ export interface ChannelCanonicalizationContract<
 > {
   readonly version: number;
   readonly canonicalize: (raw: TRaw) => TEvent | Promise<TEvent>;
+  /** Maps every equivalent provider retry to the same bounded durable partition. */
+  readonly partitionKey: (event: TEvent) => string;
 }
 
 export interface ChannelInputParser<TInput> {
@@ -144,21 +150,31 @@ export type ChannelEvent<TChannel> = TChannel extends ChannelCanonicalizationCon
  * Defines a typed channel from Standard Schema (including Zod) or a parser and
  * one deterministic mapping, so consumers do not repeat the input type.
  */
-export function defineChannel<TSchema extends ChannelSchema, TEvent extends CanonicalChannelEvent>(options: {
+export function defineChannel<
+  TSchema extends ChannelSchema,
+  TMap extends (input: ChannelSchemaOutput<TSchema>) => CanonicalChannelEvent,
+>(options: {
   readonly version: number;
   readonly input: TSchema;
-  readonly map: (input: ChannelSchemaOutput<TSchema>) => TEvent;
-}): ChannelCanonicalizationContract<ChannelSchemaInput<TSchema>, TEvent> {
+  readonly map: TMap;
+  readonly partitionKey: (event: ReturnType<TMap>) => string;
+}): ChannelCanonicalizationContract<ChannelSchemaInput<TSchema>, ReturnType<TMap>> {
   if (options.input === null || typeof options.input !== "object" || !isChannelSchema(options.input)) {
     throw new TypeError("channel input must implement Standard Schema or define parse");
   }
   if (typeof options.map !== "function") {
     throw new TypeError("channel map must be a function");
   }
-  return defineChannelCanonicalization({
+  return defineChannelCanonicalization<
+    ChannelSchemaInput<TSchema>,
+    ReturnType<TMap>
+  >({
     version: options.version,
+    partitionKey: options.partitionKey,
     async canonicalize(raw) {
-      return options.map(await parseChannelInput(options.input, raw));
+      return options.map(
+        await parseChannelInput(options.input, raw),
+      ) as ReturnType<TMap>;
     },
   });
 }
@@ -171,7 +187,14 @@ export function defineChannelCanonicalization<
   if (typeof options.canonicalize !== "function") {
     throw new TypeError("channel canonicalization canonicalize must be a function");
   }
-  return Object.freeze({ version: options.version, canonicalize: options.canonicalize });
+  if (typeof options.partitionKey !== "function") {
+    throw new TypeError("channel canonicalization partitionKey must be a function");
+  }
+  return Object.freeze({
+    version: options.version,
+    canonicalize: options.canonicalize,
+    partitionKey: options.partitionKey,
+  });
 }
 
 /** Canonicalizes a provider delivery and assigns its root idempotency identity. */
@@ -186,6 +209,7 @@ export async function canonicalizeChannelDelivery<
   assertPositiveInteger(contract.version, "channel canonicalization version");
   assertNonEmpty(options.applicationId, "applicationId");
   const event = cloneCanonicalEvent(await contract.canonicalize(raw));
+  const partitionKey = nonEmpty(contract.partitionKey(event), "channel partitionKey");
   const key = await deriveEventKey({
     tenantId: event.source.tenantId,
     applicationId: options.applicationId,
@@ -196,6 +220,7 @@ export async function canonicalizeChannelDelivery<
   const payload = deepFreeze({
     applicationId: options.applicationId,
     canonicalizationVersion: contract.version,
+    partitionKey,
     event,
   }) as AcceptedChannelEvent<TEvent>;
   const inputHash = await hashIdempotencyInput(payload);
@@ -294,6 +319,23 @@ export async function deriveAttentionDirectDispatchKey(input: {
   ]) as Promise<DirectDispatchKey>;
 }
 
+/** Channel-owned bounded durable serialization boundary. */
+export async function deriveAttentionPartitionKey(input: {
+  readonly applicationId: string;
+  readonly tenantId: string;
+  readonly channelId: string;
+  readonly installationId: string;
+  readonly partitionKey: string;
+}): Promise<AttentionPartitionKey> {
+  return domainHash("eve:partition:v1", [
+    nonEmpty(input.applicationId, "applicationId"),
+    nonEmpty(input.tenantId, "tenantId"),
+    nonEmpty(input.channelId, "channelId"),
+    nonEmpty(input.installationId, "installationId"),
+    nonEmpty(input.partitionKey, "partitionKey"),
+  ]) as Promise<AttentionPartitionKey>;
+}
+
 /** Full-branch identity. */
 export async function deriveAttentionBranchKey(input: {
   readonly occurrenceKey: OccurrenceKey;
@@ -314,15 +356,14 @@ export async function deriveAttentionBranchKey(input: {
 
 /** Serialized correlation-workflow identity. */
 export async function deriveAttentionInstanceKey(input: {
-  readonly applicationId: string;
-  readonly tenantId: string;
+  readonly partitionCellKey: AttentionPartitionKey;
   readonly monitorId: string;
   readonly definitionVersion: string;
   readonly correlationKey: string;
 }): Promise<AttentionInstanceKey> {
-  return domainHash("eve:instance:v2", [
-    nonEmpty(input.applicationId, "applicationId"),
-    nonEmpty(input.tenantId, "tenantId"),
+  assertKeyKind(input.partitionCellKey, "partition");
+  return domainHash("eve:instance:v3", [
+    input.partitionCellKey,
     nonEmpty(input.monitorId, "monitorId"),
     nonEmpty(input.definitionVersion, "definitionVersion"),
     nonEmpty(input.correlationKey, "correlationKey"),
@@ -639,7 +680,8 @@ function assertKeyKind(value: string, kind: string): void {
     occurrence: [1],
     "direct-dispatch": [2],
     branch: [2],
-    instance: [2],
+    partition: [1],
+    instance: [3],
     batch: [2],
     run: [2],
     wake: [2],

@@ -36,9 +36,10 @@ const selectedSignals = defineChannelCanonicalization({
       occurredAt: record.occurredAt,
       actor: record.actor,
       origin: { kind: "external", depth: 0 },
-      data: record.signal,
+      data: { partition: record.entityKey, signal: record.signal },
     };
   },
+  partitionKey: event => event.data.partition,
 });
 
 await ambient.publish(selectedSignals, record);

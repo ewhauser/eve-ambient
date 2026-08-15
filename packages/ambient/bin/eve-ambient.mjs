@@ -17,7 +17,7 @@ if (command !== "init" || component !== "celld") {
     const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
     cpSync(resolve(packageRoot, "celld-worker"), target, { recursive: true });
     console.log(`Created ${target}`);
-    console.log("Set CELLD_FLEET_URL and ATTENTION_CALLBACK_URL in wrangler.jsonc.");
+    console.log("Set ATTENTION_CALLBACK_URL in wrangler.jsonc.");
     console.log("Install ATTENTION_SECRET through your deployment secret store, then deploy with celld.");
   }
 }

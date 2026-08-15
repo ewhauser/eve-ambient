@@ -20,6 +20,11 @@ export interface EventCoordinatorBranchInput {
   readonly inputHash: InputHash;
 }
 
+export type PendingEventFanout = Omit<AcceptedFanout, "branches"> & {
+  /** Complete branch values whose custody has not moved to a workflow yet. */
+  readonly branches: readonly FullAttentionBranch[];
+};
+
 /** Private durable admission state; `fanout` is deleted after all handoffs. */
 export interface EventCoordinatorState {
   readonly eventKey: EventKey;
@@ -30,7 +35,7 @@ export interface EventCoordinatorState {
   readonly acceptedAt: string;
   acceptedBranchKeys: BranchKey[];
   dedupeExpiresAt?: string | undefined;
-  fanout?: AcceptedFanout | undefined;
+  pendingFanout?: PendingEventFanout | undefined;
   receipt?: AttentionAcceptanceReceipt | undefined;
 }
 
@@ -59,7 +64,7 @@ export function createEventCoordinator(
     })),
     acceptedAt: input.now,
     acceptedBranchKeys: [],
-    fanout: clone(fanout),
+    pendingFanout: clone(fanout),
   };
 }
 
@@ -91,11 +96,10 @@ export function pendingCoordinatorBranches(
   coordinator: EventCoordinatorState,
 ): readonly FullAttentionBranch[] {
   if (coordinator.receipt !== undefined) return [];
-  if (coordinator.fanout === undefined) {
+  if (coordinator.pendingFanout === undefined) {
     throw new Error("pending event coordinator lost its frozen fan-out");
   }
-  const accepted = new Set(coordinator.acceptedBranchKeys);
-  return coordinator.fanout.branches.filter((branch) => !accepted.has(branch.branchKey));
+  return coordinator.pendingFanout.branches;
 }
 
 export function markCoordinatorBranchAccepted(
@@ -108,6 +112,14 @@ export function markCoordinatorBranchAccepted(
   if (!coordinator.acceptedBranchKeys.includes(branchKey)) {
     coordinator.acceptedBranchKeys.push(branchKey);
   }
+  if (coordinator.pendingFanout !== undefined) {
+    coordinator.pendingFanout = {
+      ...coordinator.pendingFanout,
+      branches: coordinator.pendingFanout.branches.filter(
+        (branch) => branch.branchKey !== branchKey,
+      ),
+    };
+  }
 }
 
 export function completeEventCoordinator(
@@ -116,6 +128,9 @@ export function completeEventCoordinator(
 ): AttentionAcceptanceReceipt {
   if (coordinator.acceptedBranchKeys.length !== coordinator.branchInputs.length) {
     throw new Error("cannot complete an event coordinator with missing branch handoffs");
+  }
+  if (coordinator.pendingFanout?.branches.length !== 0) {
+    throw new Error("cannot complete an event coordinator while it retains branch payloads");
   }
   coordinator.dedupeExpiresAt = addMs(input.now, input.dedupeMs);
   coordinator.receipt = {
@@ -127,7 +142,7 @@ export function completeEventCoordinator(
     acceptedAt: coordinator.acceptedAt,
     dedupeExpiresAt: coordinator.dedupeExpiresAt,
   };
-  delete coordinator.fanout;
+  delete coordinator.pendingFanout;
   return clone(coordinator.receipt);
 }
 

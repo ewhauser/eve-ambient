@@ -46,7 +46,8 @@ export const POST = ambient.fetch;
 
 Run `eve-ambient init celld` to create the packaged worker configuration. Its
 single callback base URL reaches the application-owned `ambient.fetch`
-handler. The celld engine has no PostgreSQL dependency.
+handler. The celld engine places one custody cell per channel-defined bounded
+partition, not per event, and has no PostgreSQL dependency.
 
 ## Memory
 

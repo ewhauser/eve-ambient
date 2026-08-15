@@ -53,8 +53,6 @@ const rule = defineAmbientRule({
   version: "v1",
   channel: eveGitHubPullRequestActivity,
   policy,
-  correlationKey: event =>
-    `${event.data.repository.id}#${event.data.pullRequestNumber}`,
   decide,
 });
 
@@ -77,6 +75,11 @@ normalizes the webhook; the adapter publishes its typed `pull_request` and
 with multiple pull requests produce one stable event per PR. Other Eve GitHub
 configuration, including normal comment invocation, remains available on the
 same options object.
+
+The adapter also assigns one stable Ambient partition per pull request, so the
+rule's default workflow already groups all PR and check-suite activity for
+that PR. Set a rule `correlationKey` only to create multiple independent
+workflows inside a pull request.
 
 Eve normally schedules inbound hooks after its HTTP acknowledgement and logs
 hook failures. This adapter deliberately waits for those hooks and tracks

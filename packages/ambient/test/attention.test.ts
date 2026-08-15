@@ -178,6 +178,7 @@ async function acceptedSource() {
       ReturnType<typeof event>
     >({
       version: 1,
+      partitionKey: () => "conversation-1",
       canonicalize: (raw) => event(raw.id, raw.body),
     }),
     { id: "event-1", body: "semantic payload", attempt: 7 },

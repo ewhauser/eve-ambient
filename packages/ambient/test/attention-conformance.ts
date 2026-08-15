@@ -848,6 +848,7 @@ async function fanout(options: {
       ReturnType<typeof canonicalEvent>
     >({
       version: 1,
+      partitionKey: () => "conversation-1",
       canonicalize: (raw) => canonicalEvent(raw.eventId, raw.body),
     }),
     {

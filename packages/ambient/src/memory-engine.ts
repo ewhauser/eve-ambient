@@ -18,6 +18,7 @@ import {
   type EventCoordinatorState,
 } from "./coordinator.js";
 import {
+  deriveAttentionPartitionKey,
   deriveAttentionInstanceKey,
   hashIdempotencyInput,
   IdempotencyConflictError,
@@ -213,7 +214,7 @@ export class MemoryAttentionEngine implements AttentionEngine {
     return {
       eventCoordinators: this.#events.size,
       pendingFanoutPayloads: [...this.#events.values()].filter(
-        (coordinator) => coordinator.fanout !== undefined,
+        (coordinator) => coordinator.pendingFanout !== undefined,
       ).length,
       acceptanceReceipts: [...this.#events.values()].filter(
         (coordinator) => coordinator.receipt !== undefined,
@@ -249,9 +250,15 @@ export class MemoryAttentionEngine implements AttentionEngine {
 
   async #appendBranch(input: FullAttentionBranch): Promise<void> {
     const branch = await validateFullAttentionBranch(input);
-    const instanceKey = await deriveAttentionInstanceKey({
+    const partitionCellKey = await deriveAttentionPartitionKey({
       applicationId: branch.applicationId,
       tenantId: branch.tenantId,
+      channelId: branch.event.source.channelId,
+      installationId: branch.event.source.installationId,
+      partitionKey: branch.partitionKey,
+    });
+    const instanceKey = await deriveAttentionInstanceKey({
+      partitionCellKey,
       monitorId: branch.monitorId,
       definitionVersion: branch.definitionVersion,
       correlationKey: branch.correlationKey,

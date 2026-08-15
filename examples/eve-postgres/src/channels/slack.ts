@@ -45,6 +45,7 @@ export const slackChannel = defineChannel({
       origin: { kind: "external", depth: 0 },
     };
   },
+  partitionKey: (event) => event.data.incidentId,
 });
 
 export type SlackMessageEvent = ChannelEvent<typeof slackChannel>;

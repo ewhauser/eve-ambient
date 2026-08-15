@@ -165,6 +165,7 @@ async function checkpointFanout() {
   const source = await canonicalizeChannelDelivery(
     defineChannelCanonicalization({
       version: 1,
+      partitionKey: () => "checkpoint-partition",
       canonicalize: (raw: { readonly id: string }) => ({
         id: raw.id,
         type: "channel.message",

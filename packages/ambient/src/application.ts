@@ -62,7 +62,8 @@ interface AmbientRuleDefinitionBase<TEvent extends CanonicalChannelEvent> {
   readonly policy: SerializableMailboxPolicy;
   readonly channel: ChannelCanonicalizationContract<never, TEvent>;
   readonly matches?: ((event: TEvent) => boolean) | undefined;
-  readonly correlationKey: (event: TEvent) => string;
+  /** Optional sub-correlation within the channel partition. Defaults to one workflow per rule. */
+  readonly correlationKey?: ((event: TEvent) => string) | undefined;
   readonly orderKey?: ((event: TEvent) => string) | undefined;
 }
 
@@ -102,7 +103,7 @@ export function defineAmbientRule<TEvent extends CanonicalChannelEvent>(
   if (definition.matches !== undefined && typeof definition.matches !== "function") {
     throw new TypeError("rule matches must be a function");
   }
-  if (typeof definition.correlationKey !== "function") {
+  if (definition.correlationKey !== undefined && typeof definition.correlationKey !== "function") {
     throw new TypeError("rule correlationKey must be a function");
   }
   if (definition.orderKey !== undefined && typeof definition.orderKey !== "function") {
@@ -117,13 +118,14 @@ export function defineAmbientRule<TEvent extends CanonicalChannelEvent>(
     ? async (batch: FrozenAttentionBatch<TEvent>) => definition.prepare!(batch)
     : async (batch: FrozenAttentionBatch<TEvent>) => definition.decide!(batchView(batch));
   const matches = definition.matches ?? (() => true);
+  const correlationKey = definition.correlationKey ?? (() => "default");
   const orderKey = definition.orderKey ?? ((event: TEvent) => event.occurredAt ?? event.id);
   const executor: AmbientRuleExecutor = Object.freeze({
     matches(channel: object, event: CanonicalChannelEvent) {
       return definition.channel === channel && matches(event as TEvent);
     },
     correlationKey: (event: CanonicalChannelEvent) =>
-      definition.correlationKey(event as TEvent),
+      correlationKey(event as TEvent),
     orderKey: (event: CanonicalChannelEvent) => orderKey(event as TEvent),
     prepare: (batch: FrozenAttentionBatch) => prepare(batch as FrozenAttentionBatch<TEvent>),
   });

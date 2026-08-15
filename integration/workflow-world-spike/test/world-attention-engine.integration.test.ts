@@ -17,9 +17,13 @@ import {
 } from "@ewhauser/eve-ambient/world";
 import { createServer, type Server } from "node:http";
 import { getHookByToken, getRun } from "workflow/api";
+import { getWorld, setWorld } from "workflow/runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createCountingWorld, waitForStableWorldCalls } from "./counting-world.js";
 
 const SECRET_ENV = "AMBIENT_WORLD_TEST_SECRET";
+const MAX_COLD_MESSAGE_WORLD_CALLS = 160;
+const MAX_WARM_MESSAGE_WORLD_CALLS = 120;
 const servers: Server[] = [];
 
 afterEach(async () => {
@@ -35,6 +39,90 @@ afterEach(async () => {
 });
 
 describe("WorldAttentionEngine", () => {
+  it("measures the World boundary cost of cold and warm inbound messages", async () => {
+    const applicationCalls = { prepare: 0, deliver: 0 };
+    const callbackUrl = await serve(
+      createWorldAttentionCallbackHandler(
+        {
+          async prepare(): Promise<PreparedAttentionOutcome> {
+            applicationCalls.prepare += 1;
+            return {
+              kind: "wake",
+              routeId: "eve",
+              target: "session:incident-42",
+              instruction: "Investigate the event.",
+              decision: null,
+              evidence: null,
+            };
+          },
+          async deliver(wake): Promise<AttentionDeliveryReceipt> {
+            applicationCalls.deliver += 1;
+            return {
+              wakeKey: wake.wakeKey,
+              inputHash: wake.inputHash,
+              deliveredAt: new Date().toISOString(),
+              result: null,
+            };
+          },
+        },
+        { secretEnv: SECRET_ENV },
+      ),
+    );
+    process.env[SECRET_ENV] = "world-test-secret";
+    const originalWorld = getWorld();
+    const countingWorld = createCountingWorld(originalWorld);
+    setWorld(countingWorld.world);
+
+    try {
+      const engine = new WorldAttentionEngine({
+        engineId: uniqueEngineId(),
+        callbackUrl,
+        callbackSecretEnv: SECRET_ENV,
+        receiptTimeoutMs: 10_000,
+      });
+
+      await engine.accept(await fanout("cost-event-cold", "first", [plan()]));
+      await vi.waitFor(() => expect(applicationCalls.deliver).toBe(1), { timeout: 10_000 });
+      await waitForStableWorldCalls(countingWorld);
+      const coldCorrelation = countingWorld.snapshot();
+      const coldApplicationCalls = { ...applicationCalls };
+
+      countingWorld.reset();
+      applicationCalls.prepare = 0;
+      applicationCalls.deliver = 0;
+      await engine.accept(await fanout("cost-event-warm", "second", [plan()]));
+      await vi.waitFor(() => expect(applicationCalls.deliver).toBe(1), { timeout: 10_000 });
+      await waitForStableWorldCalls(countingWorld);
+      const warmCorrelation = countingWorld.snapshot();
+      const warmApplicationCalls = { ...applicationCalls };
+
+      const report = {
+        firstMessageColdCorrelation: {
+          world: withoutTrace(coldCorrelation),
+          applicationHttp: coldApplicationCalls,
+          endToEndCalls:
+            coldCorrelation.total + coldApplicationCalls.prepare + coldApplicationCalls.deliver,
+        },
+        subsequentMessageWarmCorrelation: {
+          world: withoutTrace(warmCorrelation),
+          applicationHttp: warmApplicationCalls,
+          endToEndCalls:
+            warmCorrelation.total + warmApplicationCalls.prepare + warmApplicationCalls.deliver,
+        },
+      };
+      process.stdout.write(`\nWORLD_CALL_REPORT ${JSON.stringify(report, null, 2)}\n`);
+
+      // These are intentionally ceilings rather than exact values. Cold owner
+      // election can schedule one extra replay depending on queue timing.
+      expect(coldCorrelation.total).toBeLessThanOrEqual(MAX_COLD_MESSAGE_WORLD_CALLS);
+      expect(warmCorrelation.total).toBeLessThanOrEqual(MAX_WARM_MESSAGE_WORLD_CALLS);
+      expect(coldApplicationCalls).toEqual({ prepare: 1, deliver: 1 });
+      expect(warmApplicationCalls).toEqual({ prepare: 1, deliver: 1 });
+    } finally {
+      setWorld(originalWorld);
+    }
+  });
+
   it("admits, executes, deduplicates, and conflicts through semantic World receipts", async () => {
     const prepareCalls: FrozenAttentionBatch[] = [];
     const deliveryCalls: PreparedAttentionWake[] = [];
@@ -406,4 +494,11 @@ function plan(overrides: Partial<AttentionBranchPlan> = {}): AttentionBranchPlan
 
 function uniqueEngineId(): string {
   return `test-${crypto.randomUUID()}`;
+}
+
+function withoutTrace<T extends { readonly trace: readonly string[] }>(
+  snapshot: T,
+): Omit<T, "trace"> {
+  const { trace: _trace, ...summary } = snapshot;
+  return summary;
 }

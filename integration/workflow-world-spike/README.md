@@ -25,6 +25,29 @@ complete Ambient protocol.
 pnpm --filter eve-ambient-workflow-world-spike test
 ```
 
+## Measured call cost
+
+The integration fixture wraps the public World boundary and prints a
+`WORLD_CALL_REPORT` for one accepted event, one immediate active branch, and
+one successful wake. With Workflow 4.8.2 and the local World, repeated runs
+measured:
+
+| correlation state | World calls | application HTTP | end-to-end calls |
+| --- | ---: | ---: | ---: |
+| first message, cold | 137-143 | 2 | 139-145 |
+| subsequent message, warm | 110 | 2 | 112 |
+
+The warm message's 110 World calls were 37 storage reads, 50 storage writes,
+22 queue publishes, and one World-control lookup. The writes included 48
+Workflow event appends and two admission-stream writes. The queue publishes
+included 13 correlation-workflow continuations, seven event-workflow
+continuations, and two application callback steps.
+
+These are public World method calls, not PostgreSQL wire traces. A World can
+implement a method locally or batch work internally; a remote World can turn
+each method into one or more network/storage operations. The fixture keeps
+generous 160-call cold and 120-call warm ceilings to expose further growth.
+
 ## Postgres World probe
 
 The optional test uses the official `@workflow/world-postgres` storage

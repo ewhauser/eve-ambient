@@ -78,4 +78,5 @@ prepared-wake payloads and retain only bounded receipts. The worker exposes
 payload-free diagnostics but no event lookup, history, or replay route.
 
 The celld implementation runs the same conformance suite as memory and
-PostgreSQL. See `examples/eve-celld` for an executable GitHub channel rule.
+PostgreSQL. See `examples/eve-celld` for an executable PR/CI shepherd built on
+Eve's native GitHub channel.

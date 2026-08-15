@@ -1,6 +1,7 @@
 import { celld } from "@ewhauser/eve-ambient/celld";
 import type { EveChannelAuth } from "@ewhauser/eve-ambient-eve";
 import type { ChannelFrom } from "eve/channels";
+import type { GitHubChannelState } from "eve/channels/github";
 
 import { defineEngineeringApplication } from "./application.js";
 
@@ -13,7 +14,7 @@ export interface EveCelldApplicationOptions {
   };
   readonly eve: {
     readonly auth: EveChannelAuth;
-    readonly from: ChannelFrom;
+    readonly from: ChannelFrom<GitHubChannelState>;
   };
 }
 

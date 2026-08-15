@@ -58,37 +58,25 @@ portable storage interface.
 ## Application shape
 
 ```ts
+import { defineAmbientApplication } from "@ewhauser/eve-ambient";
+import { celld } from "@ewhauser/eve-ambient/celld";
 import {
-  debounce,
-  defineAmbientApplication,
-  defineAmbientRule,
-  wake,
-} from "@ewhauser/eve-ambient";
-import { postgres } from "@ewhauser/eve-ambient/postgres";
-import { createEveAttentionRoute } from "@ewhauser/eve-ambient-eve";
-
-const rule = defineAmbientRule({
-  id: "blocked-pull-request",
-  version: "v1",
-  channel,
-  policy: debounce({ quiet: "1m", maxWait: "5m", cooldown: "10m" }),
-  correlationKey: event => event.data.pullRequest,
-  decide: ({ latest }) => wake({
-    target: latest.replyTarget.address,
-    instruction: "Help unblock this pull request.",
-    evidence: latest.data,
-  }),
-});
+  createEveGitHubAmbientChannel,
+  createEveGitHubAttentionRoute,
+} from "@ewhauser/eve-ambient-eve";
+import { pullRequestShepherdRule } from "./rules/pull-request-shepherd.js";
 
 const ambient = defineAmbientApplication({
   applicationId: "engineering-agent",
-  rules: [rule],
-  routes: [createEveAttentionRoute({ from, auth })],
-}).with(postgres({ pool, engineId: "engineering-agent" }));
+  rules: [pullRequestShepherdRule],
+  routes: [createEveGitHubAttentionRoute({ from: githubFrom, auth })],
+}).with(celld({ url: env.CELLD_URL, secret: env.CELLD_SECRET }));
 
-await ambient.engine.initialize();
-await ambient.publish(channel, providerEvent);
-await ambient.engine.runOnce();
+export const github = createEveGitHubAmbientChannel({
+  publisher: ambient,
+  tenantId: context => context.repository.owner,
+  credentials,
+});
 ```
 
 Rules and routes are defined once. Bind that same application to `memory()` in
@@ -107,9 +95,9 @@ for `vercel/eve#1842`.
 | Workspace | Purpose | Published |
 |---|---|---|
 | [`packages/ambient`](packages/ambient) | Protocol, rules, publisher, shared workflow reducer, and three backends | `@ewhauser/eve-ambient` |
-| [`packages/eve-adapter`](packages/eve-adapter) | Eve attention route and direct-dispatch adapter | `@ewhauser/eve-ambient-eve` |
+| [`packages/eve-adapter`](packages/eve-adapter) | Eve GitHub ingress, attention delivery, and direct dispatch | `@ewhauser/eve-ambient-eve` |
 | [`examples/eve-postgres`](examples/eve-postgres) | Slack incident rule on PostgreSQL | No |
-| [`examples/eve-celld`](examples/eve-celld) | GitHub pull-request rule on celld, without PostgreSQL | No |
+| [`examples/eve-celld`](examples/eve-celld) | Eve GitHub PR/CI shepherd on celld, without PostgreSQL | No |
 | [`integration/eve-conformance`](integration/eve-conformance) | Exact Eve patch and adapter conformance | No |
 
 ## Documentation

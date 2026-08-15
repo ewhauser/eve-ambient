@@ -1,6 +1,6 @@
 # @ewhauser/eve-ambient-eve
 
-The official Eve delivery adapter for `@ewhauser/eve-ambient`.
+The official Eve ingress and delivery adapter for `@ewhauser/eve-ambient`.
 
 ```sh
 pnpm add @ewhauser/eve-ambient @ewhauser/eve-ambient-eve eve@0.38.1
@@ -30,6 +30,63 @@ recorded wake therefore reaches the same durable Eve turn.
 
 Customize `renderMessage` only when the replacement preserves the trust
 boundary and complete lineage needed by the receiving agent.
+
+Stateful Eve channels also need initial channel state when a wake creates a
+new session. Supply `state` to the generic route, or use the channel-specific
+route below; the state becomes part of the prepared by-value target.
+
+## GitHub ambient ingress
+
+Use Eve's built-in GitHub channel directly instead of redefining GitHub webhook
+schemas:
+
+```ts
+import { defineAmbientRule } from "@ewhauser/eve-ambient";
+import {
+  createEveGitHubAmbientChannel,
+  createEveGitHubAttentionRoute,
+  eveGitHubPullRequestActivity,
+} from "@ewhauser/eve-ambient-eve";
+
+const rule = defineAmbientRule({
+  id: "pull-request-shepherd",
+  version: "v1",
+  channel: eveGitHubPullRequestActivity,
+  policy,
+  correlationKey: event =>
+    `${event.data.repository.id}#${event.data.pullRequestNumber}`,
+  decide,
+});
+
+const ambient = defineAmbientApplication({
+  applicationId: "engineering-agent",
+  rules: [rule],
+  routes: [createEveGitHubAttentionRoute({ from: githubFrom, auth })],
+}).with(celldBackend);
+
+export default createEveGitHubAmbientChannel({
+  publisher: ambient,
+  tenantId: context => context.repository.owner,
+  credentials,
+});
+```
+
+The returned value is Eve's normal `githubChannel()`. Eve verifies and
+normalizes the webhook; the adapter publishes its typed `pull_request` and
+`check_suite` hook values into one Ambient channel. Check suites associated
+with multiple pull requests produce one stable event per PR. Other Eve GitHub
+configuration, including normal comment invocation, remains available on the
+same options object.
+
+Eve normally schedules inbound hooks after its HTTP acknowledgement and logs
+hook failures. This adapter deliberately waits for those hooks and tracks
+Ambient admission failures separately, returning `503` unless the complete
+event reached durable custody. A standard `X-GitHub-Delivery` header is
+therefore required. The canonical event retains Eve's full raw PR or
+check-suite object along with normalized source, actor, repository, and
+conversation identity. Its prepared target also carries the complete Eve
+GitHub channel state required to create or resume the PR session; the GitHub
+attention route validates that target and supplies the state to Eve.
 
 ## Direct dispatch
 

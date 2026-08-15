@@ -10,7 +10,7 @@
       "exclude-paths": [
         "examples/world-attention",
         "integration/eve-conformance",
-        "integration/workflow-world-spike",
+        "integration/attention-world",
         "packages/eve-adapter"
       ],
       "extra-files": [

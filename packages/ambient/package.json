@@ -53,11 +53,7 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.10",
-    "workflow": "4.8.2"
-  },
-  "peerDependencies": {
-    "workflow": ">=4.8.2 <5"
+    "vitest": "^4.1.10"
   },
   "engines": {
     "node": ">=24"

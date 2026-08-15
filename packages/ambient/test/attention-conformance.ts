@@ -36,14 +36,12 @@ export interface AttentionConformanceRunResult {
 }
 
 export interface AttentionConformanceDiagnostics {
-  readonly eventCoordinators: number;
-  readonly pendingFanoutPayloads: number;
-  readonly acceptanceReceipts: number;
-  readonly correlationWorkflows: number;
+  readonly correlationStreams: number;
+  readonly recentMessages: number;
   readonly bufferedBranchPayloads: number;
   readonly activeBatchPayloads: number;
   readonly preparedWakePayloads: number;
-  readonly branchReceipts: number;
+  readonly inFlightBranches: number;
   readonly deliveryReceipts: number;
   readonly terminalFailures: number;
 }
@@ -51,7 +49,7 @@ export interface AttentionConformanceDiagnostics {
 export interface AttentionConformanceFactoryOptions {
   readonly callbacks: AttentionCallbacks;
   readonly clock: VirtualMonitorClock;
-  readonly dedupeMs?: number | undefined;
+  readonly maxRecentMessages?: number | undefined;
   readonly retryDelayMs?: number | undefined;
   readonly claimLeaseMs?: number | undefined;
   readonly maxAttempts?: number | undefined;
@@ -77,39 +75,45 @@ export function defineAttentionEngineConformance(
   createHarness: AttentionConformanceFactory,
 ): void {
   describe(`${name} attention engine conformance`, () => {
-    it("freezes an empty fan-out against later deployment membership", async () => {
+    it("does not create global state for an empty fan-out", async () => {
       const clock = new VirtualMonitorClock();
       const callbacks = new ControlledAttentionCallbacks(clock);
       const harness = await createHarness({ callbacks, clock });
       const empty = await fanout({ branches: [] });
       const accepted = await harness.engine.accept(empty);
       const changed = await fanout({ branches: [plan()] });
-      const retry = await harness.engine.accept(changed);
+      const appended = await harness.engine.accept(changed);
 
       expect(accepted.branchKeys).toEqual([]);
-      expect(retry).toEqual(accepted);
+      expect(appended.branchKeys).toEqual([changed.branches[0]!.branchKey]);
       expect(await harness.diagnostics()).toMatchObject({
-        pendingFanoutPayloads: 0,
-        acceptanceReceipts: 1,
-        bufferedBranchPayloads: 0,
+        correlationStreams: 1,
+        recentMessages: 1,
+        bufferedBranchPayloads: 1,
       });
     });
 
-    it("returns the original membership when a retry proposes different branches", async () => {
+    it("lets a retry append newly proposed correlation streams", async () => {
       const clock = new VirtualMonitorClock();
       const callbacks = new ControlledAttentionCallbacks(clock);
-      const harness = await createHarness({ callbacks, clock, maxBranches: 1 });
+      const harness = await createHarness({ callbacks, clock });
       const original = await fanout({ branches: [plan({ monitorId: "monitor-a" })] });
-      const accepted = await harness.engine.accept(original);
+      await harness.engine.accept(original);
       const changed = await fanout({
         branches: [
+          plan({ monitorId: "monitor-a" }),
           plan({ monitorId: "monitor-b" }),
-          plan({ monitorId: "monitor-c" }),
         ],
       });
 
-      await expect(harness.engine.accept(changed)).resolves.toEqual(accepted);
-      expect((await harness.diagnostics()).bufferedBranchPayloads).toBe(1);
+      await expect(harness.engine.accept(changed)).resolves.toMatchObject({
+        branchKeys: changed.branches.map((branch) => branch.branchKey),
+      });
+      expect(await harness.diagnostics()).toMatchObject({
+        correlationStreams: 2,
+        recentMessages: 2,
+        bufferedBranchPayloads: 2,
+      });
     });
 
     it("fails closed on source conflicts and overlapping branch-input conflicts", async () => {
@@ -152,8 +156,8 @@ export function defineAttentionEngineConformance(
         AttentionCapacityError,
       );
       expect(await harness.diagnostics()).toMatchObject({
-        eventCoordinators: 0,
-        pendingFanoutPayloads: 0,
+        correlationStreams: 0,
+        recentMessages: 0,
       });
     });
 
@@ -170,22 +174,26 @@ export function defineAttentionEngineConformance(
         harness.engine.accept(await fanout({ branches: [] })),
       ).rejects.toBeInstanceOf(AttentionCapacityError);
       expect(await harness.diagnostics()).toMatchObject({
-        eventCoordinators: 0,
-        pendingFanoutPayloads: 0,
+        correlationStreams: 0,
+        recentMessages: 0,
       });
     });
 
-    it("resumes a partially handed-off fan-out without repeating completed branches", async () => {
+    it("retries all stream appends and lets each receiver deduplicate", async () => {
       const clock = new VirtualMonitorClock();
       const callbacks = new ControlledAttentionCallbacks(clock);
       let appendAttempts = 0;
+      let failSecondStream = true;
       const harness = await createHarness({
         callbacks,
         clock,
         faults: {
-          beforeBranchAppend: () => {
+          beforeBranchAppend: (branch) => {
             appendAttempts += 1;
-            if (appendAttempts === 2) throw new Error("injected append outage");
+            if (branch.monitorId === "monitor-b" && failSecondStream) {
+              failSecondStream = false;
+              throw new Error("injected append outage");
+            }
           },
         },
       });
@@ -198,15 +206,17 @@ export function defineAttentionEngineConformance(
 
       await expect(harness.engine.accept(input)).rejects.toThrow("injected append outage");
       expect(await harness.diagnostics()).toMatchObject({
-        pendingFanoutPayloads: 1,
+        correlationStreams: 1,
+        recentMessages: 1,
         bufferedBranchPayloads: 1,
       });
       await expect(harness.engine.accept(input)).resolves.toMatchObject({
         branchKeys: input.branches.map((branch) => branch.branchKey),
       });
-      expect(appendAttempts).toBe(3);
+      expect(appendAttempts).toBe(4);
       expect(await harness.diagnostics()).toMatchObject({
-        pendingFanoutPayloads: 0,
+        correlationStreams: 2,
+        recentMessages: 2,
         bufferedBranchPayloads: 2,
       });
     });
@@ -236,13 +246,12 @@ export function defineAttentionEngineConformance(
       expect((await harness.diagnostics()).bufferedBranchPayloads).toBe(1);
     });
 
-    it("starts the admission receipt horizon after branch handoff completes", async () => {
+    it("returns the receiver's append timestamp after handoff completes", async () => {
       const clock = new VirtualMonitorClock();
       const callbacks = new ControlledAttentionCallbacks(clock);
       const harness = await createHarness({
         callbacks,
         clock,
-        dedupeMs: 20,
         faults: {
           afterBranchAppend: () => clock.advance(50),
         },
@@ -251,11 +260,10 @@ export function defineAttentionEngineConformance(
       const receipt = await harness.engine.accept(await fanout({ branches: [plan()] }));
 
       expect(receipt.acceptedAt).toBe("2026-01-01T00:00:00.000Z");
-      expect(receipt.dedupeExpiresAt).toBe("2026-01-01T00:00:00.070Z");
-      expect((await harness.diagnostics()).acceptanceReceipts).toBe(1);
+      expect((await harness.diagnostics()).recentMessages).toBe(1);
     });
 
-    it("timestamps each serialized branch append when it commits", async () => {
+    it("admits independent correlation streams concurrently", async () => {
       const clock = new VirtualMonitorClock();
       const callbacks = new ControlledAttentionCallbacks(clock);
       let appendResponses = 0;
@@ -279,10 +287,7 @@ export function defineAttentionEngineConformance(
         }),
       );
 
-      await expect(harness.runDue()).resolves.toMatchObject({ delivered: 1 });
-      expect(callbacks.prepareCalls).toHaveLength(1);
-      clock.advance(10);
-      await expect(harness.runDue()).resolves.toMatchObject({ delivered: 1 });
+      await expect(harness.runDue()).resolves.toMatchObject({ delivered: 2 });
       expect(callbacks.prepareCalls).toHaveLength(2);
     });
 
@@ -533,12 +538,11 @@ export function defineAttentionEngineConformance(
       await harness.runDue();
 
       expect(await harness.diagnostics()).toMatchObject({
-        pendingFanoutPayloads: 0,
         bufferedBranchPayloads: 0,
         activeBatchPayloads: 0,
         preparedWakePayloads: 0,
-        acceptanceReceipts: 1,
-        branchReceipts: 1,
+        recentMessages: 1,
+        inFlightBranches: 0,
         deliveryReceipts: 1,
       });
     });
@@ -664,42 +668,47 @@ export function defineAttentionEngineConformance(
       await expect(harness.runDue()).resolves.toMatchObject({ delivered: 1 });
     });
 
-    it("expires payload-free receipts independently of terminal payload deletion", async () => {
+    it("bounds best-effort dedup to the recent-message ring", async () => {
       const clock = new VirtualMonitorClock();
       const callbacks = new ControlledAttentionCallbacks(clock);
-      const harness = await createHarness({ callbacks, clock, dedupeMs: 20 });
-      await harness.engine.accept(await fanout({ branches: [plan()] }));
-      await harness.runDue();
-      expect((await harness.diagnostics()).acceptanceReceipts).toBe(1);
-
-      clock.advance(20);
+      const harness = await createHarness({ callbacks, clock, maxRecentMessages: 2 });
+      for (const eventId of ["event-1", "event-2", "event-3"]) {
+        await harness.engine.accept(await fanout({ eventId, branches: [plan()] }));
+        await harness.runDue();
+      }
       expect(await harness.diagnostics()).toMatchObject({
-        eventCoordinators: 0,
-        correlationWorkflows: 0,
-        branchReceipts: 0,
-        deliveryReceipts: 0,
+        correlationStreams: 1,
+        recentMessages: 2,
+        inFlightBranches: 0,
+        deliveryReceipts: 2,
       });
+
+      await harness.engine.accept(
+        await fanout({ eventId: "event-2", branches: [plan()] }),
+      );
+      expect((await harness.diagnostics()).bufferedBranchPayloads).toBe(0);
+
+      await harness.engine.accept(
+        await fanout({ eventId: "event-1", branches: [plan()] }),
+      );
+      expect((await harness.diagnostics()).bufferedBranchPayloads).toBe(1);
     });
 
-    it("starts branch receipt retention after terminal workflow completion", async () => {
+    it("bounds retained terminal outcomes without deleting the stream", async () => {
       const clock = new VirtualMonitorClock();
       const callbacks = new ControlledAttentionCallbacks(clock);
-      callbacks.advanceOnPrepareMs = 50;
-      const harness = await createHarness({ callbacks, clock, dedupeMs: 20 });
-      await harness.engine.accept(await fanout({ branches: [plan()] }));
-
-      await expect(harness.runDue()).resolves.toMatchObject({ delivered: 1 });
+      callbacks.outcome = { kind: "invalid" } as unknown as PreparedAttentionOutcome;
+      const harness = await createHarness({ callbacks, clock, maxRecentMessages: 2 });
+      for (const eventId of ["event-1", "event-2", "event-3"]) {
+        await harness.engine.accept(await fanout({ eventId, branches: [plan()] }));
+        await expect(harness.runDue()).resolves.toMatchObject({ terminalFailures: 1 });
+      }
       expect(await harness.diagnostics()).toMatchObject({
-        acceptanceReceipts: 0,
-        branchReceipts: 1,
-        deliveryReceipts: 1,
-      });
-
-      clock.advance(20);
-      expect(await harness.diagnostics()).toMatchObject({
-        correlationWorkflows: 0,
-        branchReceipts: 0,
+        correlationStreams: 1,
+        recentMessages: 2,
+        inFlightBranches: 0,
         deliveryReceipts: 0,
+        terminalFailures: 2,
       });
     });
   });

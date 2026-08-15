@@ -1,7 +1,7 @@
 # RFC 0003: Workflow World Runtime
 
-- Status: Accepted
-- Implementation: Complete
+- Status: Superseded by [RFC 0004](0004-correlation-world-protocol.md)
+- Implementation: Removed
 - Scope: Replace Ambient-specific Postgres and celld runtimes with one
   Workflow World implementation
 - Preserves: RFC 0001 lineage and full-value custody; RFC 0002 attention
@@ -11,6 +11,10 @@
   migration, and deployment sections
 
 ## Decision
+
+> Historical: the run, hook, step, sleep, and event-coordinator machinery below
+> was implemented in the spike and then removed. Measured fanout was too high
+> for the correlation protocol Ambient actually needs. RFC 0004 is current.
 
 Eve Ambient builds its production machinery on the Workflow SDK and the
 process-global World configured by the host. It does not ship custom Postgres

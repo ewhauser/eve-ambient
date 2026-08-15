@@ -16,20 +16,31 @@ import {
   assertIdempotencyInput,
   deriveAttentionBatchKey,
   deriveAttentionRunKey,
+  hashIdempotencyInput,
   type AttentionInstanceKey,
   type BranchKey,
+  type EventKey,
   type InputHash,
   type RunKey,
   type WakeKey,
 } from "./idempotency.js";
+import {
+  validateAttentionStreamAppend,
+  type AttentionStreamAppend,
+  type AttentionStreamAppendReceipt,
+} from "./stream-protocol.js";
 import { addMs } from "./time.js";
 import type { MonitorBatchClosedBy } from "./types.js";
 
 export interface AttentionBranchLedgerEntry {
   readonly branchKey: BranchKey;
   readonly inputHash: InputHash;
-  expiresAt: string;
-  terminal: boolean;
+}
+
+export interface AttentionRecentMessage {
+  readonly eventKey: EventKey;
+  readonly inputHash: InputHash;
+  readonly receipt: AttentionStreamAppendReceipt;
 }
 
 export interface BufferedAttentionBatch {
@@ -63,15 +74,13 @@ export type AttentionRunClaim =
 export interface RetainedAttentionDeliveryReceipt {
   readonly wakeKey: WakeKey;
   readonly receipt: AttentionDeliveryReceipt;
-  readonly expiresAt: string;
 }
 
 export interface RetainedAttentionFailure {
   readonly runKey: RunKey;
-  readonly expiresAt: string;
 }
 
-/** Complete private state for one serialized correlation workflow. */
+/** Complete private state for one serialized correlation stream. */
 export interface AttentionWorkflowState {
   readonly instanceKey: AttentionInstanceKey;
   readonly applicationId: string;
@@ -83,6 +92,7 @@ export interface AttentionWorkflowState {
   readonly mode: FullAttentionBranch["mode"];
   readonly policy: SerializableMailboxPolicy;
   readonly policyHash: InputHash;
+  recentMessages: AttentionRecentMessage[];
   branchLedger: AttentionBranchLedgerEntry[];
   deliveryReceipts: RetainedAttentionDeliveryReceipt[];
   terminalFailures: RetainedAttentionFailure[];
@@ -91,6 +101,9 @@ export interface AttentionWorkflowState {
   active?: ActiveAttentionRun | undefined;
   cooldownUntil?: string | undefined;
 }
+
+/** Backend-facing name for the complete state of one correlation stream. */
+export type AttentionStreamState = AttentionWorkflowState;
 
 export type PreparedTransition = "deliver" | "ignored" | "shadowed";
 
@@ -126,11 +139,65 @@ export function createAttentionWorkflow(input: {
     mode: input.branch.mode,
     policy: clone(input.branch.policy),
     policyHash: input.policyHash,
+    recentMessages: [],
     branchLedger: [],
     deliveryReceipts: [],
     terminalFailures: [],
     sealed: [],
   };
+}
+
+/**
+ * Applies one event append atomically to a correlation stream. The returned
+ * state is detached so a backend can persist it in one transaction.
+ */
+export async function applyAttentionStreamAppend(
+  current: AttentionWorkflowState | undefined,
+  proposed: AttentionStreamAppend,
+  input: { readonly now: string; readonly maxRecentMessages: number },
+): Promise<{
+  readonly state: AttentionWorkflowState;
+  readonly receipt: AttentionStreamAppendReceipt;
+}> {
+  const append = await validateAttentionStreamAppend(proposed);
+  const existing = current?.recentMessages.find(
+    (entry) => entry.eventKey === append.eventKey,
+  );
+  if (existing !== undefined) {
+    assertIdempotencyInput({
+      namespace: "attention-stream-recent-message",
+      key: append.eventKey,
+      existingInputHash: existing.inputHash,
+      receivedInputHash: append.inputHash,
+    });
+    return {
+      state: clone(current!),
+      receipt: { ...clone(existing.receipt), status: "duplicate" },
+    };
+  }
+
+  const first = append.branches[0]!;
+  const policyHash = await hashPolicy(first);
+  const state = current === undefined
+    ? createAttentionWorkflow({ instanceKey: append.streamKey, branch: first, policyHash })
+    : clone(current);
+  for (const branch of append.branches) {
+    appendAttentionBranch(state, branch, { now: input.now, policyHash });
+  }
+  const receipt: AttentionStreamAppendReceipt = {
+    streamKey: append.streamKey,
+    eventKey: append.eventKey,
+    inputHash: append.inputHash,
+    status: "appended",
+    acceptedAt: input.now,
+  };
+  state.recentMessages.push({
+    eventKey: append.eventKey,
+    inputHash: append.inputHash,
+    receipt,
+  });
+  trimRing(state.recentMessages, input.maxRecentMessages);
+  return { state, receipt: clone(receipt) };
 }
 
 /** Appends a complete branch exactly once and updates only provisional state. */
@@ -139,7 +206,6 @@ export function appendAttentionBranch(
   branch: FullAttentionBranch,
   input: {
     readonly now: string;
-    readonly dedupeMs: number;
     readonly policyHash: InputHash;
   },
 ): "appended" | "duplicate" {
@@ -161,14 +227,11 @@ export function appendAttentionBranch(
       existingInputHash: prior.inputHash,
       receivedInputHash: branch.inputHash,
     });
-    if (!prior.terminal || prior.expiresAt > input.now) return "duplicate";
-    workflow.branchLedger.splice(priorIndex, 1);
+    return "duplicate";
   }
   workflow.branchLedger.push({
     branchKey: branch.branchKey,
     inputHash: branch.inputHash,
-    expiresAt: addMs(input.now, input.dedupeMs),
-    terminal: false,
   });
   bufferBranch(workflow, clone(branch), input.now);
   return "appended";
@@ -216,7 +279,7 @@ export function activateAttentionRun(
   identity: Pick<FrozenAttentionBatch, "batchKey" | "runKey">,
   input: { readonly now: string; readonly leaseMs: number },
 ): ActiveAttentionRun {
-  if (workflow.active !== undefined) throw new Error("attention workflow already has an active run");
+  if (workflow.active !== undefined) throw new Error("attention stream already has an active run");
   const batch: FrozenAttentionBatch = { ...draft, ...identity };
   workflow.active = {
     batch,
@@ -246,7 +309,11 @@ export function isCurrentAttentionClaim(
 export async function applyPreparedAttentionOutcome(
   workflow: AttentionWorkflowState,
   outcome: PreparedAttentionOutcome,
-  input: { readonly now: string; readonly dedupeMs: number; readonly maxPreparedWakeBytes: number },
+  input: {
+    readonly now: string;
+    readonly maxPreparedWakeBytes: number;
+    readonly maxRecentMessages: number;
+  },
 ): Promise<PreparedTransition> {
   const prepared = validateAttentionCallbackValue(() =>
     validatePreparedAttentionOutcome(outcome),
@@ -265,8 +332,8 @@ export function applyPreparedAttentionCheckpoint(
   prepared: PreparedAttentionOutcome,
   input: {
     readonly now: string;
-    readonly dedupeMs: number;
     readonly maxPreparedWakeBytes: number;
+    readonly maxRecentMessages: number;
     readonly wake?: PreparedAttentionWake | undefined;
   },
 ): PreparedTransition {
@@ -274,13 +341,13 @@ export function applyPreparedAttentionCheckpoint(
   if (active.stage !== "preparing") throw new Error("attention run is not preparing");
   if (prepared.kind === "ignore") {
     if (input.wake !== undefined) throw new TypeError("ignored outcome must not include a wake");
-    finishAttentionRun(workflow, active, input.now, false, input.dedupeMs);
+    finishAttentionRun(workflow, active, input.now, false);
     return "ignored";
   }
   active.prepared = prepared;
   if (workflow.mode === "shadow") {
     if (input.wake !== undefined) throw new TypeError("shadow outcome must not include a wake");
-    finishAttentionRun(workflow, active, input.now, true, input.dedupeMs);
+    finishAttentionRun(workflow, active, input.now, true);
     return "shadowed";
   }
   if (input.wake === undefined) throw new TypeError("prepared wake outcome has no checkpointed wake");
@@ -297,7 +364,7 @@ export function applyPreparedAttentionCheckpoint(
 export function applyAttentionDeliveryReceipt(
   workflow: AttentionWorkflowState,
   receipt: AttentionDeliveryReceipt,
-  input: { readonly now: string; readonly dedupeMs: number },
+  input: { readonly now: string; readonly maxRecentMessages: number },
 ): AttentionDeliveryReceipt {
   const active = requireActive(workflow);
   if (active.stage !== "delivering" || active.wake === undefined) {
@@ -312,11 +379,11 @@ export function applyAttentionDeliveryReceipt(
   const retained = {
     wakeKey: active.wake.wakeKey,
     receipt: validated,
-    expiresAt: addMs(input.now, input.dedupeMs),
   };
   if (existingIndex >= 0) workflow.deliveryReceipts[existingIndex] = retained;
   else workflow.deliveryReceipts.push(retained);
-  finishAttentionRun(workflow, active, input.now, true, input.dedupeMs);
+  trimRing(workflow.deliveryReceipts, input.maxRecentMessages);
+  finishAttentionRun(workflow, active, input.now, true);
   return validated;
 }
 
@@ -325,9 +392,9 @@ export function failAttentionRun(
   error: unknown,
   input: {
     readonly now: string;
-    readonly dedupeMs: number;
     readonly retryDelayMs: number;
     readonly maxAttempts: number;
+    readonly maxRecentMessages: number;
     readonly terminalError: (error: unknown) => boolean;
   },
 ): "failed" | "terminal-failure" {
@@ -336,11 +403,9 @@ export function failAttentionRun(
   active.failures += 1;
   if (input.terminalError(error) || active.failures >= input.maxAttempts) {
     const runKey = active.batch.runKey;
-    finishAttentionRun(workflow, active, input.now, false, input.dedupeMs);
-    workflow.terminalFailures.push({
-      runKey,
-      expiresAt: addMs(input.now, input.dedupeMs),
-    });
+    finishAttentionRun(workflow, active, input.now, false);
+    workflow.terminalFailures.push({ runKey });
+    trimRing(workflow.terminalFailures, input.maxRecentMessages);
     return "terminal-failure";
   }
   active.retryAt = addMs(input.now, input.retryDelayMs);
@@ -364,36 +429,20 @@ export function nextAttentionDueAt(workflow: AttentionWorkflowState): string | u
           );
     return cooldown === undefined ? due : maxTimestamp(due, cooldown);
   }
-  return minTimestamp(
-    ...workflow.branchLedger.filter((entry) => entry.terminal).map((entry) => entry.expiresAt),
-    ...workflow.deliveryReceipts.map((entry) => entry.expiresAt),
-    ...workflow.terminalFailures.map((entry) => entry.expiresAt),
-    workflow.cooldownUntil,
-  );
+  return workflow.cooldownUntil;
 }
 
 export function purgeAttentionWorkflow(
   workflow: AttentionWorkflowState,
   now: string,
 ): "active" | "empty" {
-  workflow.branchLedger = workflow.branchLedger.filter(
-    (entry) => !entry.terminal || entry.expiresAt > now,
-  );
-  workflow.deliveryReceipts = workflow.deliveryReceipts.filter(
-    (entry) => entry.expiresAt > now,
-  );
-  workflow.terminalFailures = workflow.terminalFailures.filter(
-    (entry) => entry.expiresAt > now,
-  );
   if (workflow.cooldownUntil !== undefined && workflow.cooldownUntil <= now) {
     delete workflow.cooldownUntil;
   }
   return workflow.active === undefined &&
     workflow.open === undefined &&
     workflow.sealed.length === 0 &&
-    workflow.branchLedger.length === 0 &&
-    workflow.deliveryReceipts.length === 0 &&
-    workflow.terminalFailures.length === 0
+    workflow.branchLedger.length === 0
     ? "empty"
     : "active";
 }
@@ -483,17 +532,11 @@ function finishAttentionRun(
   run: ActiveAttentionRun,
   now: string,
   woke: boolean,
-  dedupeMs: number,
 ): void {
-  for (const branch of run.batch.branches) {
-    const receipt = workflow.branchLedger.find(
-      (entry) => entry.branchKey === branch.branchKey,
-    );
-    if (receipt !== undefined) {
-      receipt.terminal = true;
-      receipt.expiresAt = addMs(now, dedupeMs);
-    }
-  }
+  const completed = new Set(run.batch.branches.map((branch) => branch.branchKey));
+  workflow.branchLedger = workflow.branchLedger.filter(
+    (entry) => !completed.has(entry.branchKey),
+  );
   delete workflow.active;
   if (woke && workflow.policy.cooldownAfterWakeMs !== undefined) {
     workflow.cooldownUntil = addMs(now, workflow.policy.cooldownAfterWakeMs);
@@ -518,8 +561,19 @@ function finishAttentionRun(
   }
 }
 
+async function hashPolicy(branch: FullAttentionBranch): Promise<InputHash> {
+  return hashIdempotencyInput({ mode: branch.mode, policy: branch.policy });
+}
+
+function trimRing<T>(values: T[], maximum: number): void {
+  if (!Number.isSafeInteger(maximum) || maximum <= 0) {
+    throw new TypeError("maxRecentMessages must be a positive safe integer");
+  }
+  if (values.length > maximum) values.splice(0, values.length - maximum);
+}
+
 function requireActive(workflow: AttentionWorkflowState): ActiveAttentionRun {
-  if (workflow.active === undefined) throw new Error("attention workflow has no active run");
+  if (workflow.active === undefined) throw new Error("attention stream has no active run");
   return workflow.active;
 }
 
@@ -536,7 +590,7 @@ function assertWorkflowIdentity(
     workflow.correlationKey !== branch.correlationKey ||
     workflow.mode !== branch.mode
   ) {
-    throw new TypeError("attention branch does not match its correlation workflow identity");
+    throw new TypeError("attention branch does not match its correlation stream identity");
   }
 }
 

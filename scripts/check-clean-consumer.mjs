@@ -40,7 +40,6 @@ try {
           "@ewhauser/eve-ambient": `file:${core.tarball}`,
           "@ewhauser/eve-ambient-eve": `file:${adapter.tarball}`,
           eve: "0.38.1",
-          workflow: "4.8.2",
         },
       },
       null,

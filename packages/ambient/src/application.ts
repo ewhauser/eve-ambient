@@ -62,7 +62,7 @@ interface AmbientRuleDefinitionBase<TEvent extends CanonicalChannelEvent> {
   readonly policy: SerializableMailboxPolicy;
   readonly channel: ChannelCanonicalizationContract<never, TEvent>;
   readonly matches?: ((event: TEvent) => boolean) | undefined;
-  /** Optional sub-correlation within the channel partition. Defaults to one workflow per rule. */
+  /** Optional sub-correlation within the channel partition. Defaults to one stream per rule. */
   readonly correlationKey?: ((event: TEvent) => string) | undefined;
   readonly orderKey?: ((event: TEvent) => string) | undefined;
 }

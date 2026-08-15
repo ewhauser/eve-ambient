@@ -8,7 +8,7 @@ import type { JsonValue } from "./types.js";
  * silently coerced by `JSON.stringify`.
  *
  * This module intentionally imports no Node built-ins so the same canonical
- * representation can be used by Node, Workflow steps, and workflow sandboxes.
+ * representation can be used across Node and remote runtime realms.
  */
 export function canonicalJson(value: unknown, name = "value"): string {
   const seen = new Set<object>();
@@ -37,7 +37,7 @@ export function canonicalJson(value: unknown, name = "value"): string {
         return current.map((item, index) => normalize(item, `${path}[${index}]`));
       }
       const prototype = Object.getPrototypeOf(current);
-      // Workflow sandboxes deserialize JSON into another realm. Its ordinary
+      // Remote runtimes may deserialize JSON into another realm. Their ordinary
       // Object.prototype is not reference-equal to this realm's prototype, so
       // recognize that shape without admitting class instances.
       const ordinaryCrossRealmObject =

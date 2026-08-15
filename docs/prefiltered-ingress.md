@@ -58,9 +58,9 @@ An upstream pull consumer should:
 
 Intermediate transports may keep their own retention or duplicate ledger.
 Those records do not become a central Eve Ambient system interface. Keys are
-lineage and idempotency values, never references that the attention workflow
+lineage and idempotency values, never references that the attention stream
 must dereference later.
 
 The package does not ship Kafka or SQS adapters. A custom consumer calls the
-same publisher used by provider-facing channels. The Workflow host's selected
+same publisher used by provider-facing channels. The supplied correlation
 World owns downstream persistence and scheduling.

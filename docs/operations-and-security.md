@@ -2,59 +2,42 @@
 
 ## Durability
 
-- `accept()` succeeds only after every frozen branch emits a semantic append
-  receipt.
-- Deterministic hook tokens serialize event admission and correlation streams.
-- Prepared output is checkpointed before delivery; retries reuse the exact
-  wake and `wakeKey`.
-- Capacity, retry attempts, cooldown, and deduplication horizons are bounded
-  configuration carried with the workflow run.
-- Callback fetches have a bounded timeout, and the authenticated application
-  endpoint rejects oversized bodies before invoking application code.
+- `accept()` returns only after every selected correlation stream returns a
+  semantic append receipt.
+- Independent stream appends run concurrently and all are allowed to settle.
+- A retry resends the same groups; each receiver handles duplicates locally.
+- Prepared output is checkpointed before delivery and retried with the same
+  bytes and `wakeKey`.
+- Source-admission dedup is intentionally best effort and bounded by the
+  recent-message ring.
 
-Monitor World queue lag, failed runs and steps, hook conflicts, callback
-latency/status, stream write errors, active sleeps, storage growth, and run
-retention. Ambient no longer has a database poller or backend diagnostics API;
-those signals belong to the selected World.
+Monitor append latency and errors, active stream count, due timer lag, callback
+latency and status, retry exhaustion, ring capacity, state bytes, and final
+delivery conflicts. These signals belong to the selected World implementation.
 
 ## Secrets
 
-`callbackSecretEnv` is an environment variable name, not a secret value. The
-durable step reads its value at callback time, which supports secret rotation
-without writing the bearer credential into workflow history. The application
-handler reads the same variable and uses constant-time byte comparison.
-
-Keep provider credentials, model/session credentials, database credentials,
-and callback secrets out of event payloads, decisions, evidence, and World
-metadata.
+`callbackSecretEnv` is an environment-variable name. The application handler
+reads the value at request time and compares bearer tokens in constant time.
+The remote World must receive the value through its own secret configuration;
+do not put it in append payloads, decisions, evidence, receipts, or logs.
 
 ## Payload retention
 
-Ambient's reducer deletes terminal payloads from its live state. Workflow
-inputs, hook events, and step values may remain in the World's append-only
-history after completion. Configure encryption at rest, key rotation, backup
-scope, retention, erasure, and administrative access at the World layer.
-
-Do not describe reducer cleanup as physical erasure unless the selected World
-has been tested to provide it. Ambient exposes no event history or replay API,
-but absence of an API is not absence of retained bytes.
+The reducer removes terminal event and wake payloads from live stream state.
+The World may still retain snapshots, logs, backups, or transport bodies.
+Configure encryption, retention, erasure, and administrative access there.
+Ambient exposes no event-history or replay API.
 
 ## Definition rollout
 
-Rule identity, version, mode, policy, phase, and correlation membership
-participate in durable identity. Treat released versions as immutable and keep
-their callback code deployed until old workflows drain.
-
-Workflow code also has a deployment identity. Follow the Workflow host's
-versioning rules so sleeping runs can resume against compatible workflow and
-step registrations.
+Rule ID, version, mode, policy, and correlation participate in stream identity
+or policy conflict checks. Treat released definitions as immutable and keep
+their callback code available until their streams drain.
 
 ## Final action
 
-Delivery is idempotent rather than exactly once. Every route must carry
-`wakeKey` into the final durable system and return the original receipt for a
-matching retry. The Eve adapter maps it to Eve's keyed admission boundary.
-
-Source actors are provenance, not delegated authority. The application route
-always executes with its configured principal and must enforce tenant and loop
-boundaries.
+Delivery is idempotent rather than exactly once. Every route must propagate
+`wakeKey` to the final durable system and return the original receipt for a
+matching retry. Source actors are provenance, not delegated authority; routes
+must enforce tenant and loop boundaries with their configured principal.

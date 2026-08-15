@@ -78,12 +78,12 @@ Applications with multiple delivery routes must select one explicitly.
 event-count, or byte limit closes the batch. Canonical ordering uses the rule's
 `orderKey` and lineage keys, not arrival order.
 
-Policies are pinned to a correlation workflow. Reusing the same rule identity
+Policies are pinned to a correlation stream. Reusing the same rule identity
 and correlation key with different policy bytes is an idempotency conflict,
 not a live mutation.
 
-By default, each rule has one workflow per channel partition. Set
-`correlationKey` only when a rule needs multiple independent workflows inside
+By default, each rule has one stream per channel partition. Set
+`correlationKey` only when a rule needs multiple independent streams inside
 that partition. Correlation cannot cross partitions; if that is required,
 enlarge the channel partition deliberately.
 
@@ -95,8 +95,8 @@ const ambient = defineAmbientApplication({
   rules: [incidentRule],
   routes: [eveRoute],
 }).with(world({
-  engineId: "support-agent",
-  callbackUrl: "https://agent.example.com",
+  world: createWorldCelld({ url: process.env.WORLD_CELLD_URL }),
+  callbackSecretEnv: "AMBIENT_CALLBACK_SECRET",
 }));
 
 const receipt = await ambient.publish(slackChannel, providerDelivery);
@@ -117,4 +117,4 @@ prevents an event from being evaluated by a rule for a different shape.
 Conditional direct chat dispatch is deliberately separate. Configure the
 publisher's optional `direct` rule with an adapter that owns its own stable
 idempotency boundary. Direct dispatch does not become part of the attention
-workflow or its storage.
+stream or its storage.

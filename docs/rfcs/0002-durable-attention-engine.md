@@ -1,9 +1,9 @@
 # RFC: Durable Attention Engine
 
-- Status: Superseded by [RFC 0003](0003-workflow-world-runtime.md)
+- Status: Superseded by [RFC 0004](0004-correlation-world-protocol.md)
 - Implementation: The protocol and shared reducer remain current. The custom
   PostgreSQL and celld runtimes described here were removed in favor of one
-  Workflow World runtime.
+  correlation World protocol.
 - Scope: Replace the public store-and-runtime persistence model with one
   durable attention-engine command and two application callbacks
 - Preserves: RFC 0001 full-payload custody, idempotency lineage, membership
@@ -11,11 +11,11 @@
 - Supersedes: The former `MonitorStore`, `MonitorRuntime`, public
   persistence records, and shared storage topology
 - Related: [RFC 0001](0001-full-payload-idempotent-handoffs.md),
-  [RFC 0003](0003-workflow-world-runtime.md),
+  [RFC 0004](0004-correlation-world-protocol.md),
   `ewhauser/eve-ambient` issue #3
 
 > Historical note: backend and operational sections below describe the first
-> implementation. RFC 0003 is authoritative for current deployment, retention,
+> implementation. RFC 0004 is authoritative for current deployment, retention,
 > callbacks, scheduling, and conformance.
 
 ## Summary

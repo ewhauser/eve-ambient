@@ -16,26 +16,20 @@ export const packages = new Map([
         "dist/index.js",
         "dist/application.d.ts",
         "dist/application.js",
-        "dist/coordinator.d.ts",
-        "dist/coordinator.js",
         "dist/memory.d.ts",
         "dist/memory.js",
         "dist/idempotency.d.ts",
         "dist/idempotency.js",
         "dist/protocol.d.ts",
         "dist/protocol.js",
+        "dist/stream-protocol.d.ts",
+        "dist/stream-protocol.js",
         "dist/testing.d.ts",
         "dist/testing.js",
         "dist/workflow.d.ts",
         "dist/workflow.js",
         "dist/world.d.ts",
         "dist/world.js",
-        "dist/world-protocol.d.ts",
-        "dist/world-protocol.js",
-        "dist/world-steps.d.ts",
-        "dist/world-steps.js",
-        "dist/world-workflows.d.ts",
-        "dist/world-workflows.js",
         "LICENSE",
         "README.md",
       ],
@@ -103,14 +97,12 @@ function validateManifest(packagePath, expected) {
     if (eveDependency !== undefined) {
       failures.push("provider-independent core must not depend on eve");
     }
-    if (manifest.peerDependencies?.workflow !== ">=4.8.2 <5") {
-      failures.push("workflow peer dependency must be >=4.8.2 <5");
-    }
-    if (manifest.devDependencies?.workflow !== "4.8.2") {
-      failures.push("workflow development dependency must be exactly 4.8.2");
-    }
-    if (manifest.dependencies?.workflow !== undefined) {
-      failures.push("workflow must be a peer so the host owns the process-global World");
+    if (
+      manifest.dependencies?.workflow !== undefined ||
+      manifest.devDependencies?.workflow !== undefined ||
+      manifest.peerDependencies?.workflow !== undefined
+    ) {
+      failures.push("core must not depend on the Workflow SDK");
     }
   }
 
@@ -160,6 +152,14 @@ function validateContents(packagePath, expected, packResult) {
     "dist/celld-worker.js",
     "dist/postgres.d.ts",
     "dist/postgres.js",
+    "dist/coordinator.d.ts",
+    "dist/coordinator.js",
+    "dist/world-protocol.d.ts",
+    "dist/world-protocol.js",
+    "dist/world-steps.d.ts",
+    "dist/world-steps.js",
+    "dist/world-workflows.d.ts",
+    "dist/world-workflows.js",
     "bin/eve-ambient.mjs",
     "migrations/001_attention_engine.sql",
     "migrations/001_eve_ambient.sql",

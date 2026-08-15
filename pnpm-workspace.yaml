@@ -23,5 +23,4 @@ minimumReleaseAgeExclude:
   - "eve@0.38.1"
 
 patchedDependencies:
-  "builtin-modules@5.0.0": patches/builtin-modules@5.0.0.patch
   "eve@0.38.1": packages/eve-adapter/patches/eve@0.38.1.patch

@@ -1,11 +1,11 @@
-# Ambient on a Workflow World
+# Ambient on a correlation World
 
 This example defines a support rule once, exercises it with the in-memory
 reference engine, and binds the production runtime with `world()`.
 
 ```ts
 const application = createSupportWorldApplication({
-  callbackUrl: "https://agent.example.com",
+  world: createWorldCelld({ url: process.env.WORLD_CELLD_URL }),
   callbackSecretEnv: "AMBIENT_CALLBACK_SECRET",
   deliver: async (target, instruction) => dispatchAgent(target, instruction),
 });
@@ -13,11 +13,9 @@ const application = createSupportWorldApplication({
 export const POST = application.fetch;
 ```
 
-The Workflow host installs one process-global World. That can be the official
-Postgres World, `world-celld`, or any other conforming implementation. Ambient
-does not receive a database, Redis client, or celld client and does not select
-storage per stream.
+The supplied client only needs `world.stream(key).append(input)`. Resolving the
+stream handle is local; `append` is the single admission RPC. `world-celld` or
+another implementation owns the durable stream state and timers.
 
-The same `AMBIENT_CALLBACK_SECRET` value must be available to the Workflow step
-runtime and the application. Only its environment-variable name is persisted
-in workflow inputs.
+The same `AMBIENT_CALLBACK_SECRET` value must be available to the World runtime
+and the application. The secret authenticates prepare and delivery callbacks.

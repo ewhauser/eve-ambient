@@ -1,67 +1,39 @@
 # World deployment
 
-Ambient has one production runtime and many possible Worlds.
+Ambient accepts one correlation-addressed World client. It does not know which
+database, queue, or runtime is behind that client.
 
-| Layer | Ambient owns | World owns |
-|---|---|---|
-| Protocol | keys, hashes, membership, reducer transitions | durable event storage |
-| Scheduling | due timestamps and retry policy | queueing and durable sleeps |
-| Stream identity | event and correlation hook tokens | atomic hook ownership and resumption |
-| Receipts | semantic admission and append values | persistent output streaming |
-| Operations | callback contract | database, Redis, celld, retention, backups |
-
-Channels choose bounded semantic partitions; rules may sub-correlate inside a
-partition. Those choices determine World run identity, not physical backend
-placement.
-
-The Workflow host must install one process-global World before Ambient uses
-`start()`, `getHookByToken()`, or `resumeHook()`. Ambient intentionally does
-not accept a World per application: Workflow's external runtime APIs all need
-to resolve the same owner and storage namespace.
-
-## Official Postgres World
-
-Use `@workflow/world-postgres` when its Postgres storage, Graphile Worker queue,
-and notification streamer fit the deployment. Ambient needs no schema,
-migration, pool, advisory lock, or poller of its own.
-
-## world-celld
-
-A `world-celld` implementation replaces the old Ambient-specific celld worker
-by implementing the standard World interfaces. Ambient sees only Queue,
-Storage, and Streamer semantics. Any celld topology, alarms, Redis acceleration,
-or Postgres metadata inside that World remains an infrastructure concern.
-
-## Composite Worlds
-
-A World may combine Redis-like scheduling with Postgres history, or route
-internal World responsibilities across services. That composition is below
-Ambient's correlation stream boundary. Ambient does not choose storage per
-rule or expose a public stream-placement API.
-
-If per-stream placement is eventually needed, it should be a serializable
-World routing hint that is covered by conformance—not a return to separate
-Ambient Postgres and celld engines.
-
-## Callback endpoint
+| Ambient owns | World implementation owns |
+|---|---|
+| canonical events, rules, keys, hashes | deterministic stream addressing |
+| grouping branches by correlation | atomic append and recent-message ring |
+| prepare and deliver callback contract | durable state, timers, leases, retries |
+| exact final `wakeKey` | encryption, backups, retention, erasure |
 
 ```ts
 const ambient = application.with(world({
-  engineId: "engineering-agent",
-  callbackUrl: "https://agent.example.com",
+  world: createWorldCelld({ url: process.env.WORLD_CELLD_URL }),
   callbackSecretEnv: "AMBIENT_CALLBACK_SECRET",
 }));
-
-export const POST = ambient.fetch;
 ```
 
-Make the same secret value available to the application and Workflow step
-runtime. Restrict the callback URL to trusted networks where possible. The
-secret value never enters workflow arguments, logs, or receipts.
+`createWorldCelld()` is illustrative: `world-celld` is developed separately.
+Any implementation is conforming if `stream(key)` constructs a local handle
+and `append(input)` durably and atomically applies the exported stream reducer.
+
+A World can use celld, Postgres, Redis, or a combination internally. That
+composition remains below the stream contract; Ambient has no backend selector
+per rule and ships no custom storage adapter.
+
+## Callback endpoint
+
+The remote World needs the application callback base URL and the same bearer
+secret named by `callbackSecretEnv`. Keep the endpoint on a trusted network
+where possible. Rotate the secret in both deployments together.
 
 ## Cutover
 
-The old custom Postgres rows and celld cells are not state-compatible with
-World histories. Drain or explicitly abandon old in-flight work, configure the
-World, deploy callback handling, then switch ingress to `WorldAttentionEngine`.
-Retry source deliveries with their original canonical identity.
+The removed custom backends and the abandoned Workflow-run spike are not state
+compatible with correlation World cells. Drain or explicitly abandon old work,
+deploy the new World and callback endpoint, then switch ingress. Retries must
+preserve their original canonical source identity.

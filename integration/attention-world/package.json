@@ -1,21 +1,18 @@
 {
-  "name": "eve-ambient-workflow-world-spike",
+  "name": "eve-ambient-attention-world-integration",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --config vitest.workflow.config.ts",
+    "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@ewhauser/eve-ambient": "workspace:*",
-    "@workflow/world-postgres": "4.3.3",
-    "workflow": "4.8.2"
+    "@ewhauser/eve-ambient": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
-    "@workflow/vitest": "4.0.18",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   }

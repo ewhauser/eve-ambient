@@ -20,10 +20,16 @@ it("defines attention once and binds it to the reference engine", async () => {
   expect(deliveries).toEqual(["incident:incident-42"]);
 });
 
-it("binds the same definition to the host's Workflow World and callback endpoint", async () => {
+it("binds the same definition to a correlation World and callback endpoint", async () => {
   process.env.EXAMPLE_AMBIENT_SECRET = "test-secret";
   const application = createSupportWorldApplication({
-    callbackUrl: "https://application.example.test",
+    world: {
+      stream: () => ({
+        append: async () => {
+          throw new Error("not used by this callback test");
+        },
+      }),
+    },
     callbackSecretEnv: "EXAMPLE_AMBIENT_SECRET",
     async deliver() {
       return null;

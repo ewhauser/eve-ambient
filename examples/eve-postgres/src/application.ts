@@ -5,7 +5,6 @@ import {
 } from "@ewhauser/eve-ambient-eve";
 import type { ChannelFrom } from "eve/channels";
 
-import type { SlackMessageEvent } from "./channels/slack.js";
 import { incidentEscalationRule } from "./rules/incident-escalation.js";
 
 export function defineEngineeringApplication(options: {
@@ -15,7 +14,7 @@ export function defineEngineeringApplication(options: {
     readonly from: ChannelFrom;
   };
 }) {
-  return defineAmbientApplication<SlackMessageEvent>({
+  return defineAmbientApplication({
     applicationId: options.applicationId,
     rules: [incidentEscalationRule],
     routes: [createEveAttentionRoute(options.eve)],

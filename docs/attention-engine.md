@@ -61,8 +61,7 @@ One stream atomically owns:
 - a fixed-size recent-message ring for best-effort admission dedup;
 - open, sealed, and active full-value batches;
 - the exact prepared wake checkpoint;
-- retry, lease, and cooldown timestamps; and
-- bounded delivery receipts and terminal outcomes.
+- retry, lease, and cooldown timestamps.
 
 Terminal processing removes source payloads and in-flight branch entries. Ring
 entries contain only keys, hashes, timestamps, and receipts. Ring eviction

@@ -1,11 +1,11 @@
 import type {
   DirectDispatchRequest,
   PreparedAttentionWake,
-} from "@ewhauser/eve-ambient";
+} from "@ewhauser/eve-ambient/protocol";
 import {
   deriveAttentionDirectDispatchKey,
   hashIdempotencyInput,
-} from "@ewhauser/eve-ambient";
+} from "@ewhauser/eve-ambient/idempotency";
 import type { ChannelFrom, ChannelSendOptions } from "eve/channels";
 import { describe, expect, it } from "vitest";
 import {
@@ -37,6 +37,7 @@ const wake = {
   correlationKey: "incident-42",
   rootEventKeys: [`eve:event:v1:${"5".repeat(64)}`],
   routeId: "eve",
+  target: "slack:C123:1700000000.000001",
   instruction: "Investigate the incident.",
   decision: { action: "wake" },
   evidence: { text: "untrusted" },
@@ -48,12 +49,11 @@ describe("Eve attention adapter", () => {
     const deliveries: Parameters<typeof fakeFrom>[0] = [];
     const route = createEveAttentionRoute({
       auth: null,
-      address: (value) => `monitor:${value.correlationKey}`,
       from: fakeFrom(deliveries),
     });
 
     await expect(route.deliver(wake)).resolves.toEqual({
-      address: "monitor:incident-42",
+      address: wake.target,
       sessionId: "session-1",
       turnId: wake.wakeKey,
     });

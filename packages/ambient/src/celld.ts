@@ -8,12 +8,46 @@ import {
   type FrozenAttentionBatch,
   type PreparedAttentionWake,
 } from "./attention.js";
+import type {
+  AmbientApplicationBackend,
+  AmbientBackendBinding,
+} from "./application.js";
 import { IdempotencyConflictError } from "./idempotency.js";
 
 export interface CelldAttentionEngineOptions {
   readonly url: string;
   readonly secret: string;
   readonly fetch?: typeof fetch | undefined;
+}
+
+export interface CelldAmbientBinding extends AmbientBackendBinding {
+  readonly engine: CelldAttentionEngine;
+  readonly fetch: (request: Request) => Promise<Response>;
+}
+
+export interface CelldAmbientOptions extends CelldAttentionEngineOptions {
+  readonly preparePath?: string | undefined;
+  readonly deliverPath?: string | undefined;
+}
+
+/** Binds admission and authenticated callbacks from one celld configuration. */
+export function celld(
+  options: CelldAmbientOptions,
+): AmbientApplicationBackend<CelldAmbientBinding> {
+  return Object.freeze({
+    bind(callbacks: AttentionCallbacks) {
+      const engine = new CelldAttentionEngine(options);
+      const handlerOptions: AttentionCallbackFetchHandlerOptions = {
+        secret: options.secret,
+        ...(options.preparePath === undefined ? {} : { preparePath: options.preparePath }),
+        ...(options.deliverPath === undefined ? {} : { deliverPath: options.deliverPath }),
+      };
+      return Object.freeze({
+        engine,
+        fetch: createAttentionCallbackFetchHandler(callbacks, handlerOptions),
+      });
+    },
+  });
 }
 
 export class CelldAttentionEngine implements AttentionEngine {

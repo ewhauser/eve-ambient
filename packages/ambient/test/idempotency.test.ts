@@ -14,7 +14,7 @@ import {
   freezeMembership,
   hashIdempotencyInput,
   parseIdempotencyKey,
-} from "../src/index.js";
+} from "../src/idempotency.js";
 
 const channel = defineChannelCanonicalization({
   version: 1,

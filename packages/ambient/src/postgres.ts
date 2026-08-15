@@ -8,6 +8,10 @@ import {
   type AttentionEngine,
   type FullAttentionBranch,
 } from "./attention.js";
+import type {
+  AmbientApplicationBackend,
+  AmbientBackendBinding,
+} from "./application.js";
 import {
   completeEventCoordinator,
   createEventCoordinator,
@@ -76,6 +80,24 @@ export interface PostgresAttentionEngineOptions
   readonly callbacks: AttentionCallbacks;
   /** Namespaces independent applications in the private backend tables. */
   readonly engineId?: string | undefined;
+}
+
+export interface PostgresAmbientBinding extends AmbientBackendBinding {
+  readonly engine: PostgresAttentionEngine;
+}
+
+/** Binds an application definition to PostgreSQL without duplicating callbacks. */
+export function postgres(
+  options: Omit<PostgresAttentionEngineOptions, "callbacks">,
+): AmbientApplicationBackend<PostgresAmbientBinding> {
+  return Object.freeze({
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
+    bind(callbacks: AttentionCallbacks) {
+      return Object.freeze({
+        engine: new PostgresAttentionEngine({ ...options, callbacks }),
+      });
+    },
+  });
 }
 
 interface Limits {

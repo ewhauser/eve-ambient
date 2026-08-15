@@ -1,6 +1,6 @@
 import {
-  defineChannelCanonicalization,
-  type CanonicalChannelEvent,
+  defineChannel,
+  type ChannelEvent,
 } from "@ewhauser/eve-ambient";
 import { z } from "zod";
 
@@ -19,25 +19,11 @@ export const pullRequestInputSchema = z.object({
 });
 
 export type PullRequestInput = z.infer<typeof pullRequestInputSchema>;
-export type PullRequestEvent = CanonicalChannelEvent<
-  "github.pull-request.changed",
-  {
-    readonly repository: string;
-    readonly number: number;
-    readonly title: string;
-    readonly state: "open" | "closed";
-    readonly mergeState: "clean" | "conflicting" | "unknown";
-    readonly reviewDecision: "approved" | "changes-requested" | "review-required";
-    readonly failingChecks: readonly string[];
-    readonly updatedAt: string;
-  },
-  { readonly address: string }
->;
 
-export const githubChannel = defineChannelCanonicalization({
+export const githubChannel = defineChannel({
   version: 1,
-  canonicalize(raw: PullRequestInput): PullRequestEvent {
-    const input = pullRequestInputSchema.parse(raw);
+  input: pullRequestInputSchema,
+  map(input) {
     return {
       id: input.eventId,
       type: "github.pull-request.changed",
@@ -67,3 +53,5 @@ export const githubChannel = defineChannelCanonicalization({
     };
   },
 });
+
+export type PullRequestEvent = ChannelEvent<typeof githubChannel>;

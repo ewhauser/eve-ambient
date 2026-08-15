@@ -59,42 +59,42 @@ portable storage interface.
 
 ```ts
 import {
-  createAmbientPublisher,
-  createAttentionCallbacks,
+  debounce,
+  defineAmbientApplication,
   defineAmbientRule,
-  defineChannelCanonicalization,
+  wake,
 } from "@ewhauser/eve-ambient";
-import { PostgresAttentionEngine } from "@ewhauser/eve-ambient/postgres";
-
-const channel = defineChannelCanonicalization({
-  version: 1,
-  canonicalize: normalizeProviderEvent,
-});
+import { postgres } from "@ewhauser/eve-ambient/postgres";
+import { createEveAttentionRoute } from "@ewhauser/eve-ambient-eve";
 
 const rule = defineAmbientRule({
   id: "blocked-pull-request",
   version: "v1",
-  mode: "active",
-  policy: { buffer: { mode: "immediate" } },
-  matches: event => event.type === "pull-request.changed",
+  channel,
+  policy: debounce({ quiet: "1m", maxWait: "5m", cooldown: "10m" }),
   correlationKey: event => event.data.pullRequest,
-  orderKey: event => event.occurredAt ?? event.id,
-  prepare: decideWhetherToWake,
+  decide: ({ latest }) => wake({
+    target: latest.replyTarget.address,
+    instruction: "Help unblock this pull request.",
+    evidence: latest.data,
+  }),
 });
 
-const callbacks = createAttentionCallbacks({ rules: [rule], routes: [eve] });
-const engine = new PostgresAttentionEngine({ pool, callbacks });
-await engine.initialize();
-
-const ambient = createAmbientPublisher({
+const ambient = defineAmbientApplication({
   applicationId: "engineering-agent",
-  engine,
   rules: [rule],
-});
+  routes: [createEveAttentionRoute({ from, auth })],
+}).with(postgres({ pool, engineId: "engineering-agent" }));
 
+await ambient.engine.initialize();
 await ambient.publish(channel, providerEvent);
-await engine.runOnce();
+await ambient.engine.runOnce();
 ```
+
+Rules and routes are defined once. Bind that same application to `memory()` in
+tests, `postgres()` in a database deployment, or `celld()` in a celld
+deployment. The lower-level protocol and backend constructors remain available
+for custom integrations.
 
 The official Eve adapter maps `wakeKey` to Eve's durable admission key. It
 targets exactly `eve@0.38.1` and requires consumers to apply the carried patch

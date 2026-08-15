@@ -1,10 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  IdempotencyConflictError,
   AttentionCapacityError,
-  canonicalizeChannelDelivery,
   compileAcceptedFanout,
-  defineChannelCanonicalization,
   type AcceptedFanout,
   type AttentionCallbacks,
   type AttentionDeliveryReceipt,
@@ -14,7 +11,12 @@ import {
   type FullAttentionBranch,
   type PreparedAttentionOutcome,
   type PreparedAttentionWake,
-} from "../src/index.js";
+} from "../src/attention.js";
+import {
+  IdempotencyConflictError,
+  canonicalizeChannelDelivery,
+  defineChannelCanonicalization,
+} from "../src/idempotency.js";
 import {
   VirtualMonitorClock,
 } from "../src/testing.js";
@@ -508,6 +510,7 @@ export function defineAttentionEngineConformance(
         kind: "wake",
         decision: { answer: "changed" },
         routeId: "changed-route",
+        target: "changed-target",
         instruction: "changed instruction",
         evidence: { changed: true },
       };
@@ -516,6 +519,7 @@ export function defineAttentionEngineConformance(
 
       expect(callbacks.prepareCalls).toHaveLength(1);
       expect(callbacks.deliveryCalls).toHaveLength(2);
+      expect(callbacks.deliveryCalls[0]?.target).toBe("session:incident-42");
       expect(callbacks.deliveryCalls[1]).toEqual(callbacks.deliveryCalls[0]);
       expect(callbacks.deliveryInputsFrozen).toEqual([true, true]);
       expect(callbacks.effects.size).toBe(1);
@@ -706,6 +710,7 @@ class ControlledAttentionCallbacks implements AttentionCallbacks {
     kind: "wake",
     decision: { answer: "wake" },
     routeId: "eve-session",
+    target: "session:incident-42",
     instruction: "Investigate the event.",
     evidence: { summary: "complete evidence" },
   };

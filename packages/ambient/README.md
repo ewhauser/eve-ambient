@@ -13,57 +13,56 @@ There is no public storage, transaction, event lookup, history, or replay API.
 
 ## PostgreSQL
 
-Apply `migrations/001_attention_engine.sql`, then create and poll the engine:
+Apply `migrations/001_attention_engine.sql`, then bind and poll the application:
 
 ```ts
 import {
-  createAmbientPublisher,
-  createAttentionCallbacks,
+  defineAmbientApplication,
 } from "@ewhauser/eve-ambient";
-import { PostgresAttentionEngine } from "@ewhauser/eve-ambient/postgres";
+import { postgres } from "@ewhauser/eve-ambient/postgres";
 
-const callbacks = createAttentionCallbacks({ rules, routes });
-const engine = new PostgresAttentionEngine({
+const ambient = defineAmbientApplication({
+  applicationId: "engineering-agent",
+  rules,
+  routes,
+}).with(postgres({
   engineId: "engineering-agent",
   pool,
-  callbacks,
-});
+}));
 
-await engine.initialize();
-
-const ambient = createAmbientPublisher({
-  applicationId: "engineering-agent",
-  engine,
-  rules,
-});
-
+await ambient.engine.initialize();
 await ambient.publish(channel, providerEvent);
-await engine.runOnce();
+await ambient.engine.runOnce();
 ```
 
 ## celld
 
 ```ts
-import { CelldAttentionEngine } from "@ewhauser/eve-ambient/celld";
+import { celld } from "@ewhauser/eve-ambient/celld";
 
-const engine = new CelldAttentionEngine({ url, secret });
+const ambient = application.with(celld({ url, secret }));
+export const POST = ambient.fetch;
 ```
 
-Deploy the packaged `celld-worker/` directory and mount
-`createAttentionCallbackFetchHandler(callbacks, { secret })` at the configured
-prepare and deliver URLs. The celld engine has no PostgreSQL dependency.
+Run `eve-ambient init celld` to create the packaged worker configuration. Its
+single callback base URL reaches the application-owned `ambient.fetch`
+handler. The celld engine has no PostgreSQL dependency.
 
 ## Memory
 
 ```ts
-import { MemoryAttentionEngine } from "@ewhauser/eve-ambient/memory";
+import { memory } from "@ewhauser/eve-ambient/memory";
 
-const engine = new MemoryAttentionEngine({ callbacks, clock });
-await engine.runDue();
+const ambient = application.with(memory({ clock }));
+await ambient.engine.runDue();
 ```
 
 The memory implementation is the executable protocol reference used by the
 shared backend conformance suite.
+
+Most consumers should stay on the root application API. Backend-author wire
+types and compilers are also available from `@ewhauser/eve-ambient/protocol`;
+key derivation primitives are available from `@ewhauser/eve-ambient/idempotency`.
 
 For concepts, examples, deployment details, and the Eve patch requirement,
 see the [repository README](https://github.com/ewhauser/eve-ambient#readme).

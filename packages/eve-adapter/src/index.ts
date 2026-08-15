@@ -2,9 +2,9 @@ import type {
   AttentionRoute,
   DirectDispatchAdapter,
   DirectDispatchRequest,
-  JsonValue,
   PreparedAttentionWake,
-} from "@ewhauser/eve-ambient";
+} from "@ewhauser/eve-ambient/protocol";
+import type { JsonValue } from "@ewhauser/eve-ambient";
 import type { ChannelFrom, ChannelSendOptions } from "eve/channels";
 
 export const SUPPORTED_EVE_VERSION = "0.38.1" as const;
@@ -15,7 +15,8 @@ export type EveChannelAuth = ChannelSendOptions["auth"];
 export interface EveAttentionRouteOptions {
   readonly id?: string | undefined;
   readonly auth: EveChannelAuth | ((wake: PreparedAttentionWake) => EveChannelAuth);
-  readonly address: string | ((wake: PreparedAttentionWake) => string);
+  /** Defaults to the prepared wake's string target. */
+  readonly address?: string | ((wake: PreparedAttentionWake) => string) | undefined;
   readonly from: ChannelFrom;
   readonly renderMessage?: ((wake: PreparedAttentionWake) => string) | undefined;
 }
@@ -43,6 +44,7 @@ export function renderEveAttentionMessage(wake: PreparedAttentionWake): string {
     runKey: wake.runKey,
     batchKey: wake.batchKey,
     rootEventKeys: wake.rootEventKeys,
+    target: wake.target,
     task: {
       trust: "application",
       instruction: wake.instruction,
@@ -62,7 +64,12 @@ export function createEveAttentionRoute(
   return {
     id: options.id ?? "eve",
     async deliver(wake): Promise<JsonValue> {
-      const address = nonEmpty(resolve(options.address, wake), "Eve attention address");
+      const address = nonEmpty(
+        options.address === undefined
+          ? stringTarget(wake.target)
+          : resolve(options.address, wake),
+        "Eve attention address",
+      );
       const session = await options.from(address).send(
         (options.renderMessage ?? renderEveAttentionMessage)(wake),
         {
@@ -74,6 +81,13 @@ export function createEveAttentionRoute(
       return { address, sessionId: session.id, turnId: wake.wakeKey };
     },
   };
+}
+
+function stringTarget(target: JsonValue): string {
+  if (typeof target !== "string") {
+    throw new TypeError("Eve attention target must be a string unless address is configured");
+  }
+  return target;
 }
 
 export function renderEveDirectDispatchMessage(

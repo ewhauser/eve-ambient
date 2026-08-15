@@ -16,17 +16,17 @@ session admission honor the supplied idempotency key.
 import { createEveAttentionRoute } from "@ewhauser/eve-ambient-eve";
 
 const eveRoute = createEveAttentionRoute({
-  id: "eve",
   from: channelFrom,
-  address: wake => `agent:${wake.tenantId}`,
   auth: wake => authForTenant(wake.tenantId),
 });
 ```
 
-Use the route with `createAttentionCallbacks({ rules, routes: [eveRoute] })`.
-It serializes trusted instructions separately from untrusted evidence and maps
-the prepared wake's `wakeKey` directly to Eve's `idempotencyKey`. A retry of
-the same recorded wake therefore reaches the same durable Eve turn.
+By default, the route uses the rule's string `wake.target` as the Eve address.
+Set `address` only for custom routing. Use the route in
+`defineAmbientApplication({ rules, routes: [eveRoute] })`. It serializes
+trusted instructions separately from untrusted evidence and maps the prepared
+wake's `wakeKey` directly to Eve's `idempotencyKey`. A retry of the same
+recorded wake therefore reaches the same durable Eve turn.
 
 Customize `renderMessage` only when the replacement preserves the trust
 boundary and complete lineage needed by the receiving agent.

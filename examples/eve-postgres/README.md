@@ -5,8 +5,13 @@ running on the PostgreSQL `AttentionEngine`.
 
 1. Apply `packages/ambient/migrations/001_attention_engine.sql`.
 2. Build the application with `createEvePostgresApplication()`.
-3. Pass authenticated Slack deliveries to `publishSlackMessage()`.
-4. Poll `application.runOnce()` from one or more workers.
+3. Pass authenticated Slack deliveries to
+   `application.publish(slackChannel, delivery)`.
+4. Poll `application.engine.runOnce()` from one or more workers.
+
+Rules and routes live in `src/application.ts` and are registered exactly once.
+Production binds that definition with `postgres()`; the tests bind the same
+definition with `memory()`.
 
 PostgreSQL privately persists event coordinators, correlation workflows,
 prepared outcomes, retry leases, and idempotency receipts. The application has

@@ -27,14 +27,15 @@ const selectedSignals = defineChannelCanonicalization({
     return {
       id: record.sourceId,
       type: "selected-signal",
+      version: 1,
       source: {
         tenantId: record.tenantId,
-        provider: "signal-pipeline",
-        stream: record.topic,
+        channelId: "signal-pipeline",
+        installationId: record.topic,
       },
       occurredAt: record.occurredAt,
       actor: record.actor,
-      origin: { kind: "external" },
+      origin: { kind: "external", depth: 0 },
       data: record.signal,
     };
   },

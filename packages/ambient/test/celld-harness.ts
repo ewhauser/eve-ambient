@@ -202,8 +202,7 @@ export class FakeCelldFleet {
     const env: Record<string, unknown> = {
       ATTENTION_SECRET: this.#secret,
       CELLD_FLEET_URL: this.baseUrl,
-      ATTENTION_PREPARE_URL: "http://callbacks.test/ambient/prepare",
-      ATTENTION_DELIVER_URL: "http://callbacks.test/ambient/deliver",
+      ATTENTION_CALLBACK_URL: "http://callbacks.test/ambient",
       clock: this.#clock,
       onOutcome: (_name: string, outcome: string) => this.outcomes.push(outcome),
       ...Object.fromEntries(

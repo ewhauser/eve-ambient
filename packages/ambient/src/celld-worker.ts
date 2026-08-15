@@ -18,11 +18,14 @@ import {
   type EventCoordinatorState,
 } from "./coordinator.js";
 import {
+  deriveAttentionPartitionKey,
   deriveAttentionInstanceKey,
   hashIdempotencyInput,
   IdempotencyConflictError,
+  type AttentionInstanceKey,
+  type EventKey,
 } from "./idempotency.js";
-import { cellUrl, secretsMatch } from "./celld.js";
+import { secretsMatch } from "./celld.js";
 import {
   AttentionCallbackValidationError,
   appendAttentionBranch,
@@ -55,9 +58,11 @@ type Storage = {
   deleteAlarm(): Promise<void>;
 };
 
-type CellRecord =
-  | { readonly kind: "coordinator"; readonly coordinator: EventCoordinatorState }
-  | { readonly kind: "workflow"; readonly workflow: AttentionWorkflowState };
+interface CellRecord {
+  readonly kind: "partition";
+  coordinators: EventCoordinatorState[];
+  workflows: AttentionWorkflowState[];
+}
 
 interface Limits {
   readonly dedupeMs: number;
@@ -70,7 +75,7 @@ interface Limits {
   readonly maxResidentBytes: number;
 }
 
-/** One celld Durable Object class for event coordinators and correlation workflows. */
+/** One celld Durable Object per channel-defined custody partition. */
 export class AttentionCell {
   readonly state: any;
   readonly env: any;
@@ -105,7 +110,6 @@ export class AttentionCell {
     }
     try {
       if (action === "accept") return json(await this.#accept(body as AcceptedFanout));
-      if (action === "append") return json(await this.#append(body as FullAttentionBranch));
       return json({ error: "not found" }, 404);
     } catch (error) {
       return errorResponse(error);
@@ -114,85 +118,109 @@ export class AttentionCell {
 
   async #accept(input: AcceptedFanout): Promise<unknown> {
     const fanout = await validateAcceptedFanout(input);
-    const cellName = this.#cellName();
-    if (cellName !== fanout.eventKey) {
-      throw new TypeError("event coordinator address does not match eventKey");
+    const partitionCellKey = await deriveAttentionPartitionKey({
+      applicationId: fanout.applicationId,
+      tenantId: fanout.tenantId,
+      channelId: fanout.event.source.channelId,
+      installationId: fanout.event.source.installationId,
+      partitionKey: fanout.partitionKey,
+    });
+    if (this.#cellName() !== partitionCellKey) {
+      throw new TypeError("partition cell address does not match the accepted fan-out");
     }
     const now = this.#now();
     const limits = this.#limits();
-    let record = await this.#read();
-    if (record?.kind === "workflow") throw new TypeError("cell is already a correlation workflow");
-    if (record !== undefined && eventCoordinatorExpired(record.coordinator, now)) {
-      await this.#delete();
-      record = undefined;
-    }
-    let coordinator: EventCoordinatorState;
-    if (record === undefined) {
+    let record = (await this.#read()) ?? this.#emptyRecord();
+    this.#purgeRecord(record, now);
+    let coordinator = record.coordinators.find(
+      (candidate) => candidate.eventKey === fanout.eventKey,
+    );
+    if (coordinator === undefined) {
+      const candidate = structuredClone(record);
       coordinator = createEventCoordinator(fanout, {
         now,
         maxBranches: limits.maxBranches,
         maxFanoutBytes: limits.maxFanoutBytes,
       });
-      await this.#write({ kind: "coordinator", coordinator });
+      candidate.coordinators.push(coordinator);
+      this.#assertResidentCapacity(candidate, this.#recordEmpty(record) ? 413 : 429);
+      await this.#write(candidate);
+      await this.#armPartition(candidate);
+      record = candidate;
     } else {
-      coordinator = record.coordinator;
       validateEventCoordinatorRetry(coordinator, fanout);
     }
-    if (coordinator.receipt !== undefined) return coordinator.receipt;
-    for (const branch of pendingCoordinatorBranches(coordinator)) {
-      await this.#appendToCorrelationWorkflow(branch);
-      markCoordinatorBranchAccepted(coordinator, branch.branchKey);
-      await this.#write({ kind: "coordinator", coordinator });
+    if (coordinator.receipt !== undefined) {
+      await this.#armPartition(record);
+      return structuredClone(coordinator.receipt);
     }
-    const receipt = completeEventCoordinator(coordinator, {
+    for (const pending of pendingCoordinatorBranches(coordinator)) {
+      const branch = await validateFullAttentionBranch(pending);
+      await this.#branchAppendHook("beforeBranchAppend", branch);
+      const appended = structuredClone(record);
+      await this.#appendBranch(appended, branch, limits);
+      const appendedCoordinator = this.#coordinator(appended, fanout.eventKey);
+      if (appendedCoordinator === undefined) {
+        throw new Error("event coordinator disappeared during branch transfer");
+      }
+      markCoordinatorBranchAccepted(appendedCoordinator, branch.branchKey);
+      this.#assertResidentCapacity(appended, 429);
+      await this.#write(appended);
+      await this.#armPartition(appended);
+      record = appended;
+      coordinator = appendedCoordinator;
+
+      // A lost response here leaves branch custody and its coordinator marker
+      // in one atomic cell checkpoint. The provider retry resumes the remaining
+      // frozen branches without duplicating this member.
+      await this.#branchAppendHook("afterBranchAppend", branch);
+    }
+    const completed = structuredClone(record);
+    const completedCoordinator = this.#coordinator(completed, fanout.eventKey);
+    if (completedCoordinator === undefined) {
+      throw new Error("event coordinator disappeared before completion");
+    }
+    const receipt = completeEventCoordinator(completedCoordinator, {
       now: this.#now(),
       dedupeMs: limits.dedupeMs,
     });
-    await this.#write({ kind: "coordinator", coordinator });
-    await this.#setAlarm(Date.parse(receipt.dedupeExpiresAt));
+    await this.#write(completed);
+    await this.#armPartition(completed);
     return receipt;
   }
 
-  async #append(input: FullAttentionBranch): Promise<unknown> {
-    const branch = await validateFullAttentionBranch(input);
-    const instanceKey = await deriveAttentionInstanceKey({
+  async #appendBranch(
+    record: CellRecord,
+    branch: FullAttentionBranch,
+    limits: Limits,
+  ): Promise<void> {
+    const partitionCellKey = await deriveAttentionPartitionKey({
       applicationId: branch.applicationId,
       tenantId: branch.tenantId,
+      channelId: branch.event.source.channelId,
+      installationId: branch.event.source.installationId,
+      partitionKey: branch.partitionKey,
+    });
+    if (partitionCellKey !== this.#cellName()) {
+      throw new TypeError("branch partition does not match its custody cell");
+    }
+    const instanceKey = await deriveAttentionInstanceKey({
+      partitionCellKey,
       monitorId: branch.monitorId,
       definitionVersion: branch.definitionVersion,
       correlationKey: branch.correlationKey,
     });
-    if (this.#cellName() !== instanceKey) {
-      throw new TypeError("correlation workflow address does not match instanceKey");
-    }
-    const limits = this.#limits();
     const policyHash = await hashIdempotencyInput({ mode: branch.mode, policy: branch.policy });
-    const existing = await this.#read();
-    if (existing?.kind === "coordinator") throw new TypeError("cell is already an event coordinator");
-    const workflow =
-      existing?.workflow ?? createAttentionWorkflow({ instanceKey, branch, policyHash });
-    const outcome = appendAttentionBranch(workflow, branch, {
+    let workflow = this.#workflow(record, instanceKey);
+    if (workflow === undefined) {
+      workflow = createAttentionWorkflow({ instanceKey, branch, policyHash });
+      record.workflows.push(workflow);
+    }
+    appendAttentionBranch(workflow, branch, {
       now: this.#now(),
       dedupeMs: limits.dedupeMs,
       policyHash,
     });
-    if (attentionValueBytes(workflow) > limits.maxResidentBytes) {
-      throw new CelldResidentCapacityError(
-        existing === undefined
-          ? "attention branch can never fit in the configured cell capacity"
-          : "correlation workflow resident capacity is exhausted",
-        existing === undefined ? 413 : 429,
-      );
-    }
-    if (outcome === "appended" || existing === undefined) {
-      await this.#write({ kind: "workflow", workflow });
-      await this.#armWorkflow(workflow);
-    }
-    return {
-      branchKey: branch.branchKey,
-      inputHash: branch.inputHash,
-      acceptedAt: this.#now(),
-    };
   }
 
   async #handleAlarm(): Promise<void> {
@@ -204,44 +232,53 @@ export class AttentionCell {
         return undefined;
       }
       const now = this.#now();
-      if (record.kind === "coordinator") {
-        if (eventCoordinatorExpired(record.coordinator, now)) await this.#delete();
-        else if (record.coordinator.dedupeExpiresAt !== undefined) {
-          await this.#setAlarm(Date.parse(record.coordinator.dedupeExpiresAt));
+      this.#purgeRecord(record, now);
+      let active:
+        | {
+            readonly instanceKey: AttentionInstanceKey;
+            readonly claim: NonNullable<Awaited<ReturnType<typeof claimAttentionRun>>>;
+          }
+        | undefined;
+      for (const workflow of [...record.workflows].sort((left, right) =>
+        left.instanceKey.localeCompare(right.instanceKey),
+      )) {
+        const claim = await claimAttentionRun(workflow, {
+          now,
+          leaseMs: limits.claimLeaseMs,
+        });
+        if (claim !== undefined) {
+          active = {
+            instanceKey: workflow.instanceKey,
+            claim: structuredClone(claim),
+          };
+          break;
         }
-        return undefined;
       }
-      const workflow = record.workflow;
-      if (purgeAttentionWorkflow(workflow, now) === "empty") {
-        await this.#delete();
-        return undefined;
-      }
-      const active = await claimAttentionRun(workflow, {
-        now,
-        leaseMs: limits.claimLeaseMs,
-      });
-      await this.#write({ kind: "workflow", workflow });
-      await this.#armWorkflow(workflow);
-      return active === undefined ? undefined : structuredClone(active);
+      await this.#write(record);
+      await this.#armPartition(record);
+      return active;
     });
     if (claimed === undefined) return;
-    let failureStage = claimed.stage;
+    const claim = claimed.claim;
+    let failureStage = claim.stage;
     try {
-      if (claimed.stage === "preparing") {
+      if (claim.stage === "preparing") {
         const prepared = (await this.#callback(
           this.#callbackUrl("prepare"),
-          claimed.batch,
+          claim.batch,
         )) as PreparedAttentionOutcome;
         const transition = await this.#withLock(async () => {
-          const workflow = await this.#workflow();
-          if (!isCurrentAttentionClaim(workflow, claimed, "preparing")) return "stale";
+          const record = await this.#read();
+          if (record === undefined) return "stale";
+          const workflow = this.#workflow(record, claimed.instanceKey);
+          if (!isCurrentAttentionClaim(workflow, claim, "preparing")) return "stale";
           const result = await applyPreparedAttentionOutcome(workflow, prepared, {
             now: this.#now(),
             dedupeMs: limits.dedupeMs,
             maxPreparedWakeBytes: limits.maxPreparedWakeBytes,
           });
-          await this.#write({ kind: "workflow", workflow });
-          await this.#armWorkflow(workflow);
+          await this.#write(record);
+          await this.#armPartition(record);
           return result;
         });
         if (transition === "stale") return;
@@ -252,8 +289,11 @@ export class AttentionCell {
       }
       failureStage = "delivering";
       const wake = await this.#withLock(async () => {
-        const workflow = await this.#workflow();
-        if (!isCurrentAttentionClaim(workflow, claimed, "delivering")) return undefined;
+        const record = await this.#read();
+        const workflow = record === undefined
+          ? undefined
+          : this.#workflow(record, claimed.instanceKey);
+        if (!isCurrentAttentionClaim(workflow, claim, "delivering")) return undefined;
         if (workflow.active?.wake === undefined) throw new Error("delivery stage has no prepared wake");
         return structuredClone(workflow.active.wake);
       });
@@ -263,22 +303,26 @@ export class AttentionCell {
         wake,
       )) as AttentionDeliveryReceipt;
       const committed = await this.#withLock(async () => {
-        const workflow = await this.#workflow();
-        if (!isCurrentAttentionClaim(workflow, claimed, "delivering")) return false;
+        const record = await this.#read();
+        if (record === undefined) return false;
+        const workflow = this.#workflow(record, claimed.instanceKey);
+        if (!isCurrentAttentionClaim(workflow, claim, "delivering")) return false;
         applyAttentionDeliveryReceipt(workflow, receipt, {
           now: this.#now(),
           dedupeMs: limits.dedupeMs,
         });
-        await this.#write({ kind: "workflow", workflow });
-        await this.#armWorkflow(workflow);
+        await this.#write(record);
+        await this.#armPartition(record);
         return true;
       });
       if (committed) this.#emitOutcome("delivered");
     } catch (error) {
       if (error instanceof DurableCheckpointError) throw error.cause;
       const outcome = await this.#withLock(async () => {
-        const workflow = await this.#workflow();
-        if (!isCurrentAttentionClaim(workflow, claimed, failureStage)) return "none";
+        const record = await this.#read();
+        if (record === undefined) return "none";
+        const workflow = this.#workflow(record, claimed.instanceKey);
+        if (!isCurrentAttentionClaim(workflow, claim, failureStage)) return "none";
         const result = failAttentionRun(workflow, error, {
           now: this.#now(),
           dedupeMs: limits.dedupeMs,
@@ -286,42 +330,26 @@ export class AttentionCell {
           maxAttempts: limits.maxAttempts,
           terminalError: isTerminalError,
         });
-        await this.#write({ kind: "workflow", workflow });
-        await this.#armWorkflow(workflow);
+        await this.#write(record);
+        await this.#armPartition(record);
         return result;
       });
       if (outcome !== "none") this.#emitOutcome(outcome);
     }
   }
 
-  async #workflow(): Promise<AttentionWorkflowState | undefined> {
-    const record = await this.#read();
-    return record?.kind === "workflow" ? record.workflow : undefined;
+  #coordinator(
+    record: CellRecord,
+    eventKey: EventKey,
+  ): EventCoordinatorState | undefined {
+    return record.coordinators.find((candidate) => candidate.eventKey === eventKey);
   }
 
-  async #appendToCorrelationWorkflow(branch: FullAttentionBranch): Promise<void> {
-    const instanceKey = await deriveAttentionInstanceKey({
-      applicationId: branch.applicationId,
-      tenantId: branch.tenantId,
-      monitorId: branch.monitorId,
-      definitionVersion: branch.definitionVersion,
-      correlationKey: branch.correlationKey,
-    });
-    const response = await this.#fetch(cellUrl(this.#requiredUrl("CELLD_FLEET_URL"), instanceKey, "append"), {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${this.#secret()}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(branch),
-    });
-    if (!response.ok) {
-      const detail = await safeJson(response);
-      throw new CelldHandoffError(
-        typeof detail.error === "string" ? detail.error : `branch append returned ${response.status}`,
-        response.status,
-      );
-    }
+  #workflow(
+    record: CellRecord,
+    instanceKey: AttentionInstanceKey,
+  ): AttentionWorkflowState | undefined {
+    return record.workflows.find((candidate) => candidate.instanceKey === instanceKey);
   }
 
   async #callback(url: string, body: unknown): Promise<unknown> {
@@ -345,31 +373,100 @@ export class AttentionCell {
   async #diagnostics(): Promise<unknown> {
     const record = await this.#read();
     if (record === undefined) return { kind: "empty" };
-    if (record.kind === "coordinator") {
-      return {
-        kind: "coordinator",
-        pendingFanout: record.coordinator.fanout !== undefined,
-        acceptedBranches: record.coordinator.acceptedBranchKeys.length,
-        complete: record.coordinator.receipt !== undefined,
-      };
-    }
+    const detached = structuredClone(record);
+    this.#purgeRecord(detached, this.#now());
     return {
-      kind: "workflow",
-      bufferedBranches:
-        (record.workflow.open?.branches.length ?? 0) +
-        record.workflow.sealed.reduce((sum, batch) => sum + batch.branches.length, 0),
-      activeBatchBranches: record.workflow.active?.batch.branches.length ?? 0,
-      preparedWake: record.workflow.active?.wake !== undefined,
-      branchReceipts: record.workflow.branchLedger.length,
-      deliveryReceipts: record.workflow.deliveryReceipts.length,
-      terminalFailures: record.workflow.terminalFailures.length,
+      kind: "partition",
+      eventCoordinators: detached.coordinators.length,
+      pendingFanoutPayloads: detached.coordinators.filter(
+        (coordinator) => coordinator.pendingFanout !== undefined,
+      ).length,
+      acceptanceReceipts: detached.coordinators.filter(
+        (coordinator) => coordinator.receipt !== undefined,
+      ).length,
+      correlationWorkflows: detached.workflows.length,
+      bufferedBranches: detached.workflows.reduce(
+        (count, workflow) => count +
+          (workflow.open?.branches.length ?? 0) +
+          workflow.sealed.reduce((sum, batch) => sum + batch.branches.length, 0),
+        0,
+      ),
+      activeBatchBranches: detached.workflows.reduce(
+        (count, workflow) => count + (workflow.active?.batch.branches.length ?? 0),
+        0,
+      ),
+      preparedWakes: detached.workflows.filter(
+        (workflow) => workflow.active?.wake !== undefined,
+      ).length,
+      branchReceipts: detached.workflows.reduce(
+        (count, workflow) => count + workflow.branchLedger.length,
+        0,
+      ),
+      deliveryReceipts: detached.workflows.reduce(
+        (count, workflow) => count + workflow.deliveryReceipts.length,
+        0,
+      ),
+      terminalFailures: detached.workflows.reduce(
+        (count, workflow) => count + workflow.terminalFailures.length,
+        0,
+      ),
     };
   }
 
-  async #armWorkflow(workflow: AttentionWorkflowState): Promise<void> {
-    const due = nextAttentionDueAt(workflow);
-    if (due === undefined) await this.#deleteAlarm();
-    else await this.#setAlarm(Math.max(Date.parse(due), Date.parse(this.#now())));
+  #emptyRecord(): CellRecord {
+    return { kind: "partition", coordinators: [], workflows: [] };
+  }
+
+  #recordEmpty(record: CellRecord): boolean {
+    return record.coordinators.length === 0 && record.workflows.length === 0;
+  }
+
+  #purgeRecord(record: CellRecord, now: string): void {
+    record.coordinators = record.coordinators.filter(
+      (coordinator) => !eventCoordinatorExpired(coordinator, now),
+    );
+    record.workflows = record.workflows.filter(
+      (workflow) => purgeAttentionWorkflow(workflow, now) !== "empty",
+    );
+  }
+
+  #assertResidentCapacity(record: CellRecord, status: 413 | 429): void {
+    if (attentionValueBytes(record) <= this.#limits().maxResidentBytes) return;
+    throw new CelldResidentCapacityError(
+      status === 413
+        ? "accepted fan-out can never fit in the configured partition capacity"
+        : "partition resident capacity is exhausted",
+      status,
+    );
+  }
+
+  async #armPartition(record: CellRecord): Promise<void> {
+    if (this.#recordEmpty(record)) {
+      await this.#delete();
+      return;
+    }
+    const due = [
+      ...record.coordinators.flatMap((coordinator) =>
+        coordinator.dedupeExpiresAt === undefined ? [] : [coordinator.dedupeExpiresAt],
+      ),
+      ...record.workflows.flatMap((workflow) => {
+        const workflowDue = nextAttentionDueAt(workflow);
+        return workflowDue === undefined ? [] : [workflowDue];
+      }),
+    ].map(Date.parse);
+    if (due.length === 0) {
+      await this.#deleteAlarm();
+      return;
+    }
+    await this.#setAlarm(Math.max(Math.min(...due), Date.parse(this.#now())));
+  }
+
+  async #branchAppendHook(
+    name: "beforeBranchAppend" | "afterBranchAppend",
+    branch: FullAttentionBranch,
+  ): Promise<void> {
+    const hook = this.env?.[name];
+    if (typeof hook === "function") await hook(structuredClone(branch));
   }
 
   get #storage(): Storage {
@@ -509,15 +606,6 @@ class CelldResidentCapacityError extends Error {
   }
 }
 
-class CelldHandoffError extends Error {
-  readonly status: number;
-
-  constructor(message: string, status: number) {
-    super(message);
-    this.status = status;
-  }
-}
-
 function isTerminalError(error: unknown): boolean {
   return (
     error instanceof AttentionCapacityError ||
@@ -540,7 +628,7 @@ function errorResponse(error: unknown): Response {
     );
   }
   if (error instanceof AttentionCapacityError) return json({ error: error.message }, 413);
-  if (error instanceof CelldResidentCapacityError || error instanceof CelldHandoffError) {
+  if (error instanceof CelldResidentCapacityError) {
     return json({ error: error.message }, error.status);
   }
   if (error instanceof TypeError) return json({ error: error.message }, 400);
@@ -599,7 +687,7 @@ export default {
     if (url.pathname === "/health") return json({ ok: true, app: "eve-ambient-attention" });
     const parts = url.pathname.split("/").filter(Boolean);
     if (parts[0] !== "cells" || parts.length !== 3) {
-      return json({ error: "use /cells/<key>/<accept|append|diagnostics|whoami>" }, 404);
+      return json({ error: "use /cells/<partition-key>/<accept|diagnostics|whoami>" }, 404);
     }
     let secret: string;
     try {

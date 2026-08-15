@@ -56,7 +56,9 @@ Subscribe the GitHub App to `pull_request` and `check_suite` events. Mount
 `application.fetch` for celld's `/ambient/prepare` and `/ambient/deliver`
 callbacks; Eve mounts the returned GitHub channel at `/eve/v1/github`.
 
-Event-coordinator cells freeze fan-out. Correlation cells temporarily hold the
-complete PR/check payloads, drive alarms, checkpoint the prepared outcome, and
-delete terminal payloads. There is no PostgreSQL pool, event repository,
-payload lookup, history, or replay API.
+The Eve adapter assigns one stable custody partition per pull request. Its
+partition cell deduplicates individual deliveries, freezes fan-out, temporarily
+holds complete PR/check payloads, drives rule alarms, checkpoints prepared
+outcomes, and deletes terminal payloads. Ten webhook deliveries for the two
+synthetic PRs therefore create two cells, not ten. There is no PostgreSQL pool,
+event repository, payload lookup, history, or replay API.

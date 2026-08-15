@@ -127,10 +127,10 @@ export class LocalCelldFleet {
       }
       const diagnostic = (await response.json()) as Record<string, unknown>;
       const hasPayload =
-        diagnostic.pendingFanout === true ||
+        positiveNumber(diagnostic.pendingFanoutPayloads) ||
         positiveNumber(diagnostic.bufferedBranches) ||
         positiveNumber(diagnostic.activeBatchBranches) ||
-        diagnostic.preparedWake === true;
+        positiveNumber(diagnostic.preparedWakes);
       if (hasPayload) payloadBearingCells += 1;
       else receiptOnlyCells += 1;
     }
@@ -157,7 +157,6 @@ export class LocalCelldFleet {
     const cell = new AttentionCell(state, {
       ATTENTION_SECRET: this.#secret,
       ATTENTION_CALLBACK_URL: this.#callbackBaseUrl,
-      CELLD_FLEET_URL: this.url,
       clock: this.#clock,
       onOutcome: (_cellName: string, outcome: string) => {
         this.outcomes.push(outcome);

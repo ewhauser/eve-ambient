@@ -29,7 +29,7 @@ const wake = {
   wakeKey: `eve:wake:v2:${"1".repeat(64)}`,
   runKey: `eve:run:v2:${"2".repeat(64)}`,
   batchKey: `eve:batch:v2:${"3".repeat(64)}`,
-  instanceKey: `eve:instance:v2:${"4".repeat(64)}`,
+  instanceKey: `eve:instance:v3:${"4".repeat(64)}`,
   applicationId: "engineering-agent",
   tenantId: "tenant-1",
   monitorId: "incident",

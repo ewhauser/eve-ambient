@@ -7,6 +7,7 @@ import {
   deriveAttentionBatchKey,
   deriveAttentionBranchKey,
   deriveAttentionInstanceKey,
+  deriveAttentionPartitionKey,
   deriveAttentionRunKey,
   deriveAttentionWakeKey,
   deriveFanoutManifestHash,
@@ -18,6 +19,7 @@ import {
 
 const channel = defineChannelCanonicalization({
   version: 1,
+  partitionKey: () => "conversation-1",
   canonicalize: (raw: { readonly id: string; readonly text: string }) => ({
     id: raw.id,
     type: "message.changed",
@@ -70,7 +72,23 @@ describe("attention idempotency lineage", () => {
     ).toThrow(IdempotencyConflictError);
   });
 
-  it("derives only the v2 branch through wake chain", async () => {
+  it("binds channel partition placement into the source input hash", async () => {
+    const first = await canonicalizeChannelDelivery(
+      channel,
+      { id: "event-1", text: "hello" },
+      { applicationId: "app" },
+    );
+    const moved = await canonicalizeChannelDelivery(
+      { ...channel, partitionKey: () => "conversation-2" },
+      { id: "event-1", text: "hello" },
+      { applicationId: "app" },
+    );
+
+    expect(moved.idempotency.key).toBe(first.idempotency.key);
+    expect(moved.idempotency.inputHash).not.toBe(first.idempotency.inputHash);
+  });
+
+  it("derives the partition and current branch-through-wake lineage", async () => {
     const source = await canonicalizeChannelDelivery(channel, { id: "event-1", text: "hello" }, {
       applicationId: "app",
     });
@@ -84,9 +102,15 @@ describe("attention idempotency lineage", () => {
       definitionVersion: "v1",
       correlationKey: "incident-42",
     });
-    const instanceKey = await deriveAttentionInstanceKey({
+    const partitionCellKey = await deriveAttentionPartitionKey({
       applicationId: "app",
       tenantId: "tenant-1",
+      channelId: "slack",
+      installationId: "installation-1",
+      partitionKey: source.payload.partitionKey,
+    });
+    const instanceKey = await deriveAttentionInstanceKey({
+      partitionCellKey,
       monitorId: "incident",
       definitionVersion: "v1",
       correlationKey: "incident-42",
@@ -96,7 +120,8 @@ describe("attention idempotency lineage", () => {
     const wakeKey = await deriveAttentionWakeKey({ runKey, routeId: "eve" });
 
     expect(branchKey).toMatch(/^eve:branch:v2:/);
-    expect(instanceKey).toMatch(/^eve:instance:v2:/);
+    expect(partitionCellKey).toMatch(/^eve:partition:v1:/);
+    expect(instanceKey).toMatch(/^eve:instance:v3:/);
     expect(batchKey).toMatch(/^eve:batch:v2:/);
     expect(runKey).toMatch(/^eve:run:v2:/);
     expect(wakeKey).toMatch(/^eve:wake:v2:/);
@@ -104,9 +129,15 @@ describe("attention idempotency lineage", () => {
   });
 
   it("freezes canonical membership and rejects conflicting duplicate members", async () => {
-    const instanceKey = await deriveAttentionInstanceKey({
+    const partitionCellKey = await deriveAttentionPartitionKey({
       applicationId: "app",
       tenantId: "tenant-1",
+      channelId: "slack",
+      installationId: "installation-1",
+      partitionKey: "conversation-1",
+    });
+    const instanceKey = await deriveAttentionInstanceKey({
+      partitionCellKey,
       monitorId: "incident",
       definitionVersion: "v1",
       correlationKey: "incident-42",

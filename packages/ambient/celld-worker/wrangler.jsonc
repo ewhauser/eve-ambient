@@ -7,7 +7,6 @@
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["AttentionCell"] }],
   "vars": {
-    "CELLD_FLEET_URL": "https://attention.example.internal",
     "ATTENTION_CALLBACK_URL": "https://app.example.internal/ambient"
   }
 }

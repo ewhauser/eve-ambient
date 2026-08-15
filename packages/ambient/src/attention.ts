@@ -112,6 +112,7 @@ export interface FullAttentionBranch<
 > {
   readonly applicationId: string;
   readonly tenantId: string;
+  readonly partitionKey: string;
   readonly eventKey: EventKey;
   readonly occurrenceKey: OccurrenceKey;
   readonly sourceInputHash: InputHash;
@@ -134,6 +135,7 @@ export interface AcceptedFanout<
 > {
   readonly applicationId: string;
   readonly tenantId: string;
+  readonly partitionKey: string;
   readonly eventKey: EventKey;
   readonly occurrenceKey: OccurrenceKey;
   readonly inputHash: InputHash;
@@ -269,6 +271,7 @@ export async function compileAcceptedFanout<
   const applicationId = input.source.payload.applicationId;
   const event = cloneCanonical(input.source.payload.event, "canonical source event");
   const tenantId = event.source.tenantId;
+  const partitionKey = input.source.payload.partitionKey;
   const eventKey = input.source.idempotency.key;
   const sourceInputHash = input.source.idempotency.inputHash;
   const occurrenceKey = await deriveOccurrenceKey({ eventKey, inputHash: sourceInputHash });
@@ -299,6 +302,7 @@ export async function compileAcceptedFanout<
       const logicalInput = branchLogicalInput({
         applicationId,
         tenantId,
+        partitionKey,
         eventKey,
         occurrenceKey,
         sourceInputHash,
@@ -333,6 +337,7 @@ export async function compileAcceptedFanout<
   return deepFreeze({
     applicationId,
     tenantId,
+    partitionKey,
     eventKey,
     occurrenceKey,
     inputHash: sourceInputHash,
@@ -360,6 +365,7 @@ export async function validateAcceptedFanout(
       "inputHash",
       "manifestHash",
       "occurrenceKey",
+      "partitionKey",
       "tenantId",
     ],
     "accepted fan-out",
@@ -371,6 +377,7 @@ export async function validateAcceptedFanout(
     {
       version: detached.canonicalizationVersion,
       canonicalize: () => detached.event,
+      partitionKey: () => detached.partitionKey,
     },
     null,
     { applicationId: detached.applicationId },
@@ -414,6 +421,7 @@ export async function validateAcceptedFanout(
         "monitorId",
         "occurrenceKey",
         "orderKey",
+        "partitionKey",
         "phase",
         "policy",
         "sourceInputHash",
@@ -430,6 +438,7 @@ export async function validateAcceptedFanout(
     if (
       branch.applicationId !== detached.applicationId ||
       branch.tenantId !== detached.tenantId ||
+      branch.partitionKey !== detached.partitionKey ||
       branch.eventKey !== detached.eventKey ||
       branch.occurrenceKey !== detached.occurrenceKey ||
       branch.sourceInputHash !== detached.inputHash ||
@@ -491,6 +500,7 @@ export async function validateFullAttentionBranch(
       "monitorId",
       "occurrenceKey",
       "orderKey",
+      "partitionKey",
       "phase",
       "policy",
       "sourceInputHash",
@@ -500,7 +510,11 @@ export async function validateFullAttentionBranch(
   );
   validateBranchPlan(branch);
   const verifiedSource = await canonicalizeChannelDelivery(
-    { version: branch.canonicalizationVersion, canonicalize: () => branch.event },
+    {
+      version: branch.canonicalizationVersion,
+      canonicalize: () => branch.event,
+      partitionKey: () => branch.partitionKey,
+    },
     null,
     { applicationId: branch.applicationId },
   );
@@ -681,6 +695,7 @@ function validateBranchPlan(plan: AttentionBranchPlan): void {
 function branchLogicalInput<TEvent extends CanonicalChannelEvent>(input: {
   readonly applicationId: string;
   readonly tenantId: string;
+  readonly partitionKey: string;
   readonly eventKey: EventKey;
   readonly occurrenceKey: OccurrenceKey;
   readonly sourceInputHash: InputHash;
@@ -697,6 +712,7 @@ function branchLogicalInput<TEvent extends CanonicalChannelEvent>(input: {
   return {
     applicationId: input.applicationId,
     tenantId: input.tenantId,
+    partitionKey: input.partitionKey,
     eventKey: input.eventKey,
     occurrenceKey: input.occurrenceKey,
     sourceInputHash: input.sourceInputHash,

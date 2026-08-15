@@ -15,10 +15,13 @@ export const slackChannel = defineChannel({
   version: 1,
   input: slackDeliverySchema,
   map: normalizeSlackDelivery,
+  partitionKey: event => event.data.threadTs,
 });
 ```
 
-Normalization must be deterministic. The event includes application-relevant
+Normalization and `partitionKey` must be deterministic. The partition names
+the smallest bounded domain entity across which rules may correlate, such as a
+Slack thread or GitHub pull request. The event includes application-relevant
 data plus source tenant, provider, stream, delivery identity, actor, origin,
 and occurrence time where available. Eve Ambient canonicalizes the result,
 derives `eventKey`, and hashes the complete source input.
@@ -42,7 +45,6 @@ export const incidentRule = defineAmbientRule({
     maxBytes: 512_000,
   }),
   matches: event => event.type === "incident.changed",
-  correlationKey: event => event.data.incidentId,
   decide({ events, latest }) {
     return shouldEscalate(events)
       ? wake({
@@ -56,8 +58,8 @@ export const incidentRule = defineAmbientRule({
 });
 ```
 
-`matches`, `correlationKey`, and the optional `orderKey` run before durable
-admission and must be deterministic and side-effect free. `decide` runs later
+`matches`, the optional `correlationKey`, and the optional `orderKey` run before
+durable admission and must be deterministic and side-effect free. `decide` runs later
 on a convenient view of the frozen, complete batch. It may be repeated if its
 response is lost before the backend records it, so it must not perform the
 final action.
@@ -79,6 +81,11 @@ event-count, or byte limit closes the batch. Canonical ordering uses the rule's
 Policies are pinned to a correlation workflow. Reusing the same rule identity
 and correlation key with different policy bytes is an idempotency conflict,
 not a live mutation.
+
+By default, each rule has one workflow per channel partition. Set
+`correlationKey` only when a rule needs multiple independent workflows inside
+that partition. Correlation cannot cross partitions; if that is required,
+enlarge the channel partition deliberately.
 
 ## Publisher
 

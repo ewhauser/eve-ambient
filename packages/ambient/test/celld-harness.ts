@@ -113,17 +113,10 @@ export class FakeCelldFleet {
     let body: unknown = null;
     if (request.method === "POST") body = await request.clone().json();
     this.requests.push({ name, action, body });
-    if (action === "append") {
-      await this.#faults.beforeBranchAppend?.(structuredClone(body) as FullAttentionBranch);
-    }
     const placement = this.#place(name);
     const forwarded = new Request(`${this.baseUrl}/${action}`, request);
     forwarded.headers.set("x-cell-name", name);
-    const response = await placement.cell.fetch(forwarded);
-    if (action === "append") {
-      await this.#faults.afterBranchAppend?.(structuredClone(body) as FullAttentionBranch);
-    }
-    return response;
+    return placement.cell.fetch(forwarded);
   };
 
   async fireDueAlarms(): Promise<readonly { readonly name: string; readonly error: unknown }[]> {
@@ -173,13 +166,15 @@ export class FakeCelldFleet {
       const raw = placement.state.map.get("record");
       if (raw === undefined) continue;
       const record = JSON.parse(String(raw)) as any;
-      if (record.kind === "coordinator") {
-        if (eventCoordinatorExpired(record.coordinator, this.#clock.now().toISOString())) continue;
+      if (record.kind !== "partition") continue;
+      for (const coordinator of record.coordinators) {
+        if (eventCoordinatorExpired(coordinator, this.#clock.now().toISOString())) continue;
         result.eventCoordinators += 1;
-        if (record.coordinator.fanout !== undefined) result.pendingFanoutPayloads += 1;
-        if (record.coordinator.receipt !== undefined) result.acceptanceReceipts += 1;
-      } else if (record.kind === "workflow") {
-        const workflow = structuredClone(record.workflow);
+        if (coordinator.pendingFanout !== undefined) result.pendingFanoutPayloads += 1;
+        if (coordinator.receipt !== undefined) result.acceptanceReceipts += 1;
+      }
+      for (const source of record.workflows) {
+        const workflow = structuredClone(source);
         if (purgeAttentionWorkflow(workflow, this.#clock.now().toISOString()) === "empty") continue;
         result.correlationWorkflows += 1;
         result.bufferedBranchPayloads +=
@@ -201,9 +196,10 @@ export class FakeCelldFleet {
     const state = createFakeDurableObjectState(name);
     const env: Record<string, unknown> = {
       ATTENTION_SECRET: this.#secret,
-      CELLD_FLEET_URL: this.baseUrl,
       ATTENTION_CALLBACK_URL: "http://callbacks.test/ambient",
       clock: this.#clock,
+      beforeBranchAppend: this.#faults.beforeBranchAppend,
+      afterBranchAppend: this.#faults.afterBranchAppend,
       onOutcome: (_name: string, outcome: string) => this.outcomes.push(outcome),
       ...Object.fromEntries(
         Object.entries(this.#limits).map(([key, value]) => [key, String(value)]),

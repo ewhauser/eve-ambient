@@ -83,7 +83,7 @@ export async function runDemo(
     const alarmFailure = alarms.find((alarm) => alarm.error !== undefined);
     if (alarmFailure?.error !== undefined) throw alarmFailure.error;
 
-    assert.equal(fleet.cellCount, 11, "the duplicate delivery must reuse its event cell");
+    assert.equal(fleet.cellCount, 2, "one stable partition cell must own each pull request");
     assert.equal(deliveries.length, 1, "the demo must produce exactly one Eve turn");
     assert.deepEqual(fleet.outcomes.slice().sort(), ["delivered", "ignored"]);
     const failures = deliveryFailures(deliveries[0]!);
@@ -106,7 +106,7 @@ export async function runDemo(
       `[celld] terminal storage ${diagnostics.payloadBearingCells} payload-bearing cells; ` +
       `${diagnostics.receiptOnlyCells} receipt-only cells`,
     );
-    log("\n[done] 10 webhook deliveries -> 9 logical events -> 2 PR batches -> 1 Eve turn");
+    log("\n[done] 10 webhook deliveries -> 9 logical events -> 2 PR cells -> 1 Eve turn");
     log("[done] duplicate delivery was deduplicated; recovered and closed failures were suppressed");
     return {
       acceptedWebhooks: events.length,

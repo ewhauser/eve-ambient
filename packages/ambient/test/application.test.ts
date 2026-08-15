@@ -21,7 +21,6 @@ describe("consumer application API", () => {
       version: "v1",
       channel,
       policy: immediate(),
-      correlationKey: (event) => event.data.thread,
       decide: ({ latest }) =>
         wake({
           target: latest.replyTarget.address,
@@ -34,7 +33,6 @@ describe("consumer application API", () => {
       version: "v1",
       channel: metrics,
       policy: immediate(),
-      correlationKey: (event) => event.data.repository,
       decide: ({ latest }) =>
         wake({
           target: `repository:${latest.data.repository}`,
@@ -72,6 +70,7 @@ describe("consumer application API", () => {
       "thread:42",
     ]);
     expect(deliveries.every((delivery) => delivery.routeId === "custom-delivery")).toBe(true);
+    expect(deliveries.every((delivery) => delivery.correlationKey === "default")).toBe(true);
   });
 
   it("parses readable duration policies with bounded defaults", () => {
@@ -116,6 +115,7 @@ describe("consumer application API", () => {
         },
         origin: { kind: "external" as const, depth: 0 },
       }),
+      partitionKey: (event) => event.id,
     });
 
     await expect(
@@ -152,6 +152,7 @@ function testChannel(channelId: string) {
         origin: { kind: "external" as const, depth: 0 },
       };
     },
+    partitionKey: (event) => event.data.thread,
   });
 }
 
@@ -186,5 +187,6 @@ function metricChannel() {
         origin: { kind: "external" as const, depth: 0 },
       };
     },
+    partitionKey: (event) => event.data.repository,
   });
 }

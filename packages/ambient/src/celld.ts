@@ -12,7 +12,10 @@ import type {
   AmbientApplicationBackend,
   AmbientBackendBinding,
 } from "./application.js";
-import { IdempotencyConflictError } from "./idempotency.js";
+import {
+  deriveAttentionPartitionKey,
+  IdempotencyConflictError,
+} from "./idempotency.js";
 
 export interface CelldAttentionEngineOptions {
   readonly url: string;
@@ -63,8 +66,15 @@ export class CelldAttentionEngine implements AttentionEngine {
 
   async accept(input: AcceptedFanout): Promise<AttentionAcceptanceReceipt> {
     const fanout = await validateAcceptedFanout(input);
+    const partitionKey = await deriveAttentionPartitionKey({
+      applicationId: fanout.applicationId,
+      tenantId: fanout.tenantId,
+      channelId: fanout.event.source.channelId,
+      installationId: fanout.event.source.installationId,
+      partitionKey: fanout.partitionKey,
+    });
     const response = await this.#fetch(
-      cellUrl(this.#url, fanout.eventKey, "accept"),
+      cellUrl(this.#url, partitionKey, "accept"),
       {
         method: "POST",
         headers: {
@@ -108,7 +118,7 @@ export interface AttentionCallbackFetchHandlerOptions {
   readonly deliverPath?: string | undefined;
 }
 
-/** Authenticated by-value callback endpoint used by celld correlation cells. */
+/** Authenticated by-value callback endpoint used by celld partition cells. */
 export function createAttentionCallbackFetchHandler(
   callbacks: AttentionCallbacks,
   options: AttentionCallbackFetchHandlerOptions,

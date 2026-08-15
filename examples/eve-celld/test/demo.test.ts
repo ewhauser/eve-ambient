@@ -6,7 +6,7 @@ it("runs the Eve GitHub and celld console demo end to end", async () => {
   const result = await runDemo({ log: () => undefined });
 
   expect(result.acceptedWebhooks).toBe(10);
-  expect(result.celldCells).toBe(11);
+  expect(result.celldCells).toBe(2);
   expect(result.outcomes.slice().sort()).toEqual(["delivered", "ignored"]);
   expect(result.payloadBearingCells).toBe(0);
   expect(result.deliveries).toHaveLength(1);

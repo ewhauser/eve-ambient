@@ -23,8 +23,6 @@ export const pullRequestShepherdRule = defineAmbientRule({
     cooldown: "30m",
     maxEvents: 100,
   }),
-  correlationKey: (event) =>
-    `${event.data.repository.id}#${event.data.pullRequestNumber}`,
   decide({ events, eventKeys }) {
     const suites = new Map<string, EveGitHubCheckSuiteActivityEvent>();
     let closed = false;

@@ -93,8 +93,10 @@ await ambient.engine.runOnce();
 
 Rules and routes are defined once. Bind that same application to `memory()` in
 tests, `postgres()` in a database deployment, or `celld()` in a celld
-deployment. The lower-level protocol and backend constructors remain available
-for custom integrations.
+deployment. Each rule retains the event type of its own channel, so one
+application can safely publish GitHub, Slack, scheduled, and other channel
+events without an application-wide event union. The lower-level protocol and
+backend constructors remain available for custom integrations.
 
 The official Eve adapter maps `wakeKey` to Eve's durable admission key. It
 targets exactly `eve@0.38.1` and requires consumers to apply the carried patch

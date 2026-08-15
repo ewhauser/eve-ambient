@@ -25,7 +25,8 @@ derives `eventKey`, and hashes the complete source input.
 
 ## Ambient rules
 
-An ambient rule is an immutable, version-addressed definition:
+An ambient rule is an immutable, version-addressed definition bound to one
+channel:
 
 ```ts
 import { debounce, defineAmbientRule, ignore, wake } from "@ewhauser/eve-ambient";
@@ -95,6 +96,13 @@ The publisher canonicalizes the event, evaluates all rules, freezes the
 complete fan-out, and calls `engine.accept()`. A successful receipt means every
 selected branch has reached durable backend custody. It does not mean a
 decision or delivery has already completed.
+
+An application may register rules from multiple channels with unrelated event
+types. Each `defineAmbientRule()` call preserves its channel's type; each
+`publish(channel, input)` call infers that channel independently. The
+application registry itself has no single event generic. Requiring every rule
+to name its channel is what makes that heterogeneous registry type-safe and
+prevents an event from being evaluated by a rule for a different shape.
 
 Conditional direct chat dispatch is deliberately separate. Configure the
 publisher's optional `direct` rule with an adapter that owns its own stable

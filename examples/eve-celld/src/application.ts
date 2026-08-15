@@ -5,7 +5,6 @@ import {
 } from "@ewhauser/eve-ambient-eve";
 import type { ChannelFrom } from "eve/channels";
 
-import type { PullRequestEvent } from "./channels/github.js";
 import { blockedPullRequestRule } from "./rules/blocked-pull-request.js";
 
 export function defineEngineeringApplication(options: {
@@ -15,7 +14,7 @@ export function defineEngineeringApplication(options: {
     readonly from: ChannelFrom;
   };
 }) {
-  return defineAmbientApplication<PullRequestEvent>({
+  return defineAmbientApplication({
     applicationId: options.applicationId,
     rules: [blockedPullRequestRule],
     routes: [createEveAttentionRoute(options.eve)],

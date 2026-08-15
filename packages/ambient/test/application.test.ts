@@ -13,9 +13,9 @@ import { canonicalizeChannelDelivery } from "../src/idempotency.js";
 import { memory } from "../src/memory.js";
 
 describe("consumer application API", () => {
-  it("defines rules and routes once and binds them to a backend", async () => {
+  it("binds heterogeneous channel rules to one application", async () => {
     const channel = testChannel("messages");
-    const otherChannel = testChannel("other");
+    const metrics = metricChannel();
     const rule = defineAmbientRule({
       id: "mention",
       version: "v1",
@@ -29,11 +29,24 @@ describe("consumer application API", () => {
           evidence: latest.data,
         }),
     });
+    const metricRule = defineAmbientRule({
+      id: "popular-repository",
+      version: "v1",
+      channel: metrics,
+      policy: immediate(),
+      correlationKey: (event) => event.data.repository,
+      decide: ({ latest }) =>
+        wake({
+          target: `repository:${latest.data.repository}`,
+          instruction: "Review the newly popular repository.",
+          evidence: { stars: latest.data.stars },
+        }),
+    });
     const deliveries: PreparedAttentionWake[] = [];
     const clock = { now: () => new Date("2026-01-01T00:00:00.000Z") };
     const application = defineAmbientApplication({
       applicationId: "test-application",
-      rules: [rule],
+      rules: [rule, metricRule],
       routes: [{
         id: "custom-delivery",
         async deliver(prepared) {
@@ -43,18 +56,22 @@ describe("consumer application API", () => {
       }],
     }).with(memory({ clock }));
 
-    const ignored = await application.publish(otherChannel, input("other-event"));
-    const accepted = await application.publish(channel, input("message-event"));
+    const message = await application.publish(channel, input("message-event"));
+    const metric = await application.publish(metrics, {
+      id: "metric-event",
+      repository: "ewhauser/eve-ambient",
+      stars: 100,
+    });
     await application.engine.runDue();
 
-    expect(ignored.attention.branchKeys).toEqual([]);
-    expect(accepted.attention.branchKeys).toHaveLength(1);
-    expect(deliveries).toHaveLength(1);
-    expect(deliveries[0]).toMatchObject({
-      routeId: "custom-delivery",
-      target: "thread:42",
-      rootEventKeys: [accepted.attention.eventKey],
-    });
+    expect(message.attention.branchKeys).toHaveLength(1);
+    expect(metric.attention.branchKeys).toHaveLength(1);
+    expect(deliveries).toHaveLength(2);
+    expect(deliveries.map((delivery) => delivery.target).sort()).toEqual([
+      "repository:ewhauser/eve-ambient",
+      "thread:42",
+    ]);
+    expect(deliveries.every((delivery) => delivery.routeId === "custom-delivery")).toBe(true);
   });
 
   it("parses readable duration policies with bounded defaults", () => {
@@ -140,4 +157,34 @@ function testChannel(channelId: string) {
 
 function input(id: string) {
   return { id, thread: "42", text: "hello" };
+}
+
+function metricChannel() {
+  return defineChannel({
+    version: 1,
+    input: {
+      parse(value: unknown) {
+        if (value === null || typeof value !== "object") throw new TypeError("invalid metric");
+        return value as {
+          readonly id: string;
+          readonly repository: string;
+          readonly stars: number;
+        };
+      },
+    },
+    map(value) {
+      return {
+        id: value.id,
+        type: "repository.metric" as const,
+        version: 1,
+        data: { repository: value.repository, stars: value.stars },
+        source: {
+          channelId: "metrics",
+          installationId: "installation-1",
+          tenantId: "tenant-1",
+        },
+        origin: { kind: "external" as const, depth: 0 },
+      };
+    },
+  });
 }

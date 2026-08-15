@@ -94,7 +94,10 @@ const ambient = defineAmbientApplication({
   applicationId: "support-agent",
   rules: [incidentRule],
   routes: [eveRoute],
-}).with(postgres({ pool, engineId: "support-agent" }));
+}).with(world({
+  engineId: "support-agent",
+  callbackUrl: "https://agent.example.com",
+}));
 
 const receipt = await ambient.publish(slackChannel, providerDelivery);
 ```

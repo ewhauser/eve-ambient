@@ -1,34 +1,31 @@
 # Eve Ambient
 
-Durable ambient attention for Eve agents.
+Durable ambient attention for Eve agents, built on Workflow Worlds.
 
-Applications define typed channel normalization and ambient rules. Eve Ambient
-freezes the resulting fan-out, correlates complete events by key, buffers them,
-records a decision before delivery, and wakes Eve only when attention is
-warranted.
+Applications define typed channels, correlation rules, and final routes. Eve
+Ambient freezes the selected fan-out, serializes each correlation stream,
+debounces event storms, checkpoints a decision, and wakes Eve only when
+attention is warranted.
 
 ```text
-channel partition ──────────────────────────────┐
-channel event → eventKey → occurrenceKey → branchKey
-                                      ↓         │
-                         correlate → batchKey   │
-                                      ↓         │
-                              runKey → wakeKey → Eve
+provider event
+    |
+    v
+publish -> event-key workflow -----------------------> semantic accept receipt
+                |                                            ^
+                | full branch                                | append receipt
+                v                                            |
+      partition + rule workflow -> timer -> prepare -> checkpoint -> deliver
+                |
+                +---- Queue + Storage + Streamer from the configured World
 ```
 
-Every durable handoff carries the complete payload by value. Keys express
-lineage and idempotency; they are never payload references. When a workflow is
-terminal, its event payloads are deleted and only bounded receipts remain.
-There is no event repository, lookup, history, or replay API.
+Ambient does not implement Redis, Postgres, or celld persistence. The Workflow
+host installs one process-global World: the official Postgres World,
+`world-celld`, or another conforming implementation. A composite World can use
+different infrastructure internally without changing Ambient or its streams.
 
-## Why
-
-Sending every message, webhook, alert, or state change directly to an agent is
-noisy and expensive. Application-specific debounce and retry glue also tends
-to fail at exactly the awkward boundaries: duplicate delivery, process restart,
-hot correlation keys, or a completed decision followed by a failed handoff.
-
-Eve Ambient supplies one durable boundary:
+## Durable boundary
 
 ```ts
 interface AttentionEngine {
@@ -36,82 +33,77 @@ interface AttentionEngine {
 }
 ```
 
-The backend owns correlation and retry. The application owns two callbacks:
+`accept()` returns only after every frozen branch has produced a semantic
+append receipt. A Workflow hook transport acknowledgement alone is not enough.
+Lost responses, concurrent starts, partial fan-out, duplicates, and
+same-key/different-input conflicts are resolved inside the durable protocol.
 
-- `prepare(batch)` performs bounded, tool-less decision work.
-- `deliver(wake)` performs the final idempotent Ambient handoff.
-
-The prepared outcome is durably recorded before delivery. A lost delivery
-response therefore retries the exact same bytes and `wakeKey`.
-
-## Backends
-
-| Backend | Durable behavior | Worker model |
-|---|---|---|
-| Memory | Executable reference implementation and deterministic tests | Explicit `runDue()` |
-| PostgreSQL | Private per-event coordinators and per-correlation workflows | Poll `runOnce()` from one or more workers |
-| celld | One custody cell per channel-defined partition | Cell alarms; no PostgreSQL dependency |
-
-PostgreSQL and celld pass the same failure-oriented conformance suite as the
-memory engine. Backend persistence is private implementation detail, not a
-portable storage interface.
+Each channel derives a bounded durable partition, such as a Slack thread or
+pull request. Each rule then gets one long-lived Workflow run per partition,
+with an optional sub-correlation key. A deterministic hook token addresses
+that run. It is Ambient's internal first-class stream:
+it owns ordered full-value branches, buffer policy, durable timers, retries,
+prepared wake bytes, cooldown, and bounded idempotency state. It is deliberately
+not a public mutable `Stream` API.
 
 ## Application shape
 
 ```ts
 import { defineAmbientApplication } from "@ewhauser/eve-ambient";
-import { celld } from "@ewhauser/eve-ambient/celld";
-import {
-  createEveGitHubAmbientChannel,
-  createEveGitHubAttentionRoute,
-} from "@ewhauser/eve-ambient-eve";
-import { pullRequestShepherdRule } from "./rules/pull-request-shepherd.js";
+import { world } from "@ewhauser/eve-ambient/world";
 
 const ambient = defineAmbientApplication({
   applicationId: "engineering-agent",
   rules: [pullRequestShepherdRule],
-  routes: [createEveGitHubAttentionRoute({ from: githubFrom, auth })],
-}).with(celld({ url: env.CELLD_URL, secret: env.CELLD_SECRET }));
+  routes: [eveRoute],
+}).with(world({
+  engineId: "engineering-agent",
+  callbackUrl: "https://agent.example.com",
+  callbackSecretEnv: "AMBIENT_CALLBACK_SECRET",
+}));
 
-export const github = createEveGitHubAmbientChannel({
-  publisher: ambient,
-  tenantId: context => context.repository.owner,
-  credentials,
-});
+export const POST = ambient.fetch;
+await ambient.publish(githubChannel, webhook);
 ```
 
-Rules and routes are defined once. Bind that same application to `memory()` in
-tests, `postgres()` in a database deployment, or `celld()` in a celld
-deployment. Each rule retains the event type of its own channel, so one
-application can safely publish GitHub, Slack, scheduled, and other channel
-events without an application-wide event union. The lower-level protocol and
-backend constructors remain available for custom integrations.
+The Workflow step runtime and application share the callback secret through
+the named environment variable. Only the variable name and callback URL enter
+workflow history; the secret value does not. Callback requests default to a
+30-second timeout and a 16 MiB body limit; both are configurable on `world()`.
 
-The official Eve adapter maps `wakeKey` to Eve's durable admission key. It
-targets exactly `eve@0.38.1` and requires consumers to apply the carried patch
-for `vercel/eve#1842`.
+Use `memory()` for deterministic rule tests. It remains the executable reducer
+reference, not a production persistence backend.
+
+## Guarantees and retention
+
+- Every durable handoff carries complete canonical values; keys are lineage,
+  never payload references.
+- Event membership and batch membership are frozen and canonically ordered.
+- `prepare()` may repeat, but the exact prepared wake is recorded before
+  `deliver()` and reused for delivery retries.
+- `wakeKey` is the final idempotency key and must reach the final durable action.
+- Reducer state drops terminal payloads after handoff, but Workflow Worlds are
+  append-only event logs. Physical payload retention, encryption, and deletion
+  are therefore World-level operational policies. Ambient exposes no event
+  lookup, history, or replay API.
 
 ## Repository
 
 | Workspace | Purpose | Published |
 |---|---|---|
-| [`packages/ambient`](packages/ambient) | Protocol, rules, publisher, shared workflow reducer, and three backends | `@ewhauser/eve-ambient` |
+| [`packages/ambient`](packages/ambient) | Protocol, rules, reference reducer, and World workflows | `@ewhauser/eve-ambient` |
 | [`packages/eve-adapter`](packages/eve-adapter) | Eve GitHub ingress, attention delivery, and direct dispatch | `@ewhauser/eve-ambient-eve` |
-| [`examples/eve-postgres`](examples/eve-postgres) | Slack incident rule on PostgreSQL | No |
-| [`examples/eve-celld`](examples/eve-celld) | Eve GitHub PR/CI shepherd on celld, with a runnable console demo and no PostgreSQL | No |
+| [`examples/world-attention`](examples/world-attention) | One definition bound to memory and a host-supplied World | No |
+| [`integration/workflow-world-spike`](integration/workflow-world-spike) | Local and Postgres World integration/conformance | No |
 | [`integration/eve-conformance`](integration/eve-conformance) | Exact Eve patch and adapter conformance | No |
 
 ## Documentation
 
 - [Attention engine protocol](docs/attention-engine.md)
+- [World deployment](docs/deployment-options.md)
 - [Monitoring and rules](docs/monitoring-model.md)
-- [PostgreSQL deployment](docs/postgres.md)
-- [celld deployment](docs/celld.md)
-- [Deployment choices](docs/deployment-options.md)
-- [Prefiltered ingress](docs/prefiltered-ingress.md)
 - [Operations and security](docs/operations-and-security.md)
-- [RFC 0001: full-payload idempotent handoffs](docs/rfcs/0001-full-payload-idempotent-handoffs.md)
-- [RFC 0002: durable attention engine](docs/rfcs/0002-durable-attention-engine.md)
+- [RFC 0003: Workflow World runtime](docs/rfcs/0003-workflow-world-runtime.md)
 
 ## Development
 
@@ -121,12 +113,6 @@ pnpm install
 pnpm check
 ```
 
-Run the credential-free Eve GitHub and celld example with:
-
-```sh
-pnpm --filter eve-ambient-example-celld demo
-```
-
-Set `EVE_AMBIENT_POSTGRES_URL` to run the PostgreSQL conformance suite against a
-real database. `pnpm check` also verifies the Eve patch, packed npm artifacts,
-celld browser bundle, and a clean consumer install.
+Set `WORKFLOW_SPIKE_POSTGRES_URL` to include the official Postgres World probe.
+The full check also runs the local World integration, Eve conformance, package
+artifact validation, and a clean consumer install.

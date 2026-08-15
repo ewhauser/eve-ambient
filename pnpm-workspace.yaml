@@ -4,7 +4,13 @@ packages:
   - "integration/*"
 
 allowBuilds:
+  "@swc/core": true
+  cbor-extract: true
   esbuild: true
+
+overrides:
+  "nanoid@5.1.6": "5.1.16"
+  "undici@7.28.0": "7.29.0"
 
 # Hold new direct and transitive releases for one day. Security updates can
 # still be selected explicitly when a faster upgrade is required.
@@ -17,4 +23,5 @@ minimumReleaseAgeExclude:
   - "eve@0.38.1"
 
 patchedDependencies:
+  "builtin-modules@5.0.0": patches/builtin-modules@5.0.0.patch
   "eve@0.38.1": packages/eve-adapter/patches/eve@0.38.1.patch

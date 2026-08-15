@@ -1,67 +1,67 @@
-# Deployment options
+# World deployment
 
-Applications define channels, rules, and routes once, then bind that definition
-to one attention backend. Payload lineage and the final Eve route stay the same.
+Ambient has one production runtime and many possible Worlds.
 
-| Backend | Persistence | Work scheduling | Best fit |
-|---|---|---|---|
-| Memory | Process memory | Explicit `runDue()` | Tests and executable reference behavior |
-| PostgreSQL | Private event/workflow rows | Workers poll `runOnce()` | Existing PostgreSQL deployments and simple operations |
-| celld | Channel-partition custody cells | Cell alarms | Distributed domain-entity serialization without PostgreSQL |
+| Layer | Ambient owns | World owns |
+|---|---|---|
+| Protocol | keys, hashes, membership, reducer transitions | durable event storage |
+| Scheduling | due timestamps and retry policy | queueing and durable sleeps |
+| Stream identity | event and correlation hook tokens | atomic hook ownership and resumption |
+| Receipts | semantic admission and append values | persistent output streaming |
+| Operations | callback contract | database, Redis, celld, retention, backups |
 
-Backend state is not portable. Switching an active installation requires an
-application-specific cutover because no public storage or state-migration
-interface exists. There are no legacy production users requiring a migration
-for this repository's architecture replacement.
+Channels choose bounded semantic partitions; rules may sub-correlate inside a
+partition. Those choices determine World run identity, not physical backend
+placement.
 
-## PostgreSQL
+The Workflow host must install one process-global World before Ambient uses
+`start()`, `getHookByToken()`, or `resumeHook()`. Ambient intentionally does
+not accept a World per application: Workflow's external runtime APIs all need
+to resolve the same owner and storage namespace.
 
-```text
-provider -> publisher -> PostgreSQL accept -> due worker
-                                            -> prepare -> checkpoint
-                                            -> deliver -> receipt
+## Official Postgres World
+
+Use `@workflow/world-postgres` when its Postgres storage, Graphile Worker queue,
+and notification streamer fit the deployment. Ambient needs no schema,
+migration, pool, advisory lock, or poller of its own.
+
+## world-celld
+
+A `world-celld` implementation replaces the old Ambient-specific celld worker
+by implementing the standard World interfaces. Ambient sees only Queue,
+Storage, and Streamer semantics. Any celld topology, alarms, Redis acceleration,
+or Postgres metadata inside that World remains an infrastructure concern.
+
+## Composite Worlds
+
+A World may combine Redis-like scheduling with Postgres history, or route
+internal World responsibilities across services. That composition is below
+Ambient's correlation stream boundary. Ambient does not choose storage per
+rule or expose a public stream-placement API.
+
+If per-stream placement is eventually needed, it should be a serializable
+World routing hint that is covered by conformance—not a return to separate
+Ambient Postgres and celld engines.
+
+## Callback endpoint
+
+```ts
+const ambient = application.with(world({
+  engineId: "engineering-agent",
+  callbackUrl: "https://agent.example.com",
+  callbackSecretEnv: "AMBIENT_CALLBACK_SECRET",
+}));
+
+export const POST = ambient.fetch;
 ```
 
-Apply the private migration, bind the application with `postgres({ pool })`,
-initialize `application.engine`, and run one or more pollers. PostgreSQL owns
-active payload custody, timers, leases, and bounded receipts. It does not
-expose an event repository.
+Make the same secret value available to the application and Workflow step
+runtime. Restrict the callback URL to trusted networks where possible. The
+secret value never enters workflow arguments, logs, or receipts.
 
-Choose it when PostgreSQL is already an acceptable durable dependency and the
-workload can be served by its due index plus per-key advisory locks.
+## Cutover
 
-## celld
-
-```text
-provider -> publisher -> partition cell alarm -> prepare -> checkpoint -> deliver
-```
-
-Create the packaged worker with `eve-ambient init celld`, bind the application
-with `celld({ url, secret })`, and expose its authenticated `fetch` handler.
-celld owns all attention persistence; the application and example need no
-PostgreSQL pool, schema, or worker.
-
-Choose it when channel-defined domain partitions and durable alarms fit the
-operating environment better than a database poller. A partition must be
-bounded: for example, one pull request or Slack thread, not an entire busy
-installation unless cross-installation serialization is truly required.
-
-## External ingress pipelines
-
-Kafka, SQS, a webhook service, or a domain-specific rules engine may own source
-delivery before Eve Ambient. Their retention and duplicate suppression are
-implementation details. The integration must send the complete normalized
-payload to `ambient.publish()` and retry ambiguous outcomes with the same
-source identity.
-
-The upstream system may acknowledge or commit its delivery only after
-`publish()` returns successfully. That receipt means the complete frozen
-fan-out has reached the selected attention backend. Eve Ambient does not add a
-central event store or replay API around the upstream transport.
-
-## Selection guidance
-
-Start with the backend already operated and understood by the application.
-Measure payload size, rule fan-out, correlation-key distribution, decision
-latency, and retry rates before making throughput claims. An upstream log and
-the choice between PostgreSQL and celld are independent decisions.
+The old custom Postgres rows and celld cells are not state-compatible with
+World histories. Drain or explicitly abandon old in-flight work, configure the
+World, deploy callback handling, then switch ingress to `WorldAttentionEngine`.
+Retry source deliveries with their original canonical identity.

@@ -6,12 +6,12 @@
     "lib": ["ES2023", "DOM", "ESNext.Disposable"],
     "types": ["node"],
     "strict": true,
-    "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
     "verbatimModuleSyntax": true,
-    "esModuleInterop": true,
     "skipLibCheck": true,
-    "noEmit": true
+    "noEmit": true,
+    "plugins": [{ "name": "workflow" }]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "vitest.workflow.config.ts"]
 }

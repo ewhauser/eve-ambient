@@ -18,28 +18,24 @@ export const packages = new Map([
         "dist/application.js",
         "dist/coordinator.d.ts",
         "dist/coordinator.js",
-        "dist/celld.d.ts",
-        "dist/celld.js",
-        "dist/celld-worker.d.ts",
-        "dist/celld-worker.js",
         "dist/memory.d.ts",
         "dist/memory.js",
         "dist/idempotency.d.ts",
         "dist/idempotency.js",
         "dist/protocol.d.ts",
         "dist/protocol.js",
-        "dist/postgres.d.ts",
-        "dist/postgres.js",
         "dist/testing.d.ts",
         "dist/testing.js",
         "dist/workflow.d.ts",
         "dist/workflow.js",
-        "bin/eve-ambient.mjs",
-        "migrations/001_attention_engine.sql",
-        "celld-worker/README.md",
-        "celld-worker/build.mjs",
-        "celld-worker/index.ts",
-        "celld-worker/wrangler.jsonc",
+        "dist/world.d.ts",
+        "dist/world.js",
+        "dist/world-protocol.d.ts",
+        "dist/world-protocol.js",
+        "dist/world-steps.d.ts",
+        "dist/world-steps.js",
+        "dist/world-workflows.d.ts",
+        "dist/world-workflows.js",
         "LICENSE",
         "README.md",
       ],
@@ -107,6 +103,15 @@ function validateManifest(packagePath, expected) {
     if (eveDependency !== undefined) {
       failures.push("provider-independent core must not depend on eve");
     }
+    if (manifest.peerDependencies?.workflow !== ">=4.8.2 <5") {
+      failures.push("workflow peer dependency must be >=4.8.2 <5");
+    }
+    if (manifest.devDependencies?.workflow !== "4.8.2") {
+      failures.push("workflow development dependency must be exactly 4.8.2");
+    }
+    if (manifest.dependencies?.workflow !== undefined) {
+      failures.push("workflow must be a peer so the host owns the process-global World");
+    }
   }
 
   if (packagePath === "packages/eve-adapter") {
@@ -149,6 +154,14 @@ function validateContents(packagePath, expected, packResult) {
     "dist/runtime.js",
     "dist/storage.d.ts",
     "dist/storage.js",
+    "dist/celld.d.ts",
+    "dist/celld.js",
+    "dist/celld-worker.d.ts",
+    "dist/celld-worker.js",
+    "dist/postgres.d.ts",
+    "dist/postgres.js",
+    "bin/eve-ambient.mjs",
+    "migrations/001_attention_engine.sql",
     "migrations/001_eve_ambient.sql",
   ]);
   const forbidden = [...paths].filter(

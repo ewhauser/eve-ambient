@@ -23,8 +23,8 @@ Merging a release pull request creates one draft GitHub release per changed
 package. The same workflow then:
 
 1. installs the frozen pnpm workspace, including the exact Eve patch;
-2. builds and tests all packages, examples, and conformance fixtures against
-   PostgreSQL;
+2. builds and tests all packages, examples, World integration, and conformance
+   fixtures, including the Postgres World probe when configured;
 3. verifies the installed Eve patch and both package contents;
 4. packs only the release paths in a job with no publish credentials;
 5. waits for the protected `release` environment;

@@ -40,6 +40,7 @@ try {
           "@ewhauser/eve-ambient": `file:${core.tarball}`,
           "@ewhauser/eve-ambient-eve": `file:${adapter.tarball}`,
           eve: "0.38.1",
+          workflow: "4.8.2",
         },
       },
       null,
@@ -57,25 +58,12 @@ try {
     cwd: consumer,
     stdio: "inherit",
   });
-  const generatedCelld = resolve(consumer, "generated-celld");
-  execFileSync(
-    "pnpm",
-    ["exec", "eve-ambient", "init", "celld", generatedCelld],
-    { cwd: consumer, stdio: "pipe" },
-  );
-  const generatedCelldConfig = readFileSync(
-    resolve(generatedCelld, "wrangler.jsonc"),
-    "utf8",
-  );
-  if (!generatedCelldConfig.includes("ATTENTION_CALLBACK_URL")) {
-    throw new Error("celld initializer did not create the simplified callback configuration");
-  }
   execFileSync(
     "node",
     [
       "--input-type=module",
       "--eval",
-      'const core = await import("@ewhauser/eve-ambient"); const protocol = await import("@ewhauser/eve-ambient/protocol"); const idempotency = await import("@ewhauser/eve-ambient/idempotency"); const postgres = await import("@ewhauser/eve-ambient/postgres"); const celld = await import("@ewhauser/eve-ambient/celld"); const memory = await import("@ewhauser/eve-ambient/memory"); const adapter = await import("@ewhauser/eve-ambient-eve"); if (typeof core.defineAmbientApplication !== "function") throw new Error("missing ambient application definition"); if (typeof protocol.compileAcceptedFanout !== "function") throw new Error("missing protocol surface"); if (typeof idempotency.deriveEventKey !== "function") throw new Error("missing idempotency surface"); if (typeof postgres.postgres !== "function") throw new Error("missing Postgres binding"); if (typeof celld.celld !== "function") throw new Error("missing celld binding"); if (typeof memory.memory !== "function") throw new Error("missing memory binding"); for (const removed of ["MonitorRuntime", "compileMonitor", "PostgresMonitorStore"]) if (removed in core || removed in postgres) throw new Error(`legacy export remains: ${removed}`); for (const name of ["createEveAttentionRoute", "createEveGitHubAmbientChannel", "createEveGitHubAttentionRoute", "eveGitHubPullRequestActivity"]) if (typeof adapter[name] !== "function" && typeof adapter[name] !== "object") throw new Error(`missing Eve adapter export: ${name}`); if (adapter.SUPPORTED_EVE_VERSION !== "0.38.1") throw new Error("wrong Eve support version");',
+      'const core = await import("@ewhauser/eve-ambient"); const protocol = await import("@ewhauser/eve-ambient/protocol"); const idempotency = await import("@ewhauser/eve-ambient/idempotency"); const world = await import("@ewhauser/eve-ambient/world"); const memory = await import("@ewhauser/eve-ambient/memory"); const adapter = await import("@ewhauser/eve-ambient-eve"); if (typeof core.defineAmbientApplication !== "function") throw new Error("missing ambient application definition"); if (typeof protocol.compileAcceptedFanout !== "function") throw new Error("missing protocol surface"); if (typeof idempotency.deriveEventKey !== "function") throw new Error("missing idempotency surface"); if (typeof world.world !== "function" || typeof world.WorldAttentionEngine !== "function") throw new Error("missing World binding"); if (typeof memory.memory !== "function") throw new Error("missing memory binding"); for (const removed of ["MonitorRuntime", "compileMonitor", "PostgresMonitorStore", "PostgresAttentionEngine", "CelldAttentionEngine"]) if (removed in core || removed in world) throw new Error(`legacy export remains: ${removed}`); for (const specifier of ["@ewhauser/eve-ambient/postgres", "@ewhauser/eve-ambient/celld", "@ewhauser/eve-ambient/celld-worker"]) { try { await import(specifier); throw new Error(`removed backend remains importable: ${specifier}`); } catch (error) { if (error instanceof Error && error.message.startsWith("removed backend remains")) throw error; } } for (const name of ["createEveAttentionRoute", "createEveGitHubAmbientChannel", "createEveGitHubAttentionRoute", "eveGitHubPullRequestActivity"]) if (typeof adapter[name] !== "function" && typeof adapter[name] !== "object") throw new Error(`missing Eve adapter export: ${name}`); if (adapter.SUPPORTED_EVE_VERSION !== "0.38.1") throw new Error("wrong Eve support version");',
     ],
     { cwd: consumer, stdio: "pipe" },
   );

@@ -51,6 +51,15 @@ export interface ActiveAttentionRun {
   wake?: PreparedAttentionWake | undefined;
 }
 
+export type FrozenAttentionBatchDraft = Omit<
+  FrozenAttentionBatch,
+  "batchKey" | "runKey"
+>;
+
+export type AttentionRunClaim =
+  | { readonly kind: "active"; readonly active: ActiveAttentionRun }
+  | { readonly kind: "draft"; readonly draft: FrozenAttentionBatchDraft };
+
 export interface RetainedAttentionDeliveryReceipt {
   readonly wakeKey: WakeKey;
   readonly receipt: AttentionDeliveryReceipt;
@@ -67,6 +76,7 @@ export interface AttentionWorkflowState {
   readonly instanceKey: AttentionInstanceKey;
   readonly applicationId: string;
   readonly tenantId: string;
+  readonly partitionKey: string;
   readonly monitorId: string;
   readonly definitionVersion: string;
   readonly correlationKey: string;
@@ -109,6 +119,7 @@ export function createAttentionWorkflow(input: {
     instanceKey: input.instanceKey,
     applicationId: input.branch.applicationId,
     tenantId: input.branch.tenantId,
+    partitionKey: input.branch.partitionKey,
     monitorId: input.branch.monitorId,
     definitionVersion: input.branch.definitionVersion,
     correlationKey: input.branch.correlationKey,
@@ -168,6 +179,22 @@ export async function claimAttentionRun(
   workflow: AttentionWorkflowState,
   input: { readonly now: string; readonly leaseMs: number },
 ): Promise<ActiveAttentionRun | undefined> {
+  const claim = beginAttentionRunClaim(workflow, input);
+  if (claim === undefined) return undefined;
+  if (claim.kind === "active") return claim.active;
+  const batchKey = await deriveAttentionBatchKey({
+    instanceKey: claim.draft.instanceKey,
+    orderedBranchKeys: claim.draft.branches.map((branch) => branch.branchKey),
+  });
+  const runKey = await deriveAttentionRunKey({ batchKey });
+  return activateAttentionRun(workflow, claim.draft, { batchKey, runKey }, input);
+}
+
+/** Begins a claim without crossing an async boundary. */
+export function beginAttentionRunClaim(
+  workflow: AttentionWorkflowState,
+  input: { readonly now: string; readonly leaseMs: number },
+): AttentionRunClaim | undefined {
   if (workflow.active !== undefined) {
     if (
       workflow.active.retryAt > input.now ||
@@ -176,10 +203,21 @@ export async function claimAttentionRun(
       return undefined;
     }
     workflow.active.leaseUntil = addMs(input.now, input.leaseMs);
-    return workflow.active;
+    return { kind: "active", active: workflow.active };
   }
-  const batch = await freezeDueBatch(workflow, input.now);
-  if (batch === undefined) return undefined;
+  const draft = freezeDueBatchDraft(workflow, input.now);
+  return draft === undefined ? undefined : { kind: "draft", draft };
+}
+
+/** Installs keys derived by a durable step and completes a new claim. */
+export function activateAttentionRun(
+  workflow: AttentionWorkflowState,
+  draft: FrozenAttentionBatchDraft,
+  identity: Pick<FrozenAttentionBatch, "batchKey" | "runKey">,
+  input: { readonly now: string; readonly leaseMs: number },
+): ActiveAttentionRun {
+  if (workflow.active !== undefined) throw new Error("attention workflow already has an active run");
+  const batch: FrozenAttentionBatch = { ...draft, ...identity };
   workflow.active = {
     batch,
     stage: "preparing",
@@ -210,22 +248,44 @@ export async function applyPreparedAttentionOutcome(
   outcome: PreparedAttentionOutcome,
   input: { readonly now: string; readonly dedupeMs: number; readonly maxPreparedWakeBytes: number },
 ): Promise<PreparedTransition> {
-  const active = requireActive(workflow);
-  if (active.stage !== "preparing") throw new Error("attention run is not preparing");
   const prepared = validateAttentionCallbackValue(() =>
     validatePreparedAttentionOutcome(outcome),
   );
+  const active = requireActive(workflow);
+  const wake =
+    prepared.kind === "wake" && workflow.mode === "active"
+      ? await createPreparedAttentionWake(active.batch, prepared)
+      : undefined;
+  return applyPreparedAttentionCheckpoint(workflow, prepared, { ...input, wake });
+}
+
+/** Applies a validated outcome and optional wake without awaiting native promises. */
+export function applyPreparedAttentionCheckpoint(
+  workflow: AttentionWorkflowState,
+  prepared: PreparedAttentionOutcome,
+  input: {
+    readonly now: string;
+    readonly dedupeMs: number;
+    readonly maxPreparedWakeBytes: number;
+    readonly wake?: PreparedAttentionWake | undefined;
+  },
+): PreparedTransition {
+  const active = requireActive(workflow);
+  if (active.stage !== "preparing") throw new Error("attention run is not preparing");
   if (prepared.kind === "ignore") {
+    if (input.wake !== undefined) throw new TypeError("ignored outcome must not include a wake");
     finishAttentionRun(workflow, active, input.now, false, input.dedupeMs);
     return "ignored";
   }
   active.prepared = prepared;
   if (workflow.mode === "shadow") {
+    if (input.wake !== undefined) throw new TypeError("shadow outcome must not include a wake");
     finishAttentionRun(workflow, active, input.now, true, input.dedupeMs);
     return "shadowed";
   }
-  active.wake = await createPreparedAttentionWake(active.batch, prepared);
-  if (attentionValueBytes(active.wake) > input.maxPreparedWakeBytes) {
+  if (input.wake === undefined) throw new TypeError("prepared wake outcome has no checkpointed wake");
+  active.wake = input.wake;
+  if (attentionValueBytes(input.wake) > input.maxPreparedWakeBytes) {
     throw new AttentionCapacityError(
       `prepared wake exceeds the maximum of ${input.maxPreparedWakeBytes} bytes`,
     );
@@ -378,10 +438,10 @@ function bufferBranch(
         };
 }
 
-async function freezeDueBatch(
+function freezeDueBatchDraft(
   workflow: AttentionWorkflowState,
   now: string,
-): Promise<FrozenAttentionBatch | undefined> {
+): FrozenAttentionBatchDraft | undefined {
   if (isFuture(workflow.cooldownUntil, now)) return undefined;
   let batch = workflow.sealed.shift();
   if (batch === undefined && workflow.open !== undefined) {
@@ -403,15 +463,8 @@ async function freezeDueBatch(
   }
   if (batch === undefined || batch.closedBy === undefined) return undefined;
   const branches = [...batch.branches].sort(compareAttentionBranches);
-  const batchKey = await deriveAttentionBatchKey({
-    instanceKey: workflow.instanceKey,
-    orderedBranchKeys: branches.map((branch) => branch.branchKey),
-  });
-  const runKey = await deriveAttentionRunKey({ batchKey });
   return {
     instanceKey: workflow.instanceKey,
-    batchKey,
-    runKey,
     applicationId: workflow.applicationId,
     tenantId: workflow.tenantId,
     monitorId: workflow.monitorId,
@@ -477,6 +530,7 @@ function assertWorkflowIdentity(
   if (
     workflow.applicationId !== branch.applicationId ||
     workflow.tenantId !== branch.tenantId ||
+    workflow.partitionKey !== branch.partitionKey ||
     workflow.monitorId !== branch.monitorId ||
     workflow.definitionVersion !== branch.definitionVersion ||
     workflow.correlationKey !== branch.correlationKey ||

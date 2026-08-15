@@ -62,5 +62,5 @@ lineage and idempotency values, never references that the attention workflow
 must dereference later.
 
 The package does not ship Kafka or SQS adapters. A custom consumer calls the
-same publisher used by provider-facing channels, and its selected backend may
-be either PostgreSQL or celld.
+same publisher used by provider-facing channels. The Workflow host's selected
+World owns downstream persistence and scheduling.

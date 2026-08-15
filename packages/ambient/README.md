@@ -1,55 +1,48 @@
 # @ewhauser/eve-ambient
 
-Provider-independent durable attention for typed channel events.
+Provider-independent durable attention on Workflow Worlds.
 
 ```sh
-pnpm add @ewhauser/eve-ambient
+pnpm add @ewhauser/eve-ambient workflow
 ```
 
-The package exposes one portable persistence command,
-`AttentionEngine.accept()`, plus typed channel normalization, ambient rules,
-fan-out compilation, and application-owned `prepare`/`deliver` callbacks.
-There is no public storage, transaction, event lookup, history, or replay API.
-
-## PostgreSQL
-
-Apply `migrations/001_attention_engine.sql`, then bind and poll the application:
+Define channels, rules, and routes once, then bind production to the World
+configured by the Workflow host:
 
 ```ts
-import {
-  defineAmbientApplication,
-} from "@ewhauser/eve-ambient";
-import { postgres } from "@ewhauser/eve-ambient/postgres";
+import { world } from "@ewhauser/eve-ambient/world";
 
-const ambient = defineAmbientApplication({
-  applicationId: "engineering-agent",
-  rules,
-  routes,
-}).with(postgres({
-  engineId: "engineering-agent",
-  pool,
+const ambient = application.with(world({
+  engineId: "support-agent",
+  callbackUrl: "https://agent.example.com",
+  callbackSecretEnv: "AMBIENT_CALLBACK_SECRET",
+  callbackTimeoutMs: 30_000,
+  maxCallbackRequestBytes: 16 * 1024 * 1024,
 }));
 
-await ambient.engine.initialize();
-await ambient.publish(channel, providerEvent);
-await ambient.engine.runOnce();
-```
-
-## celld
-
-```ts
-import { celld } from "@ewhauser/eve-ambient/celld";
-
-const ambient = application.with(celld({ url, secret }));
 export const POST = ambient.fetch;
 ```
 
-Run `eve-ambient init celld` to create the packaged worker configuration. Its
-single callback base URL reaches the application-owned `ambient.fetch`
-handler. The celld engine places one custody cell per channel-defined bounded
-partition, not per event, and has no PostgreSQL dependency.
+`world()` does not accept a database or World object. Workflow hook lookup and
+resumption use the host's process-global World, so the host must install its
+Postgres, `world-celld`, or composite World before calling Ambient.
 
-## Memory
+The binding provides:
+
+- `engine.accept()` for durable keyed admission;
+- `fetch()` for authenticated `/ambient/prepare` and `/ambient/deliver`
+  callbacks; and
+- autonomous Workflow timers and retries—there is no Ambient poller.
+
+The callback secret value is read from the named environment variable by both
+the application handler and durable steps. It is never included in workflow
+arguments.
+
+Callback fetches are aborted after `callbackTimeoutMs` and retried through the
+durable attention policy. The authenticated handler rejects request bodies
+larger than `maxCallbackRequestBytes` before application code runs.
+
+For deterministic tests:
 
 ```ts
 import { memory } from "@ewhauser/eve-ambient/memory";
@@ -58,12 +51,7 @@ const ambient = application.with(memory({ clock }));
 await ambient.engine.runDue();
 ```
 
-The memory implementation is the executable protocol reference used by the
-shared backend conformance suite.
-
-Most consumers should stay on the root application API. Backend-author wire
-types and compilers are also available from `@ewhauser/eve-ambient/protocol`;
-key derivation primitives are available from `@ewhauser/eve-ambient/idempotency`.
-
-For concepts, examples, deployment details, and the Eve patch requirement,
-see the [repository README](https://github.com/ewhauser/eve-ambient#readme).
+The package exposes no public transaction, storage, event lookup, history, or
+replay interface. Backend-author protocol types remain available from
+`@ewhauser/eve-ambient/protocol`, with identity primitives from
+`@ewhauser/eve-ambient/idempotency`.

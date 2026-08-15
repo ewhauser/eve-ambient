@@ -24,9 +24,8 @@ import {
   claimAttentionRun,
   failAttentionRun,
   isCurrentAttentionClaim,
-  purgeAttentionWorkflow,
-  type AttentionWorkflowState,
-} from "./workflow.js";
+  type AttentionStreamState,
+} from "./stream-state.js";
 import { WorldAttentionEngine } from "./world.js";
 
 const DEFAULT_MAX_RECENT_MESSAGES = 48;
@@ -71,8 +70,6 @@ export interface MemoryAttentionDiagnostics {
   readonly activeBatchPayloads: number;
   readonly preparedWakePayloads: number;
   readonly inFlightBranches: number;
-  readonly deliveryReceipts: number;
-  readonly terminalFailures: number;
 }
 
 type ProcessOutcome =
@@ -94,7 +91,7 @@ export class MemoryAttentionEngine implements AttentionEngine {
   readonly #maxPreparedWakeBytes: number;
   readonly #faults: MemoryAttentionEngineFaults;
   readonly #ingress: WorldAttentionEngine;
-  readonly #streams = new Map<AttentionInstanceKey, AttentionWorkflowState>();
+  readonly #streams = new Map<AttentionInstanceKey, AttentionStreamState>();
   readonly #locks = new Map<string, Promise<void>>();
 
   constructor(options: MemoryAttentionEngineOptions) {
@@ -149,7 +146,6 @@ export class MemoryAttentionEngine implements AttentionEngine {
     options: { readonly limit?: number | undefined } = {},
   ): Promise<MemoryAttentionRunResult> {
     const limit = positiveInteger(options.limit ?? 100, "limit");
-    this.#purgeExpiredSync();
     const result = {
       claimed: 0,
       ignored: 0,
@@ -173,7 +169,6 @@ export class MemoryAttentionEngine implements AttentionEngine {
   }
 
   diagnostics(): MemoryAttentionDiagnostics {
-    this.#purgeExpiredSync();
     const streams = [...this.#streams.values()];
     return {
       correlationStreams: streams.length,
@@ -192,14 +187,6 @@ export class MemoryAttentionEngine implements AttentionEngine {
       preparedWakePayloads: streams.filter((stream) => stream.active?.wake !== undefined).length,
       inFlightBranches: streams.reduce(
         (count, stream) => count + stream.branchLedger.length,
-        0,
-      ),
-      deliveryReceipts: streams.reduce(
-        (count, stream) => count + stream.deliveryReceipts.length,
-        0,
-      ),
-      terminalFailures: streams.reduce(
-        (count, stream) => count + stream.terminalFailures.length,
         0,
       ),
     };
@@ -246,7 +233,6 @@ export class MemoryAttentionEngine implements AttentionEngine {
           return applyPreparedAttentionOutcome(stream, prepared, {
             now: this.#now(),
             maxPreparedWakeBytes: this.#maxPreparedWakeBytes,
-            maxRecentMessages: this.#maxRecentMessages,
           });
         });
         if (transition === "stale") return "none";
@@ -266,7 +252,6 @@ export class MemoryAttentionEngine implements AttentionEngine {
         if (!isCurrentAttentionClaim(stream, claimed, "delivering")) return false;
         applyAttentionDeliveryReceipt(stream, receipt, {
           now: this.#now(),
-          maxRecentMessages: this.#maxRecentMessages,
         });
         return true;
       });
@@ -279,16 +264,10 @@ export class MemoryAttentionEngine implements AttentionEngine {
           now: this.#now(),
           retryDelayMs: this.#retryDelayMs,
           maxAttempts: this.#maxAttempts,
-          maxRecentMessages: this.#maxRecentMessages,
           terminalError: isTerminalError,
         });
       });
     }
-  }
-
-  #purgeExpiredSync(): void {
-    const now = this.#now();
-    for (const stream of this.#streams.values()) purgeAttentionWorkflow(stream, now);
   }
 
   #now(): string {

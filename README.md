@@ -92,6 +92,7 @@ and pure stream reducer, but is not a production persistence backend.
 - [World deployment](docs/deployment-options.md)
 - [Monitoring and rules](docs/monitoring-model.md)
 - [Operations and security](docs/operations-and-security.md)
+- [Architecture decision index](docs/rfcs/README.md)
 - [RFC 0004: Correlation World protocol](docs/rfcs/0004-correlation-world-protocol.md)
 
 ## Development

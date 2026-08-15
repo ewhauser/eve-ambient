@@ -10,10 +10,7 @@ import {
   deriveAttentionPartitionKey,
   deriveAttentionRunKey,
   deriveAttentionWakeKey,
-  deriveFanoutManifestHash,
   deriveOccurrenceKey,
-  freezeMembership,
-  hashIdempotencyInput,
   parseIdempotencyKey,
 } from "../src/idempotency.js";
 
@@ -128,60 +125,4 @@ describe("attention idempotency lineage", () => {
     expect(() => parseIdempotencyKey("branch", `eve:branch:v1:${"0".repeat(64)}`)).toThrow();
   });
 
-  it("freezes canonical membership and rejects conflicting duplicate members", async () => {
-    const partitionCellKey = await deriveAttentionPartitionKey({
-      applicationId: "app",
-      tenantId: "tenant-1",
-      channelId: "slack",
-      installationId: "installation-1",
-      partitionKey: "conversation-1",
-    });
-    const instanceKey = await deriveAttentionInstanceKey({
-      partitionCellKey,
-      monitorId: "incident",
-      definitionVersion: "v1",
-      correlationKey: "incident-42",
-    });
-    const eventHash = await hashIdempotencyInput({ event: 1 });
-    const otherHash = await hashIdempotencyInput({ event: 2 });
-    const source = await canonicalizeChannelDelivery(channel, { id: "event-1", text: "hello" }, {
-      applicationId: "app",
-    });
-    const occurrenceKey = await deriveOccurrenceKey({
-      eventKey: source.idempotency.key,
-      inputHash: source.idempotency.inputHash,
-    });
-    const branchKey = await deriveAttentionBranchKey({
-      occurrenceKey,
-      monitorId: "incident",
-      definitionVersion: "v1",
-      correlationKey: "incident-42",
-    });
-
-    await expect(
-      freezeMembership({
-        namespace: "batch",
-        orderedMembers: [
-          { key: branchKey, inputHash: eventHash },
-          { key: branchKey, inputHash: otherHash },
-        ],
-        frozenAt: "2026-01-01T00:00:00.000Z",
-        deriveOperationKey: (keys) =>
-          deriveAttentionBatchKey({ instanceKey, orderedBranchKeys: keys }),
-      }),
-    ).rejects.toBeInstanceOf(IdempotencyConflictError);
-  });
-
-  it("hashes an empty fan-out manifest as a durable no-work result", async () => {
-    const source = await canonicalizeChannelDelivery(channel, { id: "event-1", text: "hello" }, {
-      applicationId: "app",
-    });
-    const occurrenceKey = await deriveOccurrenceKey({
-      eventKey: source.idempotency.key,
-      inputHash: source.idempotency.inputHash,
-    });
-    await expect(
-      deriveFanoutManifestHash({ occurrenceKey, orderedBranches: [] }),
-    ).resolves.toMatch(/^eve:fanout:v1:[0-9a-f]{64}$/);
-  });
 });

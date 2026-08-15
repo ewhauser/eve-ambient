@@ -21,8 +21,6 @@ import {
   type BranchKey,
   type EventKey,
   type InputHash,
-  type RunKey,
-  type WakeKey,
 } from "./idempotency.js";
 import {
   validateAttentionStreamAppend,
@@ -58,7 +56,6 @@ export interface ActiveAttentionRun {
   retryAt: string;
   leaseUntil?: string | undefined;
   failures: number;
-  prepared?: PreparedAttentionOutcome | undefined;
   wake?: PreparedAttentionWake | undefined;
 }
 
@@ -71,17 +68,8 @@ export type AttentionRunClaim =
   | { readonly kind: "active"; readonly active: ActiveAttentionRun }
   | { readonly kind: "draft"; readonly draft: FrozenAttentionBatchDraft };
 
-export interface RetainedAttentionDeliveryReceipt {
-  readonly wakeKey: WakeKey;
-  readonly receipt: AttentionDeliveryReceipt;
-}
-
-export interface RetainedAttentionFailure {
-  readonly runKey: RunKey;
-}
-
-/** Complete private state for one serialized correlation stream. */
-export interface AttentionWorkflowState {
+/** Complete backend-owned state for one serialized correlation stream. */
+export interface AttentionStreamState {
   readonly instanceKey: AttentionInstanceKey;
   readonly applicationId: string;
   readonly tenantId: string;
@@ -94,16 +82,11 @@ export interface AttentionWorkflowState {
   readonly policyHash: InputHash;
   recentMessages: AttentionRecentMessage[];
   branchLedger: AttentionBranchLedgerEntry[];
-  deliveryReceipts: RetainedAttentionDeliveryReceipt[];
-  terminalFailures: RetainedAttentionFailure[];
   open?: BufferedAttentionBatch | undefined;
   sealed: BufferedAttentionBatch[];
   active?: ActiveAttentionRun | undefined;
   cooldownUntil?: string | undefined;
 }
-
-/** Backend-facing name for the complete state of one correlation stream. */
-export type AttentionStreamState = AttentionWorkflowState;
 
 export type PreparedTransition = "deliver" | "ignored" | "shadowed";
 
@@ -114,7 +97,7 @@ export class AttentionCallbackValidationError extends Error {
   }
 }
 
-export function validateAttentionCallbackValue<T>(validate: () => T): T {
+function validateAttentionCallbackValue<T>(validate: () => T): T {
   try {
     return validate();
   } catch (error) {
@@ -123,11 +106,11 @@ export function validateAttentionCallbackValue<T>(validate: () => T): T {
   }
 }
 
-export function createAttentionWorkflow(input: {
+function createAttentionStream(input: {
   readonly instanceKey: AttentionInstanceKey;
   readonly branch: FullAttentionBranch;
   readonly policyHash: InputHash;
-}): AttentionWorkflowState {
+}): AttentionStreamState {
   return {
     instanceKey: input.instanceKey,
     applicationId: input.branch.applicationId,
@@ -141,8 +124,6 @@ export function createAttentionWorkflow(input: {
     policyHash: input.policyHash,
     recentMessages: [],
     branchLedger: [],
-    deliveryReceipts: [],
-    terminalFailures: [],
     sealed: [],
   };
 }
@@ -152,11 +133,11 @@ export function createAttentionWorkflow(input: {
  * state is detached so a backend can persist it in one transaction.
  */
 export async function applyAttentionStreamAppend(
-  current: AttentionWorkflowState | undefined,
+  current: AttentionStreamState | undefined,
   proposed: AttentionStreamAppend,
   input: { readonly now: string; readonly maxRecentMessages: number },
 ): Promise<{
-  readonly state: AttentionWorkflowState;
+  readonly state: AttentionStreamState;
   readonly receipt: AttentionStreamAppendReceipt;
 }> {
   const append = await validateAttentionStreamAppend(proposed);
@@ -179,7 +160,7 @@ export async function applyAttentionStreamAppend(
   const first = append.branches[0]!;
   const policyHash = await hashPolicy(first);
   const state = current === undefined
-    ? createAttentionWorkflow({ instanceKey: append.streamKey, branch: first, policyHash })
+    ? createAttentionStream({ instanceKey: append.streamKey, branch: first, policyHash })
     : clone(current);
   for (const branch of append.branches) {
     appendAttentionBranch(state, branch, { now: input.now, policyHash });
@@ -201,8 +182,8 @@ export async function applyAttentionStreamAppend(
 }
 
 /** Appends a complete branch exactly once and updates only provisional state. */
-export function appendAttentionBranch(
-  workflow: AttentionWorkflowState,
+function appendAttentionBranch(
+  stream: AttentionStreamState,
   branch: FullAttentionBranch,
   input: {
     readonly now: string;
@@ -211,16 +192,16 @@ export function appendAttentionBranch(
 ): "appended" | "duplicate" {
   assertIdempotencyInput({
     namespace: "attention-instance-policy",
-    key: workflow.instanceKey,
-    existingInputHash: workflow.policyHash,
+    key: stream.instanceKey,
+    existingInputHash: stream.policyHash,
     receivedInputHash: input.policyHash,
   });
-  assertWorkflowIdentity(workflow, branch);
-  const priorIndex = workflow.branchLedger.findIndex(
+  assertStreamIdentity(stream, branch);
+  const priorIndex = stream.branchLedger.findIndex(
     (entry) => entry.branchKey === branch.branchKey,
   );
   if (priorIndex >= 0) {
-    const prior = workflow.branchLedger[priorIndex]!;
+    const prior = stream.branchLedger[priorIndex]!;
     assertIdempotencyInput({
       namespace: "attention-branch-append",
       key: branch.branchKey,
@@ -229,20 +210,20 @@ export function appendAttentionBranch(
     });
     return "duplicate";
   }
-  workflow.branchLedger.push({
+  stream.branchLedger.push({
     branchKey: branch.branchKey,
     inputHash: branch.inputHash,
   });
-  bufferBranch(workflow, clone(branch), input.now);
+  bufferBranch(stream, clone(branch), input.now);
   return "appended";
 }
 
 /** Claims one due run and freezes its complete ordered membership. */
 export async function claimAttentionRun(
-  workflow: AttentionWorkflowState,
+  stream: AttentionStreamState,
   input: { readonly now: string; readonly leaseMs: number },
 ): Promise<ActiveAttentionRun | undefined> {
-  const claim = beginAttentionRunClaim(workflow, input);
+  const claim = beginAttentionRunClaim(stream, input);
   if (claim === undefined) return undefined;
   if (claim.kind === "active") return claim.active;
   const batchKey = await deriveAttentionBatchKey({
@@ -250,104 +231,101 @@ export async function claimAttentionRun(
     orderedBranchKeys: claim.draft.branches.map((branch) => branch.branchKey),
   });
   const runKey = await deriveAttentionRunKey({ batchKey });
-  return activateAttentionRun(workflow, claim.draft, { batchKey, runKey }, input);
+  return activateAttentionRun(stream, claim.draft, { batchKey, runKey }, input);
 }
 
 /** Begins a claim without crossing an async boundary. */
 export function beginAttentionRunClaim(
-  workflow: AttentionWorkflowState,
+  stream: AttentionStreamState,
   input: { readonly now: string; readonly leaseMs: number },
 ): AttentionRunClaim | undefined {
-  if (workflow.active !== undefined) {
+  if (stream.active !== undefined) {
     if (
-      workflow.active.retryAt > input.now ||
-      (workflow.active.leaseUntil !== undefined && workflow.active.leaseUntil > input.now)
+      stream.active.retryAt > input.now ||
+      (stream.active.leaseUntil !== undefined && stream.active.leaseUntil > input.now)
     ) {
       return undefined;
     }
-    workflow.active.leaseUntil = addMs(input.now, input.leaseMs);
-    return { kind: "active", active: workflow.active };
+    stream.active.leaseUntil = addMs(input.now, input.leaseMs);
+    return { kind: "active", active: stream.active };
   }
-  const draft = freezeDueBatchDraft(workflow, input.now);
+  const draft = freezeDueBatchDraft(stream, input.now);
   return draft === undefined ? undefined : { kind: "draft", draft };
 }
 
 /** Installs keys derived by a durable step and completes a new claim. */
 export function activateAttentionRun(
-  workflow: AttentionWorkflowState,
+  stream: AttentionStreamState,
   draft: FrozenAttentionBatchDraft,
   identity: Pick<FrozenAttentionBatch, "batchKey" | "runKey">,
   input: { readonly now: string; readonly leaseMs: number },
 ): ActiveAttentionRun {
-  if (workflow.active !== undefined) throw new Error("attention stream already has an active run");
+  if (stream.active !== undefined) throw new Error("attention stream already has an active run");
   const batch: FrozenAttentionBatch = { ...draft, ...identity };
-  workflow.active = {
+  stream.active = {
     batch,
     stage: "preparing",
     retryAt: input.now,
     leaseUntil: addMs(input.now, input.leaseMs),
     failures: 0,
   };
-  return workflow.active;
+  return stream.active;
 }
 
 /** True only while this exact leased claim still owns the requested stage. */
 export function isCurrentAttentionClaim(
-  workflow: AttentionWorkflowState | undefined,
+  stream: AttentionStreamState | undefined,
   claim: ActiveAttentionRun,
   stage: ActiveAttentionRun["stage"],
-): workflow is AttentionWorkflowState {
+): stream is AttentionStreamState {
   return (
-    workflow?.active !== undefined &&
-    workflow.active.batch.runKey === claim.batch.runKey &&
-    workflow.active.stage === stage &&
-    workflow.active.leaseUntil !== undefined &&
-    workflow.active.leaseUntil === claim.leaseUntil
+    stream?.active !== undefined &&
+    stream.active.batch.runKey === claim.batch.runKey &&
+    stream.active.stage === stage &&
+    stream.active.leaseUntil !== undefined &&
+    stream.active.leaseUntil === claim.leaseUntil
   );
 }
 
 export async function applyPreparedAttentionOutcome(
-  workflow: AttentionWorkflowState,
+  stream: AttentionStreamState,
   outcome: PreparedAttentionOutcome,
   input: {
     readonly now: string;
     readonly maxPreparedWakeBytes: number;
-    readonly maxRecentMessages: number;
   },
 ): Promise<PreparedTransition> {
   const prepared = validateAttentionCallbackValue(() =>
     validatePreparedAttentionOutcome(outcome),
   );
-  const active = requireActive(workflow);
+  const active = requireActive(stream);
   const wake =
-    prepared.kind === "wake" && workflow.mode === "active"
+    prepared.kind === "wake" && stream.mode === "active"
       ? await createPreparedAttentionWake(active.batch, prepared)
       : undefined;
-  return applyPreparedAttentionCheckpoint(workflow, prepared, { ...input, wake });
+  return applyPreparedAttentionCheckpoint(stream, prepared, { ...input, wake });
 }
 
 /** Applies a validated outcome and optional wake without awaiting native promises. */
 export function applyPreparedAttentionCheckpoint(
-  workflow: AttentionWorkflowState,
+  stream: AttentionStreamState,
   prepared: PreparedAttentionOutcome,
   input: {
     readonly now: string;
     readonly maxPreparedWakeBytes: number;
-    readonly maxRecentMessages: number;
     readonly wake?: PreparedAttentionWake | undefined;
   },
 ): PreparedTransition {
-  const active = requireActive(workflow);
+  const active = requireActive(stream);
   if (active.stage !== "preparing") throw new Error("attention run is not preparing");
   if (prepared.kind === "ignore") {
     if (input.wake !== undefined) throw new TypeError("ignored outcome must not include a wake");
-    finishAttentionRun(workflow, active, input.now, false);
+    finishAttentionRun(stream, active, input.now, false);
     return "ignored";
   }
-  active.prepared = prepared;
-  if (workflow.mode === "shadow") {
+  if (stream.mode === "shadow") {
     if (input.wake !== undefined) throw new TypeError("shadow outcome must not include a wake");
-    finishAttentionRun(workflow, active, input.now, true);
+    finishAttentionRun(stream, active, input.now, true);
     return "shadowed";
   }
   if (input.wake === undefined) throw new TypeError("prepared wake outcome has no checkpointed wake");
@@ -362,100 +340,71 @@ export function applyPreparedAttentionCheckpoint(
 }
 
 export function applyAttentionDeliveryReceipt(
-  workflow: AttentionWorkflowState,
+  stream: AttentionStreamState,
   receipt: AttentionDeliveryReceipt,
-  input: { readonly now: string; readonly maxRecentMessages: number },
+  input: { readonly now: string },
 ): AttentionDeliveryReceipt {
-  const active = requireActive(workflow);
+  const active = requireActive(stream);
   if (active.stage !== "delivering" || active.wake === undefined) {
     throw new Error("attention run is not delivering");
   }
   const validated = validateAttentionCallbackValue(() =>
     validateAttentionDeliveryReceipt(receipt, active.wake!),
   );
-  const existingIndex = workflow.deliveryReceipts.findIndex(
-    (entry) => entry.wakeKey === active.wake!.wakeKey,
-  );
-  const retained = {
-    wakeKey: active.wake.wakeKey,
-    receipt: validated,
-  };
-  if (existingIndex >= 0) workflow.deliveryReceipts[existingIndex] = retained;
-  else workflow.deliveryReceipts.push(retained);
-  trimRing(workflow.deliveryReceipts, input.maxRecentMessages);
-  finishAttentionRun(workflow, active, input.now, true);
+  finishAttentionRun(stream, active, input.now, true);
   return validated;
 }
 
 export function failAttentionRun(
-  workflow: AttentionWorkflowState,
+  stream: AttentionStreamState,
   error: unknown,
   input: {
     readonly now: string;
     readonly retryDelayMs: number;
     readonly maxAttempts: number;
-    readonly maxRecentMessages: number;
     readonly terminalError: (error: unknown) => boolean;
   },
 ): "failed" | "terminal-failure" {
-  const active = requireActive(workflow);
+  const active = requireActive(stream);
   delete active.leaseUntil;
   active.failures += 1;
   if (input.terminalError(error) || active.failures >= input.maxAttempts) {
-    const runKey = active.batch.runKey;
-    finishAttentionRun(workflow, active, input.now, false);
-    workflow.terminalFailures.push({ runKey });
-    trimRing(workflow.terminalFailures, input.maxRecentMessages);
+    finishAttentionRun(stream, active, input.now, false);
     return "terminal-failure";
   }
   active.retryAt = addMs(input.now, input.retryDelayMs);
   return "failed";
 }
 
-export function nextAttentionDueAt(workflow: AttentionWorkflowState): string | undefined {
-  if (workflow.active !== undefined) {
-    return maxTimestamp(workflow.active.retryAt, workflow.active.leaseUntil);
+export function nextAttentionDueAt(stream: AttentionStreamState): string | undefined {
+  if (stream.active !== undefined) {
+    return maxTimestamp(stream.active.retryAt, stream.active.leaseUntil);
   }
-  const cooldown = workflow.cooldownUntil;
-  if (workflow.sealed.length > 0) return cooldown ?? workflow.sealed[0]!.closedAt;
-  if (workflow.open !== undefined) {
-    const policy = workflow.policy.buffer;
+  const cooldown = stream.cooldownUntil;
+  if (stream.sealed.length > 0) return cooldown ?? stream.sealed[0]!.closedAt;
+  if (stream.open !== undefined) {
+    const policy = stream.policy.buffer;
     const due =
       policy.mode === "immediate"
-        ? workflow.open.updatedAt
+        ? stream.open.updatedAt
         : minTimestamp(
-            addMs(workflow.open.updatedAt, policy.quietPeriodMs),
-            addMs(workflow.open.openedAt, policy.maxWaitMs),
+            addMs(stream.open.updatedAt, policy.quietPeriodMs),
+            addMs(stream.open.openedAt, policy.maxWaitMs),
           );
     return cooldown === undefined ? due : maxTimestamp(due, cooldown);
   }
-  return workflow.cooldownUntil;
-}
-
-export function purgeAttentionWorkflow(
-  workflow: AttentionWorkflowState,
-  now: string,
-): "active" | "empty" {
-  if (workflow.cooldownUntil !== undefined && workflow.cooldownUntil <= now) {
-    delete workflow.cooldownUntil;
-  }
-  return workflow.active === undefined &&
-    workflow.open === undefined &&
-    workflow.sealed.length === 0 &&
-    workflow.branchLedger.length === 0
-    ? "empty"
-    : "active";
+  return stream.cooldownUntil;
 }
 
 function bufferBranch(
-  workflow: AttentionWorkflowState,
+  stream: AttentionStreamState,
   branch: FullAttentionBranch,
   now: string,
 ): void {
   const bytes = attentionValueBytes(branch);
-  const policy = workflow.policy.buffer;
-  if (policy.mode === "immediate" && !isFuture(workflow.cooldownUntil, now)) {
-    workflow.sealed.push({
+  const policy = stream.policy.buffer;
+  if (policy.mode === "immediate" && !isFuture(stream.cooldownUntil, now)) {
+    stream.sealed.push({
       branches: [branch],
       bytes,
       openedAt: now,
@@ -467,58 +416,63 @@ function bufferBranch(
   }
   if (
     policy.mode === "debounce" &&
-    workflow.open !== undefined &&
-    (workflow.open.branches.length + 1 > policy.maxEvents ||
-      workflow.open.bytes + bytes > policy.maxBytes)
+    stream.open !== undefined &&
+    (stream.open.branches.length + 1 > policy.maxEvents ||
+      stream.open.bytes + bytes > policy.maxBytes)
   ) {
     const closedBy: MonitorBatchClosedBy =
-      workflow.open.branches.length + 1 > policy.maxEvents ? "max-events" : "max-bytes";
-    workflow.sealed.push({ ...workflow.open, closedAt: now, closedBy });
-    delete workflow.open;
+      stream.open.branches.length + 1 > policy.maxEvents ? "max-events" : "max-bytes";
+    stream.sealed.push({ ...stream.open, closedAt: now, closedBy });
+    delete stream.open;
   }
-  workflow.open =
-    workflow.open === undefined
+  stream.open =
+    stream.open === undefined
       ? { branches: [branch], bytes, openedAt: now, updatedAt: now }
       : {
-          ...workflow.open,
-          branches: [...workflow.open.branches, branch],
-          bytes: workflow.open.bytes + bytes,
+          ...stream.open,
+          branches: [...stream.open.branches, branch],
+          bytes: stream.open.bytes + bytes,
           updatedAt: now,
         };
 }
 
 function freezeDueBatchDraft(
-  workflow: AttentionWorkflowState,
+  stream: AttentionStreamState,
   now: string,
 ): FrozenAttentionBatchDraft | undefined {
-  if (isFuture(workflow.cooldownUntil, now)) return undefined;
-  let batch = workflow.sealed.shift();
-  if (batch === undefined && workflow.open !== undefined) {
-    const policy = workflow.policy.buffer;
+  if (isFuture(stream.cooldownUntil, now)) return undefined;
+  let batch = stream.sealed.shift();
+  if (batch === undefined && stream.open !== undefined) {
+    const policy = stream.policy.buffer;
     let closedBy: MonitorBatchClosedBy;
-    if (workflow.cooldownUntil !== undefined && workflow.cooldownUntil <= now) {
+    if (stream.cooldownUntil !== undefined && stream.cooldownUntil <= now) {
       closedBy = "cooldown-expired";
     } else if (policy.mode === "immediate") {
       closedBy = "immediate";
     } else {
-      const quietAt = addMs(workflow.open.updatedAt, policy.quietPeriodMs);
-      const maximumAt = addMs(workflow.open.openedAt, policy.maxWaitMs);
+      const quietAt = addMs(stream.open.updatedAt, policy.quietPeriodMs);
+      const maximumAt = addMs(stream.open.openedAt, policy.maxWaitMs);
       if (quietAt > now && maximumAt > now) return undefined;
       closedBy = maximumAt <= quietAt ? "max-wait" : "quiet-period";
     }
-    batch = { ...workflow.open, closedAt: now, closedBy };
-    delete workflow.open;
-    delete workflow.cooldownUntil;
+    batch = { ...stream.open, closedAt: now, closedBy };
+    delete stream.open;
+    delete stream.cooldownUntil;
   }
-  if (batch === undefined || batch.closedBy === undefined) return undefined;
+  if (batch === undefined || batch.closedBy === undefined) {
+    if (stream.cooldownUntil !== undefined && stream.cooldownUntil <= now) {
+      delete stream.cooldownUntil;
+    }
+    return undefined;
+  }
   const branches = [...batch.branches].sort(compareAttentionBranches);
   return {
-    instanceKey: workflow.instanceKey,
-    applicationId: workflow.applicationId,
-    tenantId: workflow.tenantId,
-    monitorId: workflow.monitorId,
-    definitionVersion: workflow.definitionVersion,
-    correlationKey: workflow.correlationKey,
+    instanceKey: stream.instanceKey,
+    applicationId: stream.applicationId,
+    tenantId: stream.tenantId,
+    monitorId: stream.monitorId,
+    definitionVersion: stream.definitionVersion,
+    correlationKey: stream.correlationKey,
     openedAt: batch.openedAt,
     frozenAt: batch.closedAt ?? now,
     closedBy: batch.closedBy,
@@ -528,35 +482,35 @@ function freezeDueBatchDraft(
 }
 
 function finishAttentionRun(
-  workflow: AttentionWorkflowState,
+  stream: AttentionStreamState,
   run: ActiveAttentionRun,
   now: string,
   woke: boolean,
 ): void {
   const completed = new Set(run.batch.branches.map((branch) => branch.branchKey));
-  workflow.branchLedger = workflow.branchLedger.filter(
+  stream.branchLedger = stream.branchLedger.filter(
     (entry) => !completed.has(entry.branchKey),
   );
-  delete workflow.active;
-  if (woke && workflow.policy.cooldownAfterWakeMs !== undefined) {
-    workflow.cooldownUntil = addMs(now, workflow.policy.cooldownAfterWakeMs);
-    if (workflow.policy.buffer.mode !== "immediate") return;
+  delete stream.active;
+  if (woke && stream.policy.cooldownAfterWakeMs !== undefined) {
+    stream.cooldownUntil = addMs(now, stream.policy.cooldownAfterWakeMs);
+    if (stream.policy.buffer.mode !== "immediate") return;
     const buffered = [
-      ...workflow.sealed.flatMap((batch) => batch.branches),
-      ...(workflow.open?.branches ?? []),
+      ...stream.sealed.flatMap((batch) => batch.branches),
+      ...(stream.open?.branches ?? []),
     ];
     if (buffered.length > 0) {
       const openedAt = [
-        ...workflow.sealed.map((batch) => batch.openedAt),
-        ...(workflow.open === undefined ? [] : [workflow.open.openedAt]),
+        ...stream.sealed.map((batch) => batch.openedAt),
+        ...(stream.open === undefined ? [] : [stream.open.openedAt]),
       ].sort()[0]!;
-      workflow.open = {
+      stream.open = {
         branches: buffered,
         bytes: buffered.reduce((sum, branch) => sum + attentionValueBytes(branch), 0),
         openedAt,
         updatedAt: now,
       };
-      workflow.sealed = [];
+      stream.sealed = [];
     }
   }
 }
@@ -572,23 +526,23 @@ function trimRing<T>(values: T[], maximum: number): void {
   if (values.length > maximum) values.splice(0, values.length - maximum);
 }
 
-function requireActive(workflow: AttentionWorkflowState): ActiveAttentionRun {
-  if (workflow.active === undefined) throw new Error("attention stream has no active run");
-  return workflow.active;
+function requireActive(stream: AttentionStreamState): ActiveAttentionRun {
+  if (stream.active === undefined) throw new Error("attention stream has no active run");
+  return stream.active;
 }
 
-function assertWorkflowIdentity(
-  workflow: AttentionWorkflowState,
+function assertStreamIdentity(
+  stream: AttentionStreamState,
   branch: FullAttentionBranch,
 ): void {
   if (
-    workflow.applicationId !== branch.applicationId ||
-    workflow.tenantId !== branch.tenantId ||
-    workflow.partitionKey !== branch.partitionKey ||
-    workflow.monitorId !== branch.monitorId ||
-    workflow.definitionVersion !== branch.definitionVersion ||
-    workflow.correlationKey !== branch.correlationKey ||
-    workflow.mode !== branch.mode
+    stream.applicationId !== branch.applicationId ||
+    stream.tenantId !== branch.tenantId ||
+    stream.partitionKey !== branch.partitionKey ||
+    stream.monitorId !== branch.monitorId ||
+    stream.definitionVersion !== branch.definitionVersion ||
+    stream.correlationKey !== branch.correlationKey ||
+    stream.mode !== branch.mode
   ) {
     throw new TypeError("attention branch does not match its correlation stream identity");
   }

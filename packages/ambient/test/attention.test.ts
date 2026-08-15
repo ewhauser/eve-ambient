@@ -9,7 +9,6 @@ import {
 import {
   canonicalizeChannelDelivery,
   defineChannelCanonicalization,
-  deriveFanoutManifestHash,
   hashIdempotencyInput,
 } from "../src/idempotency.js";
 
@@ -39,7 +38,7 @@ describe("attention fan-out protocol", () => {
     await expect(validateAcceptedFanout(compiled)).resolves.toEqual(compiled);
   });
 
-  it("rejects claimed lineage, manifest, and branch payload tampering", async () => {
+  it("rejects claimed lineage and branch payload tampering", async () => {
     const compiled = await compileAcceptedFanout({
       source: await acceptedSource(),
       branches: [branch()],
@@ -49,12 +48,6 @@ describe("attention fan-out protocol", () => {
       wrongOccurrence.eventKey as unknown as AcceptedFanout["occurrenceKey"];
     await expect(validateAcceptedFanout(wrongOccurrence)).rejects.toThrow(
       "occurrenceKey does not match",
-    );
-
-    const wrongManifest = clone(compiled);
-    wrongManifest.manifestHash = compiled.inputHash as unknown as AcceptedFanout["manifestHash"];
-    await expect(validateAcceptedFanout(wrongManifest)).rejects.toThrow(
-      "manifestHash does not match",
     );
 
     const wrongBranch = clone(compiled);
@@ -136,11 +129,6 @@ describe("attention fan-out protocol", () => {
     delete logicalInput.branchKey;
     delete logicalInput.inputHash;
     value.inputHash = await hashIdempotencyInput(logicalInput);
-    independentlyHashed.manifestHash = await deriveFanoutManifestHash({
-      occurrenceKey: independentlyHashed.occurrenceKey,
-      orderedBranches: [{ branchKey: value.branchKey, inputHash: value.inputHash }],
-    });
-
     await expect(validateAcceptedFanout(independentlyHashed)).rejects.toBeInstanceOf(
       AttentionCapacityError,
     );

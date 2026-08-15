@@ -1,7 +1,14 @@
 # Ambient on a correlation World
 
-This example defines a support rule once, exercises it with the in-memory
-reference engine, and binds the production runtime with `world()`.
+This workspace contains two typechecked application shapes:
+
+- `application.ts` defines a small provider-independent support rule and
+  exercises it with the in-memory reference engine;
+- `github-pr-shepherd.ts` listens to Eve's typed GitHub PR and check-suite
+  events, debounces them per pull request, and invokes one idempotent Eve turn
+  for a current CI failure.
+
+Both bind the production runtime with `world()`.
 
 ```ts
 const application = createSupportWorldApplication({

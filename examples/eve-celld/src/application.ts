@@ -1,22 +1,23 @@
 import { defineAmbientApplication } from "@ewhauser/eve-ambient";
 import {
-  createEveAttentionRoute,
+  createEveGitHubAttentionRoute,
   type EveChannelAuth,
 } from "@ewhauser/eve-ambient-eve";
 import type { ChannelFrom } from "eve/channels";
+import type { GitHubChannelState } from "eve/channels/github";
 
-import { blockedPullRequestRule } from "./rules/blocked-pull-request.js";
+import { pullRequestShepherdRule } from "./rules/pull-request-shepherd.js";
 
 export function defineEngineeringApplication(options: {
   readonly applicationId: string;
   readonly eve: {
     readonly auth: EveChannelAuth;
-    readonly from: ChannelFrom;
+    readonly from: ChannelFrom<GitHubChannelState>;
   };
 }) {
   return defineAmbientApplication({
     applicationId: options.applicationId,
-    rules: [blockedPullRequestRule],
-    routes: [createEveAttentionRoute(options.eve)],
+    rules: [pullRequestShepherdRule],
+    routes: [createEveGitHubAttentionRoute(options.eve)],
   });
 }

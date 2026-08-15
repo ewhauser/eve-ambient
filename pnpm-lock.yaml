@@ -22,9 +22,6 @@ importers:
       eve:
         specifier: 0.38.1
         version: 0.38.1(patch_hash=d32bd74253cdb621fa7401a045a43bfc505a9d5906211932ff0c38cc741085f0)(ai@7.0.62(zod@4.4.3))(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.2))
-      zod:
-        specifier: ^4.4.3
-        version: 4.4.3
     devDependencies:
       typescript:
         specifier: ^7.0.2

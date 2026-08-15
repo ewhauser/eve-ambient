@@ -1,20 +1,41 @@
-# Eve + celld attention engine
+# Eve GitHub PR shepherd on celld
 
-This private workspace shows a typed GitHub channel event and ambient rule
-running on the celld `AttentionEngine` with no PostgreSQL dependency.
+This workspace shows a real ambient workflow built on Eve's native
+`githubChannel()`: a pull-request shepherd that coalesces PR and check-suite
+webhooks, ignores a stale failure when a later success or closure arrives, and
+wakes one idempotent Eve turn for the latest unresolved CI failure.
 
-1. Run `pnpm exec eve-ambient init celld ./attention-worker`, configure it, and deploy it.
-2. Build the application with `createEveCelldApplication()`.
-3. Mount `application.fetch` at `/ambient/prepare` and `/ambient/deliver`.
-4. Pass authenticated GitHub deliveries to
-   `application.publish(githubChannel, delivery)` and acknowledge only after it resolves.
+The consumer does not define a GitHub webhook schema. The Eve adapter owns:
 
-Rules and routes live in `src/application.ts` and are registered exactly once.
-Production binds that definition with `celld()`; the tests bind the same
-definition with `memory()`.
+- GitHub App verification and Eve's normalized `onPullRequest` and
+  `onCheckSuite` hooks;
+- delivery, installation, repository, actor, PR conversation, and full raw
+  event canonicalization;
+- waiting for Ambient's durable acceptance before returning Eve's `200`;
+- mapping the final `wakeKey` to Eve's durable turn admission key.
 
-Event-coordinator cells freeze fan-out. Correlation cells hold complete branch
-and batch values, drive alarms, record prepared outcomes before delivery, and
-delete terminal payloads. Their only application calls are authenticated
-by-value `prepare` and `deliver` callbacks. There is no PostgreSQL pool, event
-repository, payload lookup, history, or replay API.
+The application only defines its policy in
+`src/rules/pull-request-shepherd.ts` and its deployment bindings:
+
+```ts
+const application = createEveCelldApplication({
+  applicationId: "engineering-agent",
+  celld: { url: env.CELLD_URL, secret: env.CELLD_SECRET },
+  eve: { from: githubFrom, auth },
+});
+
+export default createEngineeringGitHubChannel({
+  publisher: application,
+  tenantId: context => context.repository.owner,
+  credentials,
+});
+```
+
+Subscribe the GitHub App to `pull_request` and `check_suite` events. Mount
+`application.fetch` for celld's `/ambient/prepare` and `/ambient/deliver`
+callbacks; Eve mounts the returned GitHub channel at `/eve/v1/github`.
+
+Event-coordinator cells freeze fan-out. Correlation cells temporarily hold the
+complete PR/check payloads, drive alarms, checkpoint the prepared outcome, and
+delete terminal payloads. There is no PostgreSQL pool, event repository,
+payload lookup, history, or replay API.

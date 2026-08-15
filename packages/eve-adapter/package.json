@@ -1,7 +1,7 @@
 {
   "name": "@ewhauser/eve-ambient-eve",
   "version": "0.0.0",
-  "description": "Official Eve channel adapter for @ewhauser/eve-ambient.",
+  "description": "Official Eve ingress and delivery adapter for @ewhauser/eve-ambient.",
   "license": "MIT",
   "type": "module",
   "files": [

@@ -11,8 +11,7 @@
   "dependencies": {
     "@ewhauser/eve-ambient": "workspace:*",
     "@ewhauser/eve-ambient-eve": "workspace:*",
-    "eve": "0.38.1",
-    "zod": "^4.4.3"
+    "eve": "0.38.1"
   },
   "devDependencies": {
     "typescript": "^7.0.2",

@@ -95,7 +95,72 @@ export interface ChannelCanonicalizationContract<
   TEvent extends CanonicalChannelEvent = CanonicalChannelEvent,
 > {
   readonly version: number;
-  readonly canonicalize: (raw: TRaw) => TEvent;
+  readonly canonicalize: (raw: TRaw) => TEvent | Promise<TEvent>;
+}
+
+export interface ChannelInputParser<TInput> {
+  readonly parse: (value: unknown) => TInput;
+}
+
+export interface StandardChannelSchema<TInput = unknown, TOutput = TInput> {
+  readonly "~standard": {
+    readonly version: 1;
+    readonly validate: (
+      value: unknown,
+    ) =>
+      | { readonly value: TOutput; readonly issues?: undefined }
+      | { readonly issues: readonly { readonly message: string }[] }
+      | Promise<
+          | { readonly value: TOutput; readonly issues?: undefined }
+          | { readonly issues: readonly { readonly message: string }[] }
+        >;
+    readonly types?: {
+      readonly input: TInput;
+      readonly output: TOutput;
+    } | undefined;
+  };
+}
+
+type ChannelSchema = ChannelInputParser<unknown> | StandardChannelSchema<unknown, unknown>;
+type ChannelSchemaInput<TSchema> = TSchema extends StandardChannelSchema<infer TInput, unknown>
+  ? TInput
+  : TSchema extends ChannelInputParser<infer TInput>
+    ? TInput
+    : never;
+type ChannelSchemaOutput<TSchema> = TSchema extends StandardChannelSchema<unknown, infer TOutput>
+  ? TOutput
+  : TSchema extends ChannelInputParser<infer TOutput>
+    ? TOutput
+    : never;
+
+export type ChannelEvent<TChannel> = TChannel extends ChannelCanonicalizationContract<
+  never,
+  infer TEvent
+>
+  ? TEvent
+  : never;
+
+/**
+ * Defines a typed channel from Standard Schema (including Zod) or a parser and
+ * one deterministic mapping, so consumers do not repeat the input type.
+ */
+export function defineChannel<TSchema extends ChannelSchema, TEvent extends CanonicalChannelEvent>(options: {
+  readonly version: number;
+  readonly input: TSchema;
+  readonly map: (input: ChannelSchemaOutput<TSchema>) => TEvent;
+}): ChannelCanonicalizationContract<ChannelSchemaInput<TSchema>, TEvent> {
+  if (options.input === null || typeof options.input !== "object" || !isChannelSchema(options.input)) {
+    throw new TypeError("channel input must implement Standard Schema or define parse");
+  }
+  if (typeof options.map !== "function") {
+    throw new TypeError("channel map must be a function");
+  }
+  return defineChannelCanonicalization({
+    version: options.version,
+    async canonicalize(raw) {
+      return options.map(await parseChannelInput(options.input, raw));
+    },
+  });
 }
 
 export function defineChannelCanonicalization<
@@ -120,7 +185,7 @@ export async function canonicalizeChannelDelivery<
 ): Promise<IdempotentEnvelope<AcceptedChannelEvent<TEvent>, EventKey>> {
   assertPositiveInteger(contract.version, "channel canonicalization version");
   assertNonEmpty(options.applicationId, "applicationId");
-  const event = cloneCanonicalEvent(contract.canonicalize(raw));
+  const event = cloneCanonicalEvent(await contract.canonicalize(raw));
   const key = await deriveEventKey({
     tenantId: event.source.tenantId,
     applicationId: options.applicationId,
@@ -147,6 +212,35 @@ export async function canonicalizeChannelDelivery<
 
 export async function hashIdempotencyInput(value: unknown): Promise<InputHash> {
   return domainHash("eve:input:v1", [value]) as Promise<InputHash>;
+}
+
+function isChannelSchema(value: object): value is ChannelSchema {
+  if ("~standard" in value) {
+    const standard = value["~standard"];
+    return (
+      standard !== null &&
+      typeof standard === "object" &&
+      "validate" in standard &&
+      typeof standard.validate === "function"
+    );
+  }
+  return "parse" in value && typeof value.parse === "function";
+}
+
+async function parseChannelInput<TSchema extends ChannelSchema>(
+  schema: TSchema,
+  value: ChannelSchemaInput<TSchema>,
+): Promise<ChannelSchemaOutput<TSchema>> {
+  if ("~standard" in schema) {
+    const result = await schema["~standard"].validate(value);
+    if ("issues" in result && result.issues !== undefined) {
+      const detail = result.issues.map((issue) => issue.message).join("; ");
+      throw new TypeError(`channel input is invalid${detail.length === 0 ? "" : `: ${detail}`}`);
+    }
+    if (!("value" in result)) throw new TypeError("channel input validation returned no value");
+    return result.value as ChannelSchemaOutput<TSchema>;
+  }
+  return schema.parse(value) as ChannelSchemaOutput<TSchema>;
 }
 
 /** Validates a key reconstructed from durable or transport data. */

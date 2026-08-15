@@ -229,7 +229,7 @@ export class AttentionCell {
     try {
       if (claimed.stage === "preparing") {
         const prepared = (await this.#callback(
-          this.#requiredUrl("ATTENTION_PREPARE_URL"),
+          this.#callbackUrl("prepare"),
           claimed.batch,
         )) as PreparedAttentionOutcome;
         const transition = await this.#withLock(async () => {
@@ -259,7 +259,7 @@ export class AttentionCell {
       });
       if (wake === undefined) return;
       const receipt = (await this.#callback(
-        this.#requiredUrl("ATTENTION_DELIVER_URL"),
+        this.#callbackUrl("deliver"),
         wake,
       )) as AttentionDeliveryReceipt;
       const committed = await this.#withLock(async () => {
@@ -447,6 +447,15 @@ export class AttentionCell {
 
   #requiredUrl(name: string): string {
     return absoluteUrl(this.env?.[name], name);
+  }
+
+  #callbackUrl(kind: "prepare" | "deliver"): string {
+    if (this.env?.ATTENTION_CALLBACK_URL !== undefined) {
+      return `${absoluteUrl(this.env.ATTENTION_CALLBACK_URL, "ATTENTION_CALLBACK_URL")}/${kind}`;
+    }
+    return this.#requiredUrl(
+      kind === "prepare" ? "ATTENTION_PREPARE_URL" : "ATTENTION_DELIVER_URL",
+    );
   }
 
   #limits(): Limits {

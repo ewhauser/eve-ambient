@@ -21,17 +21,19 @@ versions.
 ## Run the backend
 
 ```ts
-import { createAttentionCallbacks } from "@ewhauser/eve-ambient";
-import { PostgresAttentionEngine } from "@ewhauser/eve-ambient/postgres";
+import { defineAmbientApplication } from "@ewhauser/eve-ambient";
+import { postgres } from "@ewhauser/eve-ambient/postgres";
 
-const callbacks = createAttentionCallbacks({ rules, routes });
-const engine = new PostgresAttentionEngine({
+const ambient = defineAmbientApplication({
+  applicationId: "support-agent",
+  rules,
+  routes,
+}).with(postgres({
   engineId: "support-agent",
   pool,
-  callbacks,
-});
+}));
 
-await engine.initialize();
+await ambient.engine.initialize();
 ```
 
 `initialize()` verifies that the migration is present; it does not create or
@@ -40,7 +42,7 @@ work:
 
 ```ts
 setInterval(() => {
-  void engine.runOnce({ limit: 100 });
+  void ambient.engine.runOnce({ limit: 100 });
 }, 250);
 ```
 

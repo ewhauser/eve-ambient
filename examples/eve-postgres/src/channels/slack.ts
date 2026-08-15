@@ -1,6 +1,6 @@
 import {
-  defineChannelCanonicalization,
-  type CanonicalChannelEvent,
+  defineChannel,
+  type ChannelEvent,
 } from "@ewhauser/eve-ambient";
 import { z } from "zod";
 
@@ -17,23 +17,12 @@ export const slackMessageInputSchema = z.object({
 });
 
 export type SlackMessageInput = z.infer<typeof slackMessageInputSchema>;
-export type SlackMessageEvent = CanonicalChannelEvent<
-  "slack.message",
-  {
-    readonly channelId: string;
-    readonly incidentId: string;
-    readonly severity: "info" | "warning" | "critical";
-    readonly text: string;
-    readonly threadTs: string;
-  },
-  { readonly address: string }
->;
 
 /** The authenticated Slack adapter owns this deterministic normalization. */
-export const slackChannel = defineChannelCanonicalization({
+export const slackChannel = defineChannel({
   version: 1,
-  canonicalize(raw: SlackMessageInput): SlackMessageEvent {
-    const input = slackMessageInputSchema.parse(raw);
+  input: slackMessageInputSchema,
+  map(input) {
     return {
       id: input.eventId,
       type: "slack.message",
@@ -57,3 +46,5 @@ export const slackChannel = defineChannelCanonicalization({
     };
   },
 });
+
+export type SlackMessageEvent = ChannelEvent<typeof slackChannel>;

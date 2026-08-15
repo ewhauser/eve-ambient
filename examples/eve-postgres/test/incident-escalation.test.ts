@@ -1,38 +1,25 @@
-import {
-  createAmbientPublisher,
-  createAttentionCallbacks,
-} from "@ewhauser/eve-ambient";
-import { MemoryAttentionEngine } from "@ewhauser/eve-ambient/memory";
+import { memory } from "@ewhauser/eve-ambient/memory";
 import { VirtualMonitorClock } from "@ewhauser/eve-ambient/testing";
-import { createEveAttentionRoute } from "@ewhauser/eve-ambient-eve";
 import type { ChannelFrom, ChannelSendOptions } from "eve/channels";
 import { expect, it } from "vitest";
+import { defineEngineeringApplication } from "../src/application.js";
 import { slackChannel } from "../src/channels/slack.js";
-import { incidentEscalationRule } from "../src/rules/incident-escalation.js";
 
 it("publishes a Slack rule into one idempotent Eve wake", async () => {
   const deliveries: Array<{ message: string; options: ChannelSendOptions }> = [];
-  const from = (() => ({
+  const from = ((address: string) => ({
     async send(message: string, options: ChannelSendOptions) {
       deliveries.push({ message, options });
       return { id: "session-1" };
     },
   })) as unknown as ChannelFrom;
-  const route = createEveAttentionRoute({ id: "eve", auth: null, address: "incident", from });
   const clock = new VirtualMonitorClock();
-  const callbacks = createAttentionCallbacks({
-    rules: [incidentEscalationRule],
-    routes: [route],
-    clock,
-  });
-  const engine = new MemoryAttentionEngine({ callbacks, clock });
-  const publisher = createAmbientPublisher({
+  const ambient = defineEngineeringApplication({
     applicationId: "engineering-agent",
-    engine,
-    rules: [incidentEscalationRule],
-  });
+    eve: { auth: null, from },
+  }).with(memory({ clock }));
 
-  const receipt = await publisher.publish(slackChannel, {
+  const receipt = await ambient.publish(slackChannel, {
     eventId: "event-1",
     installationId: "slack-installation",
     tenantId: "tenant-1",
@@ -44,7 +31,7 @@ it("publishes a Slack rule into one idempotent Eve wake", async () => {
     threadTs: "1700000000.000001",
   });
   clock.advance(30_000);
-  await engine.runDue();
+  await ambient.engine.runDue();
 
   expect(receipt.attention.branchKeys).toHaveLength(1);
   expect(deliveries).toHaveLength(1);

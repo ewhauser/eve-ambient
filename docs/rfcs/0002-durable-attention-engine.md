@@ -230,6 +230,8 @@ type PreparedOutcome =
       readonly kind: "wake";
       readonly decision: JsonValue;
       readonly routeId: string;
+      /** Explicit final delivery destination. */
+      readonly target: JsonValue;
       readonly instruction: string;
       /** Complete immutable evidence, not references to source events. */
       readonly evidence: JsonValue;
@@ -247,6 +249,7 @@ interface PreparedWake {
   readonly correlationKey: string;
   readonly rootEventKeys: readonly EventKey[];
   readonly routeId: string;
+  readonly target: JsonValue;
   readonly instruction: string;
   readonly decision: JsonValue;
   readonly evidence: JsonValue;
@@ -641,28 +644,22 @@ implementation, not the reference shape every engine must emulate.
 The intended application boundary is approximately:
 
 ```ts
-const ambient = createAmbientPublisher({
+const application = defineAmbientApplication({
   applicationId: "engineering-agent",
-  channels,
-  monitors,
-  engine: createCelldAttentionEngine({ url, secret }),
+  rules,
+  routes,
 });
 
-await ambient.publish(events, "pull_request.changed", providerEvent);
+const ambient = application.with(celld({ url, secret }));
+await ambient.publish(githubChannel, providerEvent);
 ```
 
-The application separately registers the compiled definition registry and the
-two callbacks with its chosen backend host:
+The backend binding registers the same immutable rule and route registry for
+publishing and callbacks:
 
 ```ts
-const callbacks = createAttentionCallbacks({
-  definitions: monitors,
-  decisions,
-  deliveryChannels,
-});
-
-app.post("/ambient/prepare", callbacks.handlePrepare);
-app.post("/ambient/deliver", callbacks.handleDeliver);
+app.post("/ambient/prepare", ambient.fetch);
+app.post("/ambient/deliver", ambient.fetch);
 ```
 
 A PostgreSQL worker can call the same callback object directly. The public

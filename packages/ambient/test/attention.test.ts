@@ -1,15 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
   AttentionCapacityError,
-  deriveFanoutManifestHash,
   compileAcceptedFanout,
-  defineChannelCanonicalization,
-  canonicalizeChannelDelivery,
-  hashIdempotencyInput,
   validateAcceptedFanout,
   type AcceptedFanout,
   type AttentionBranchPlan,
-} from "../src/index.js";
+} from "../src/attention.js";
+import {
+  canonicalizeChannelDelivery,
+  defineChannelCanonicalization,
+  deriveFanoutManifestHash,
+  hashIdempotencyInput,
+} from "../src/idempotency.js";
 
 describe("attention fan-out protocol", () => {
   it("carries the canonical event by value and erases declaration order", async () => {

@@ -78,6 +78,8 @@ same `wakeKey`.
 prepared wakes to named routes:
 
 ```ts
+import { createAttentionCallbacks } from "@ewhauser/eve-ambient/protocol";
+
 const callbacks = createAttentionCallbacks({
   rules: [rule],
   routes: [eveRoute],
@@ -85,7 +87,8 @@ const callbacks = createAttentionCallbacks({
 ```
 
 `prepare()` returns either `{ kind: "ignore", decision }` or a wake containing
-`routeId`, trusted `instruction`, untrusted `evidence`, and `decision`.
+`routeId`, an explicit delivery `target`, trusted `instruction`, untrusted
+`evidence`, and `decision`.
 `deliver()` must treat `wakeKey` as the idempotency key of the final durable
 action and return the same receipt for a matching retry.
 

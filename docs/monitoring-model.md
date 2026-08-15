@@ -9,11 +9,12 @@ A channel canonicalization contract turns a provider-specific delivery into a
 `CanonicalChannelEvent` with stable source identity:
 
 ```ts
-import { defineChannelCanonicalization } from "@ewhauser/eve-ambient";
+import { defineChannel } from "@ewhauser/eve-ambient";
 
-export const slackChannel = defineChannelCanonicalization({
+export const slackChannel = defineChannel({
   version: 1,
-  canonicalize: normalizeSlackDelivery,
+  input: slackDeliverySchema,
+  map: normalizeSlackDelivery,
 });
 ```
 
@@ -27,47 +28,45 @@ derives `eventKey`, and hashes the complete source input.
 An ambient rule is an immutable, version-addressed definition:
 
 ```ts
-import { defineAmbientRule } from "@ewhauser/eve-ambient";
+import { debounce, defineAmbientRule, ignore, wake } from "@ewhauser/eve-ambient";
 
 export const incidentRule = defineAmbientRule({
   id: "incident-escalation",
   version: "v1",
-  mode: "active",
-  policy: {
-    buffer: {
-      mode: "debounce",
-      quietPeriodMs: 30_000,
-      maxWaitMs: 5 * 60_000,
-      maxEvents: 100,
-      maxBytes: 512_000,
-    },
-    cooldownAfterWakeMs: 10 * 60_000,
-  },
+  channel: slackChannel,
+  policy: debounce({
+    quiet: "30s",
+    maxWait: "5m",
+    cooldown: "10m",
+    maxBytes: 512_000,
+  }),
   matches: event => event.type === "incident.changed",
   correlationKey: event => event.data.incidentId,
-  orderKey: event => event.occurredAt ?? event.id,
-  async prepare(batch) {
-    return shouldEscalate(batch)
-      ? {
-          kind: "wake",
-          routeId: "eve",
+  decide({ events, latest }) {
+    return shouldEscalate(events)
+      ? wake({
+          target: latest.replyTarget.address,
           instruction: "Investigate the incident and report the next action.",
           decision: { reason: "severity-increased" },
-          evidence: { events: batch.branches.map(branch => branch.event) },
-        }
-      : { kind: "ignore", decision: { reason: "no-escalation" } };
+          evidence: { events },
+        })
+      : ignore({ reason: "no-escalation" });
   },
 });
 ```
 
-`matches`, `correlationKey`, and `orderKey` run before durable admission and
-must be deterministic and side-effect free. `prepare` runs later on a frozen,
-complete batch. It may be repeated if its response is lost before the backend
-records it, so it must not perform the final action.
+`matches`, `correlationKey`, and the optional `orderKey` run before durable
+admission and must be deterministic and side-effect free. `decide` runs later
+on a convenient view of the frozen, complete batch. It may be repeated if its
+response is lost before the backend records it, so it must not perform the
+final action.
 
-`mode: "shadow"` executes preparation and records the result without delivery.
-Rule IDs and versions are part of durable lineage; change the version whenever
-behavior or policy changes.
+Rules default to active delivery. `mode: "shadow"` executes preparation and
+records the result without delivery. Rule IDs and versions are part of durable
+lineage; change the version whenever behavior or policy changes.
+
+`wake()` may omit `routeId` when the application registers exactly one route.
+Applications with multiple delivery routes must select one explicitly.
 
 ## Buffer policies
 
@@ -83,11 +82,11 @@ not a live mutation.
 ## Publisher
 
 ```ts
-const ambient = createAmbientPublisher({
+const ambient = defineAmbientApplication({
   applicationId: "support-agent",
-  engine,
   rules: [incidentRule],
-});
+  routes: [eveRoute],
+}).with(postgres({ pool, engineId: "support-agent" }));
 
 const receipt = await ambient.publish(slackChannel, providerDelivery);
 ```

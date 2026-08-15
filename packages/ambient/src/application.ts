@@ -8,6 +8,7 @@ import {
   type AttentionMode,
   type FrozenAttentionBatch,
   type PreparedAttentionOutcome,
+  type PreparedAttentionResult,
   type PreparedAttentionWake,
   type SerializableMailboxPolicy,
 } from "./attention.js";
@@ -30,27 +31,87 @@ export interface AmbientRule<TEvent extends CanonicalChannelEvent = CanonicalCha
   readonly mode: AttentionMode;
   readonly phase?: MonitorPhase | undefined;
   readonly policy: SerializableMailboxPolicy;
+  readonly channel?: object | undefined;
   readonly matches: (event: TEvent) => boolean;
   readonly correlationKey: (event: TEvent) => string;
   readonly orderKey: (event: TEvent) => string;
-  readonly prepare: (batch: FrozenAttentionBatch<TEvent>) => Promise<PreparedAttentionOutcome>;
+  readonly prepare: (batch: FrozenAttentionBatch<TEvent>) => Promise<PreparedAttentionResult>;
 }
 
+export interface AmbientBatch<TEvent extends CanonicalChannelEvent = CanonicalChannelEvent> {
+  readonly batch: FrozenAttentionBatch<TEvent>;
+  readonly events: readonly TEvent[];
+  readonly latest: TEvent;
+  readonly eventKeys: readonly EventKey[];
+}
+
+interface AmbientRuleDefinitionBase<TEvent extends CanonicalChannelEvent> {
+  readonly id: string;
+  readonly version: string;
+  readonly mode?: AttentionMode | undefined;
+  readonly phase?: MonitorPhase | undefined;
+  readonly policy: SerializableMailboxPolicy;
+  readonly channel?: ChannelCanonicalizationContract<never, TEvent> | undefined;
+  readonly matches?: ((event: TEvent) => boolean) | undefined;
+  readonly correlationKey: (event: TEvent) => string;
+  readonly orderKey?: ((event: TEvent) => string) | undefined;
+}
+
+export type AmbientRuleDefinition<TEvent extends CanonicalChannelEvent> =
+  AmbientRuleDefinitionBase<TEvent> &
+    (
+      | {
+          readonly decide: (
+            batch: AmbientBatch<TEvent>,
+          ) => PreparedAttentionResult | Promise<PreparedAttentionResult>;
+          readonly prepare?: never;
+        }
+      | {
+          readonly prepare: (
+            batch: FrozenAttentionBatch<TEvent>,
+          ) => PreparedAttentionResult | Promise<PreparedAttentionResult>;
+          readonly decide?: never;
+        }
+    );
+
 export function defineAmbientRule<TEvent extends CanonicalChannelEvent>(
-  rule: AmbientRule<TEvent>,
+  definition: AmbientRuleDefinition<TEvent>,
 ): AmbientRule<TEvent> {
-  nonEmpty(rule.id, "rule id");
-  nonEmpty(rule.version, "rule version");
-  if (rule.mode !== "active" && rule.mode !== "shadow") {
+  nonEmpty(definition.id, "rule id");
+  nonEmpty(definition.version, "rule version");
+  const mode = definition.mode ?? "active";
+  if (mode !== "active" && mode !== "shadow") {
     throw new TypeError("rule mode must be active or shadow");
   }
-  if (typeof rule.matches !== "function") throw new TypeError("rule matches must be a function");
-  if (typeof rule.correlationKey !== "function") {
+  if (definition.matches !== undefined && typeof definition.matches !== "function") {
+    throw new TypeError("rule matches must be a function");
+  }
+  if (typeof definition.correlationKey !== "function") {
     throw new TypeError("rule correlationKey must be a function");
   }
-  if (typeof rule.orderKey !== "function") throw new TypeError("rule orderKey must be a function");
-  if (typeof rule.prepare !== "function") throw new TypeError("rule prepare must be a function");
-  return Object.freeze({ ...rule });
+  if (definition.orderKey !== undefined && typeof definition.orderKey !== "function") {
+    throw new TypeError("rule orderKey must be a function");
+  }
+  const hasPrepare = typeof definition.prepare === "function";
+  const hasDecide = typeof definition.decide === "function";
+  if (hasPrepare === hasDecide) {
+    throw new TypeError("rule must define exactly one of prepare or decide");
+  }
+  const prepare = hasPrepare
+    ? async (batch: FrozenAttentionBatch<TEvent>) => definition.prepare!(batch)
+    : async (batch: FrozenAttentionBatch<TEvent>) => definition.decide!(batchView(batch));
+  return Object.freeze({
+    id: definition.id,
+    version: definition.version,
+    mode,
+    ...(definition.phase === undefined ? {} : { phase: definition.phase }),
+    policy: definition.policy,
+    ...(definition.channel === undefined ? {} : { channel: definition.channel }),
+    matches: definition.matches ?? (() => true),
+    correlationKey: definition.correlationKey,
+    orderKey: definition.orderKey ?? ((event) => event.occurredAt ?? event.id),
+    prepare,
+  });
 }
 
 export interface DirectDispatchRequest<
@@ -120,6 +181,7 @@ export function createAmbientPublisher<TEvent extends CanonicalChannelEvent>(opt
       });
       const plans: AttentionBranchPlan[] = [];
       for (const rule of rules) {
+        if (rule.channel !== undefined && rule.channel !== channel) continue;
         if (!rule.matches(source.payload.event)) continue;
         const correlationKey = rule.correlationKey(source.payload.event);
         const orderKey = rule.orderKey(source.payload.event);
@@ -172,6 +234,73 @@ export interface AttentionRoute {
   deliver(wake: PreparedAttentionWake): Promise<JsonValue>;
 }
 
+export interface AmbientBackendBinding {
+  readonly engine: AttentionEngine;
+}
+
+export interface AmbientApplicationBackend<TBinding extends AmbientBackendBinding> {
+  readonly clock?: MonitorClock | undefined;
+  bind(callbacks: AttentionCallbacks): TBinding;
+}
+
+export type AmbientApplication<
+  TEvent extends CanonicalChannelEvent,
+  TBinding extends AmbientBackendBinding,
+> = TBinding & {
+  publish<TRaw>(
+    channel: ChannelCanonicalizationContract<TRaw, TEvent>,
+    raw: TRaw,
+  ): Promise<AmbientPublishReceipt>;
+};
+
+export interface AmbientApplicationDefinition<
+  TEvent extends CanonicalChannelEvent = CanonicalChannelEvent,
+> {
+  readonly applicationId: string;
+  with<TBinding extends AmbientBackendBinding>(
+    backend: AmbientApplicationBackend<TBinding>,
+  ): AmbientApplication<TEvent, TBinding>;
+}
+
+/** Defines rules and routes once, then binds them to any supported backend. */
+export function defineAmbientApplication<TEvent extends CanonicalChannelEvent>(options: {
+  readonly applicationId: string;
+  readonly rules: readonly AmbientRule<TEvent>[];
+  readonly routes: readonly AttentionRoute[];
+  readonly direct?: DirectDispatchRule<TEvent> | undefined;
+}): AmbientApplicationDefinition<TEvent> {
+  nonEmpty(options.applicationId, "applicationId");
+  const rules = [...options.rules];
+  const routes = [...options.routes];
+  assertRuleRegistry(rules);
+  return Object.freeze({
+    applicationId: options.applicationId,
+    with<TBinding extends AmbientBackendBinding>(
+      backend: AmbientApplicationBackend<TBinding>,
+    ): AmbientApplication<TEvent, TBinding> {
+      if (backend === null || typeof backend !== "object" || typeof backend.bind !== "function") {
+        throw new TypeError("ambient application backend must define bind");
+      }
+      const callbacks = createAttentionCallbacks({
+        rules,
+        routes,
+        ...(backend.clock === undefined ? {} : { clock: backend.clock }),
+      });
+      const binding = backend.bind(callbacks);
+      const publisher = createAmbientPublisher({
+        applicationId: options.applicationId,
+        engine: binding.engine,
+        rules,
+        ...(options.direct === undefined ? {} : { direct: options.direct }),
+      });
+      return Object.freeze({
+        ...binding,
+        publish: publisher.publish.bind(publisher),
+      }) as AmbientApplication<TEvent, TBinding>;
+    },
+  });
+}
+
 export function createAttentionCallbacks<TEvent extends CanonicalChannelEvent>(options: {
   readonly rules: readonly AmbientRule<TEvent>[];
   readonly routes: readonly AttentionRoute[];
@@ -198,7 +327,13 @@ export function createAttentionCallbacks<TEvent extends CanonicalChannelEvent>(o
           `attention definition ${batch.monitorId}@${batch.definitionVersion} is not registered`,
         );
       }
-      return rule.prepare(batch as FrozenAttentionBatch<TEvent>);
+      const prepared = await rule.prepare(batch as FrozenAttentionBatch<TEvent>);
+      if (prepared.kind === "ignore") return prepared;
+      if (prepared.routeId !== undefined) return { ...prepared, routeId: prepared.routeId };
+      if (routes.size !== 1) {
+        throw new Error("a wake must select routeId when the application has multiple routes");
+      }
+      return { ...prepared, routeId: routes.keys().next().value! };
     },
     async deliver(wake: PreparedAttentionWake): Promise<AttentionDeliveryReceipt> {
       const route = routes.get(wake.routeId);
@@ -219,11 +354,35 @@ function assertRuleRegistry<TEvent extends CanonicalChannelEvent>(
 ): void {
   const identities = new Set<string>();
   for (const rule of rules) {
-    defineAmbientRule(rule);
+    nonEmpty(rule.id, "rule id");
+    nonEmpty(rule.version, "rule version");
+    if (rule.mode !== "active" && rule.mode !== "shadow") {
+      throw new TypeError("rule mode must be active or shadow");
+    }
+    if (typeof rule.matches !== "function") throw new TypeError("rule matches must be a function");
+    if (typeof rule.correlationKey !== "function") {
+      throw new TypeError("rule correlationKey must be a function");
+    }
+    if (typeof rule.orderKey !== "function") throw new TypeError("rule orderKey must be a function");
+    if (typeof rule.prepare !== "function") throw new TypeError("rule prepare must be a function");
     const identity = `${rule.id}\u0000${rule.version}`;
     if (identities.has(identity)) throw new TypeError(`duplicate ambient rule ${rule.id}@${rule.version}`);
     identities.add(identity);
   }
+}
+
+function batchView<TEvent extends CanonicalChannelEvent>(
+  batch: FrozenAttentionBatch<TEvent>,
+): AmbientBatch<TEvent> {
+  const events = batch.branches.map((branch) => branch.event);
+  const latest = events.at(-1);
+  if (latest === undefined) throw new Error("attention batch is empty");
+  return Object.freeze({
+    batch,
+    events: Object.freeze(events),
+    latest,
+    eventKeys: Object.freeze(batch.branches.map((branch) => branch.eventKey)),
+  });
 }
 
 function nonEmpty(value: string, name: string): void {

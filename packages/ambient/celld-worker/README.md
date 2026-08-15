@@ -11,11 +11,13 @@ This worker is the complete celld implementation of
 - The worker exposes only admission, internal branch append, and payload-free
   diagnostics. It has no event lookup, history, or replay route.
 
-Copy this directory from the package, configure `wrangler.jsonc`, inject
+Create this directory with `eve-ambient init celld [directory]`, configure
+`CELLD_FLEET_URL` and the application `ATTENTION_CALLBACK_URL`, inject
 `ATTENTION_SECRET` through your secret store, and deploy it with celld. The
-fleet and application callback URLs must be reachable from cells. The same
-secret authenticates client admission, internal cell handoff, and the
-application-owned `/ambient/prepare` and `/ambient/deliver` callbacks.
+fleet and callback base URL must be reachable from cells. The same secret
+authenticates client admission, internal cell handoff, and the application-owned
+`/ambient/prepare` and `/ambient/deliver` callbacks. Capacity, retention, lease,
+and retry variables are optional overrides with bounded defaults.
 
 Run `node build.mjs` before deployment to verify the exact package worker
 bundles for the target runtime.

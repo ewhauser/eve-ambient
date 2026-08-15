@@ -3,11 +3,13 @@ import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  canonicalizeChannelDelivery,
   compileAcceptedFanout,
-  defineChannelCanonicalization,
   type AttentionCallbacks,
-} from "../src/index.js";
+} from "../src/attention.js";
+import {
+  canonicalizeChannelDelivery,
+  defineChannelCanonicalization,
+} from "../src/idempotency.js";
 import {
   PostgresAttentionEngine,
   type PostgresClient,
@@ -94,6 +96,7 @@ describe.skipIf(databaseUrl === undefined)("PostgreSQL AttentionEngine integrati
           kind: "wake",
           decision: { answer: "wake" },
           routeId: "eve",
+          target: "session:incident-42",
           instruction: "Investigate the event.",
           evidence: { summary: "evidence" },
         };

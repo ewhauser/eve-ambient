@@ -42,6 +42,48 @@ export interface SerializableMailboxPolicy {
   readonly cooldownAfterWakeMs?: number | undefined;
 }
 
+export type AttentionDuration = number | `${number}${"ms" | "s" | "m" | "h" | "d"}`;
+
+export interface DebounceOptions {
+  readonly quiet: AttentionDuration;
+  readonly maxWait: AttentionDuration;
+  readonly cooldown?: AttentionDuration | undefined;
+  readonly maxEvents?: number | undefined;
+  readonly maxBytes?: number | undefined;
+}
+
+/** A bounded debounce policy with practical capacity defaults. */
+export function debounce(options: DebounceOptions): SerializableMailboxPolicy {
+  const policy: SerializableMailboxPolicy = {
+    buffer: {
+      mode: "debounce",
+      quietPeriodMs: durationMs(options.quiet, "quiet"),
+      maxWaitMs: durationMs(options.maxWait, "maxWait"),
+      maxEvents: options.maxEvents ?? 100,
+      maxBytes: options.maxBytes ?? 1_000_000,
+    },
+    ...(options.cooldown === undefined
+      ? {}
+      : { cooldownAfterWakeMs: durationMs(options.cooldown, "cooldown") }),
+  };
+  validateMailboxPolicy(policy);
+  return deepFreeze(policy);
+}
+
+/** An immediate policy, optionally followed by a cooldown. */
+export function immediate(options: {
+  readonly cooldown?: AttentionDuration | undefined;
+} = {}): SerializableMailboxPolicy {
+  const policy: SerializableMailboxPolicy = {
+    buffer: { mode: "immediate" },
+    ...(options.cooldown === undefined
+      ? {}
+      : { cooldownAfterWakeMs: durationMs(options.cooldown, "cooldown") }),
+  };
+  validateMailboxPolicy(policy);
+  return deepFreeze(policy);
+}
+
 export type AttentionMode = "active" | "shadow";
 
 export class AttentionCapacityError extends RangeError {
@@ -139,9 +181,37 @@ export type PreparedAttentionOutcome =
       readonly kind: "wake";
       readonly decision: JsonValue;
       readonly routeId: string;
+      readonly target: JsonValue;
       readonly instruction: string;
       readonly evidence: JsonValue;
     };
+
+export type PreparedAttentionResult =
+  | Extract<PreparedAttentionOutcome, { readonly kind: "ignore" }>
+  | (Omit<Extract<PreparedAttentionOutcome, { readonly kind: "wake" }>, "routeId"> & {
+      readonly routeId?: string | undefined;
+    });
+
+export function ignore(decision: JsonValue = null): PreparedAttentionResult {
+  return deepFreeze({ kind: "ignore", decision });
+}
+
+export function wake(options: {
+  readonly target: JsonValue;
+  readonly instruction: string;
+  readonly routeId?: string | undefined;
+  readonly decision?: JsonValue | undefined;
+  readonly evidence?: JsonValue | undefined;
+}): PreparedAttentionResult {
+  return deepFreeze({
+    kind: "wake",
+    ...(options.routeId === undefined ? {} : { routeId: options.routeId }),
+    target: options.target,
+    instruction: options.instruction,
+    decision: options.decision ?? null,
+    evidence: options.evidence ?? null,
+  });
+}
 
 /** Exact complete value retried at the final Ambient delivery boundary. */
 export interface PreparedAttentionWake {
@@ -156,6 +226,7 @@ export interface PreparedAttentionWake {
   readonly correlationKey: string;
   readonly rootEventKeys: readonly EventKey[];
   readonly routeId: string;
+  readonly target: JsonValue;
   readonly instruction: string;
   readonly decision: JsonValue;
   readonly evidence: JsonValue;
@@ -489,6 +560,7 @@ export async function createPreparedAttentionWake(
     correlationKey: batch.correlationKey,
     rootEventKeys,
     routeId: prepared.routeId,
+    target: prepared.target,
     instruction: prepared.instruction,
     decision: prepared.decision,
     evidence: prepared.evidence,
@@ -514,13 +586,14 @@ export function validatePreparedAttentionOutcome(
   if (detached.kind !== "wake") throw new TypeError("prepared outcome kind is invalid");
   assertExactKeys(
     detached,
-    ["decision", "evidence", "instruction", "kind", "routeId"],
+    ["decision", "evidence", "instruction", "kind", "routeId", "target"],
     "prepared wake outcome",
   );
   nonEmpty(detached.routeId, "prepared routeId");
   nonEmpty(detached.instruction, "prepared instruction");
   canonicalJson(detached.decision, "prepared decision");
   canonicalJson(detached.evidence, "prepared evidence");
+  canonicalJson(detached.target, "prepared target");
   return deepFreeze(detached);
 }
 
@@ -678,6 +751,22 @@ function positiveInteger(value: number, name: string): void {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new TypeError(`${name} must be a positive safe integer`);
   }
+}
+
+function durationMs(value: AttentionDuration, name: string): number {
+  if (typeof value === "number") {
+    positiveInteger(value, name);
+    return value;
+  }
+  const match = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/.exec(value);
+  if (match === null) {
+    throw new TypeError(`${name} must be a positive duration such as 500ms, 30s, or 5m`);
+  }
+  const multipliers = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 } as const;
+  const amount = Number(match[1]);
+  const milliseconds = amount * multipliers[match[2] as keyof typeof multipliers];
+  positiveInteger(milliseconds, name);
+  return milliseconds;
 }
 
 function canonicalTimestamp(value: string, name: string): void {

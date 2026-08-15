@@ -6,11 +6,15 @@
   "type": "module",
   "files": [
     "dist",
+    "bin",
     "migrations",
     "celld-worker",
     "README.md",
     "LICENSE"
   ],
+  "bin": {
+    "eve-ambient": "bin/eve-ambient.mjs"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -31,6 +35,16 @@
       "types": "./dist/memory.d.ts",
       "import": "./dist/memory.js",
       "default": "./dist/memory.js"
+    },
+    "./idempotency": {
+      "types": "./dist/idempotency.d.ts",
+      "import": "./dist/idempotency.js",
+      "default": "./dist/idempotency.js"
+    },
+    "./protocol": {
+      "types": "./dist/protocol.d.ts",
+      "import": "./dist/protocol.js",
+      "default": "./dist/protocol.js"
     },
     "./postgres": {
       "types": "./dist/postgres.d.ts",

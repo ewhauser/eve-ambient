@@ -1,7 +1,7 @@
 # Deployment options
 
-Applications choose one attention backend. The application-facing publisher,
-rules, callbacks, payload lineage, and final Eve route stay the same.
+Applications define channels, rules, and routes once, then bind that definition
+to one attention backend. Payload lineage and the final Eve route stay the same.
 
 | Backend | Persistence | Work scheduling | Best fit |
 |---|---|---|---|
@@ -22,9 +22,10 @@ provider -> publisher -> PostgreSQL accept -> due worker
                                             -> deliver -> receipt
 ```
 
-Apply the private migration, construct `PostgresAttentionEngine`, and run one
-or more pollers. PostgreSQL owns active payload custody, timers, leases, and
-bounded receipts. It does not expose an event repository.
+Apply the private migration, bind the application with `postgres({ pool })`,
+initialize `application.engine`, and run one or more pollers. PostgreSQL owns
+active payload custody, timers, leases, and bounded receipts. It does not
+expose an event repository.
 
 Choose it when PostgreSQL is already an acceptable durable dependency and the
 workload can be served by its due index plus per-key advisory locks.
@@ -36,7 +37,8 @@ provider -> publisher -> event cell -> correlation cell alarm
                                       -> prepare -> checkpoint -> deliver
 ```
 
-Deploy the packaged worker and authenticated application callback endpoint.
+Create the packaged worker with `eve-ambient init celld`, bind the application
+with `celld({ url, secret })`, and expose its authenticated `fetch` handler.
 celld owns all attention persistence; the application and example need no
 PostgreSQL pool, schema, or worker.
 

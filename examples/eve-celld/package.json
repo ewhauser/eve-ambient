@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit",
+    "demo": "pnpm --dir ../.. run build && tsx demo/run.ts",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
@@ -14,6 +15,8 @@
     "eve": "0.38.1"
   },
   "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.6",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   }

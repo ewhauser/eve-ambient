@@ -1,67 +1,39 @@
-# Deployment options
+# World deployment
 
-Applications define channels, rules, and routes once, then bind that definition
-to one attention backend. Payload lineage and the final Eve route stay the same.
+Ambient accepts one correlation-addressed World client. It does not know which
+database, queue, or runtime is behind that client.
 
-| Backend | Persistence | Work scheduling | Best fit |
-|---|---|---|---|
-| Memory | Process memory | Explicit `runDue()` | Tests and executable reference behavior |
-| PostgreSQL | Private event/workflow rows | Workers poll `runOnce()` | Existing PostgreSQL deployments and simple operations |
-| celld | Channel-partition custody cells | Cell alarms | Distributed domain-entity serialization without PostgreSQL |
+| Ambient owns | World implementation owns |
+|---|---|
+| canonical events, rules, keys, hashes | deterministic stream addressing |
+| grouping branches by correlation | atomic append and recent-message ring |
+| prepare and deliver callback contract | durable state, timers, leases, retries |
+| exact final `wakeKey` | encryption, backups, retention, erasure |
 
-Backend state is not portable. Switching an active installation requires an
-application-specific cutover because no public storage or state-migration
-interface exists. There are no legacy production users requiring a migration
-for this repository's architecture replacement.
-
-## PostgreSQL
-
-```text
-provider -> publisher -> PostgreSQL accept -> due worker
-                                            -> prepare -> checkpoint
-                                            -> deliver -> receipt
+```ts
+const ambient = application.with(world({
+  world: createWorldCelld({ url: process.env.WORLD_CELLD_URL }),
+  callbackSecretEnv: "AMBIENT_CALLBACK_SECRET",
+}));
 ```
 
-Apply the private migration, bind the application with `postgres({ pool })`,
-initialize `application.engine`, and run one or more pollers. PostgreSQL owns
-active payload custody, timers, leases, and bounded receipts. It does not
-expose an event repository.
+`createWorldCelld()` is illustrative: `world-celld` is developed separately.
+Any implementation is conforming if `stream(key)` constructs a local handle
+and `append(input)` durably and atomically applies the exported stream reducer.
 
-Choose it when PostgreSQL is already an acceptable durable dependency and the
-workload can be served by its due index plus per-key advisory locks.
+A World can use celld, Postgres, Redis, or a combination internally. That
+composition remains below the stream contract; Ambient has no backend selector
+per rule and ships no custom storage adapter.
 
-## celld
+## Callback endpoint
 
-```text
-provider -> publisher -> partition cell alarm -> prepare -> checkpoint -> deliver
-```
+The remote World needs the application callback base URL and the same bearer
+secret named by `callbackSecretEnv`. Keep the endpoint on a trusted network
+where possible. Rotate the secret in both deployments together.
 
-Create the packaged worker with `eve-ambient init celld`, bind the application
-with `celld({ url, secret })`, and expose its authenticated `fetch` handler.
-celld owns all attention persistence; the application and example need no
-PostgreSQL pool, schema, or worker.
+## Cutover
 
-Choose it when channel-defined domain partitions and durable alarms fit the
-operating environment better than a database poller. A partition must be
-bounded: for example, one pull request or Slack thread, not an entire busy
-installation unless cross-installation serialization is truly required.
-
-## External ingress pipelines
-
-Kafka, SQS, a webhook service, or a domain-specific rules engine may own source
-delivery before Eve Ambient. Their retention and duplicate suppression are
-implementation details. The integration must send the complete normalized
-payload to `ambient.publish()` and retry ambiguous outcomes with the same
-source identity.
-
-The upstream system may acknowledge or commit its delivery only after
-`publish()` returns successfully. That receipt means the complete frozen
-fan-out has reached the selected attention backend. Eve Ambient does not add a
-central event store or replay API around the upstream transport.
-
-## Selection guidance
-
-Start with the backend already operated and understood by the application.
-Measure payload size, rule fan-out, correlation-key distribution, decision
-latency, and retry rates before making throughput claims. An upstream log and
-the choice between PostgreSQL and celld are independent decisions.
+The removed custom backends and the abandoned Workflow-run spike are not state
+compatible with correlation World cells. Drain or explicitly abandon old work,
+deploy the new World and callback endpoint, then switch ingress. Retries must
+preserve their original canonical source identity.

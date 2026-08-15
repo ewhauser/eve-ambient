@@ -8,9 +8,9 @@
       "changelog-path": "packages/ambient/CHANGELOG.md",
       "component": "eve-ambient",
       "exclude-paths": [
-        "examples/eve-celld",
-        "examples/eve-postgres",
+        "examples/world-attention",
         "integration/eve-conformance",
+        "integration/attention-world",
         "packages/eve-adapter"
       ],
       "extra-files": [

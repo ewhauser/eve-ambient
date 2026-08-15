@@ -36,7 +36,7 @@ export interface DebouncedAttentionBuffer {
   readonly maxBytes: number;
 }
 
-/** Complete serializable lifecycle policy pinned by a correlation workflow. */
+/** Complete serializable lifecycle policy pinned by a correlation stream. */
 export interface SerializableMailboxPolicy {
   readonly buffer: ImmediateAttentionBuffer | DebouncedAttentionBuffer;
   readonly cooldownAfterWakeMs?: number | undefined;
@@ -106,7 +106,7 @@ export interface AttentionBranchPlan {
   readonly policy: SerializableMailboxPolicy;
 }
 
-/** Complete branch value appended to one serialized correlation workflow. */
+/** Complete branch value appended to one serialized correlation stream. */
 export interface FullAttentionBranch<
   TEvent extends CanonicalChannelEvent = CanonicalChannelEvent,
 > {
@@ -153,7 +153,6 @@ export interface AttentionAcceptanceReceipt {
   readonly manifestHash: FanoutManifestHash;
   readonly branchKeys: readonly BranchKey[];
   readonly acceptedAt: string;
-  readonly dedupeExpiresAt: string;
 }
 
 export interface FrozenAttentionBatch<

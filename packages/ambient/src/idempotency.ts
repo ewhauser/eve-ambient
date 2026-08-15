@@ -354,7 +354,7 @@ export async function deriveAttentionBranchKey(input: {
   ]) as Promise<BranchKey>;
 }
 
-/** Serialized correlation-workflow identity. */
+/** Serialized correlation-stream identity. */
 export async function deriveAttentionInstanceKey(input: {
   readonly partitionCellKey: AttentionPartitionKey;
   readonly monitorId: string;

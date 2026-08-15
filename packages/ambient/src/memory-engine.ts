@@ -1,7 +1,5 @@
 import {
   AttentionCapacityError,
-  validateAcceptedFanout,
-  validateFullAttentionBranch,
   type AcceptedFanout,
   type AttentionAcceptanceReceipt,
   type AttentionCallbacks,
@@ -9,37 +7,29 @@ import {
   type FullAttentionBranch,
 } from "./attention.js";
 import {
-  completeEventCoordinator,
-  createEventCoordinator,
-  eventCoordinatorExpired,
-  markCoordinatorBranchAccepted,
-  pendingCoordinatorBranches,
-  validateEventCoordinatorRetry,
-  type EventCoordinatorState,
-} from "./coordinator.js";
-import {
-  deriveAttentionPartitionKey,
-  deriveAttentionInstanceKey,
-  hashIdempotencyInput,
   IdempotencyConflictError,
   type AttentionInstanceKey,
-  type EventKey,
 } from "./idempotency.js";
+import {
+  type AttentionStreamAppend,
+  type AttentionStreamAppendReceipt,
+  type AttentionWorld,
+} from "./stream-protocol.js";
 import type { MonitorClock } from "./types.js";
 import {
   AttentionCallbackValidationError,
-  appendAttentionBranch,
   applyAttentionDeliveryReceipt,
+  applyAttentionStreamAppend,
   applyPreparedAttentionOutcome,
   claimAttentionRun,
-  createAttentionWorkflow,
   failAttentionRun,
   isCurrentAttentionClaim,
   purgeAttentionWorkflow,
   type AttentionWorkflowState,
 } from "./workflow.js";
+import { WorldAttentionEngine } from "./world.js";
 
-const DEFAULT_DEDUPE_MS = 7 * 24 * 60 * 60 * 1_000;
+const DEFAULT_MAX_RECENT_MESSAGES = 48;
 const DEFAULT_RETRY_DELAY_MS = 1_000;
 const DEFAULT_CLAIM_LEASE_MS = 30_000;
 const DEFAULT_MAX_ATTEMPTS = 10;
@@ -55,7 +45,7 @@ export interface MemoryAttentionEngineFaults {
 export interface MemoryAttentionEngineOptions {
   readonly callbacks: AttentionCallbacks;
   readonly clock?: MonitorClock | undefined;
-  readonly dedupeMs?: number | undefined;
+  readonly maxRecentMessages?: number | undefined;
   readonly retryDelayMs?: number | undefined;
   readonly claimLeaseMs?: number | undefined;
   readonly maxAttempts?: number | undefined;
@@ -75,14 +65,12 @@ export interface MemoryAttentionRunResult {
 }
 
 export interface MemoryAttentionDiagnostics {
-  readonly eventCoordinators: number;
-  readonly pendingFanoutPayloads: number;
-  readonly acceptanceReceipts: number;
-  readonly correlationWorkflows: number;
+  readonly correlationStreams: number;
+  readonly recentMessages: number;
   readonly bufferedBranchPayloads: number;
   readonly activeBatchPayloads: number;
   readonly preparedWakePayloads: number;
-  readonly branchReceipts: number;
+  readonly inFlightBranches: number;
   readonly deliveryReceipts: number;
   readonly terminalFailures: number;
 }
@@ -95,20 +83,18 @@ type ProcessOutcome =
   | "failed"
   | "terminal-failure";
 
-/** Executable reference engine and shared durable workflow state machine. */
+/** Executable in-memory World and reference correlation-stream state machine. */
 export class MemoryAttentionEngine implements AttentionEngine {
   readonly #callbacks: AttentionCallbacks;
   readonly #clock: MonitorClock;
-  readonly #dedupeMs: number;
+  readonly #maxRecentMessages: number;
   readonly #retryDelayMs: number;
   readonly #claimLeaseMs: number;
   readonly #maxAttempts: number;
-  readonly #maxBranches: number;
-  readonly #maxFanoutBytes: number;
   readonly #maxPreparedWakeBytes: number;
   readonly #faults: MemoryAttentionEngineFaults;
-  readonly #events = new Map<EventKey, EventCoordinatorState>();
-  readonly #workflows = new Map<AttentionInstanceKey, AttentionWorkflowState>();
+  readonly #ingress: WorldAttentionEngine;
+  readonly #streams = new Map<AttentionInstanceKey, AttentionWorkflowState>();
   readonly #locks = new Map<string, Promise<void>>();
 
   constructor(options: MemoryAttentionEngineOptions) {
@@ -125,7 +111,10 @@ export class MemoryAttentionEngine implements AttentionEngine {
     }
     this.#callbacks = options.callbacks;
     this.#clock = options.clock ?? { now: () => new Date() };
-    this.#dedupeMs = positiveInteger(options.dedupeMs ?? DEFAULT_DEDUPE_MS, "dedupeMs");
+    this.#maxRecentMessages = positiveInteger(
+      options.maxRecentMessages ?? DEFAULT_MAX_RECENT_MESSAGES,
+      "maxRecentMessages",
+    );
     this.#retryDelayMs = positiveInteger(
       options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS,
       "retryDelayMs",
@@ -135,50 +124,25 @@ export class MemoryAttentionEngine implements AttentionEngine {
       "claimLeaseMs",
     );
     this.#maxAttempts = positiveInteger(options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS, "maxAttempts");
-    this.#maxBranches = positiveInteger(options.maxBranches ?? DEFAULT_MAX_BRANCHES, "maxBranches");
-    this.#maxFanoutBytes = positiveInteger(
-      options.maxFanoutBytes ?? DEFAULT_MAX_FANOUT_BYTES,
-      "maxFanoutBytes",
-    );
     this.#maxPreparedWakeBytes = positiveInteger(
       options.maxPreparedWakeBytes ?? DEFAULT_MAX_PREPARED_WAKE_BYTES,
       "maxPreparedWakeBytes",
     );
     this.#faults = options.faults ?? {};
+
+    const world: AttentionWorld = {
+      stream: (key) => ({ append: (append) => this.#appendStream(key, append) }),
+    };
+    this.#ingress = new WorldAttentionEngine({
+      world,
+      clock: this.#clock,
+      maxBranches: options.maxBranches ?? DEFAULT_MAX_BRANCHES,
+      maxFanoutBytes: options.maxFanoutBytes ?? DEFAULT_MAX_FANOUT_BYTES,
+    });
   }
 
-  async accept(input: AcceptedFanout): Promise<AttentionAcceptanceReceipt> {
-    const proposed = await validateAcceptedFanout(input);
-    return this.#withLock(`event:${proposed.eventKey}`, async () => {
-      const now = this.#now();
-      const existing = this.#events.get(proposed.eventKey);
-      if (existing !== undefined && eventCoordinatorExpired(existing, now)) {
-        this.#events.delete(proposed.eventKey);
-      }
-      let coordinator = this.#events.get(proposed.eventKey);
-      if (coordinator === undefined) {
-        coordinator = createEventCoordinator(proposed, {
-          now,
-          maxBranches: this.#maxBranches,
-          maxFanoutBytes: this.#maxFanoutBytes,
-        });
-        this.#events.set(proposed.eventKey, coordinator);
-      } else {
-        validateEventCoordinatorRetry(coordinator, proposed);
-      }
-      if (coordinator.receipt !== undefined) return clone(coordinator.receipt);
-      for (const branch of pendingCoordinatorBranches(coordinator)) {
-        await this.#faults.beforeBranchAppend?.(clone(branch));
-        await this.#appendBranch(branch);
-        await this.#faults.afterBranchAppend?.(clone(branch));
-        markCoordinatorBranchAccepted(coordinator, branch.branchKey);
-      }
-      const receipt = completeEventCoordinator(coordinator, {
-        now: this.#now(),
-        dedupeMs: this.#dedupeMs,
-      });
-      return clone(receipt);
-    });
+  accept(input: AcceptedFanout): Promise<AttentionAcceptanceReceipt> {
+    return this.#ingress.accept(input);
   }
 
   async runDue(
@@ -194,7 +158,7 @@ export class MemoryAttentionEngine implements AttentionEngine {
       failed: 0,
       terminalFailures: 0,
     };
-    for (const key of [...this.#workflows.keys()].sort()) {
+    for (const key of [...this.#streams.keys()].sort()) {
       if (result.claimed >= limit) break;
       const outcome = await this.#processOne(key);
       if (outcome === "none") continue;
@@ -210,80 +174,62 @@ export class MemoryAttentionEngine implements AttentionEngine {
 
   diagnostics(): MemoryAttentionDiagnostics {
     this.#purgeExpiredSync();
-    const workflows = [...this.#workflows.values()];
+    const streams = [...this.#streams.values()];
     return {
-      eventCoordinators: this.#events.size,
-      pendingFanoutPayloads: [...this.#events.values()].filter(
-        (coordinator) => coordinator.pendingFanout !== undefined,
-      ).length,
-      acceptanceReceipts: [...this.#events.values()].filter(
-        (coordinator) => coordinator.receipt !== undefined,
-      ).length,
-      correlationWorkflows: workflows.length,
-      bufferedBranchPayloads: workflows.reduce(
-        (count, workflow) =>
+      correlationStreams: streams.length,
+      recentMessages: streams.reduce((count, stream) => count + stream.recentMessages.length, 0),
+      bufferedBranchPayloads: streams.reduce(
+        (count, stream) =>
           count +
-          (workflow.open?.branches.length ?? 0) +
-          workflow.sealed.reduce((sum, batch) => sum + batch.branches.length, 0),
+          (stream.open?.branches.length ?? 0) +
+          stream.sealed.reduce((sum, batch) => sum + batch.branches.length, 0),
         0,
       ),
-      activeBatchPayloads: workflows.reduce(
-        (count, workflow) => count + (workflow.active?.batch.branches.length ?? 0),
+      activeBatchPayloads: streams.reduce(
+        (count, stream) => count + (stream.active?.batch.branches.length ?? 0),
         0,
       ),
-      preparedWakePayloads: workflows.filter((workflow) => workflow.active?.wake !== undefined)
-        .length,
-      branchReceipts: workflows.reduce(
-        (count, workflow) => count + workflow.branchLedger.length,
+      preparedWakePayloads: streams.filter((stream) => stream.active?.wake !== undefined).length,
+      inFlightBranches: streams.reduce(
+        (count, stream) => count + stream.branchLedger.length,
         0,
       ),
-      deliveryReceipts: workflows.reduce(
-        (count, workflow) => count + workflow.deliveryReceipts.length,
+      deliveryReceipts: streams.reduce(
+        (count, stream) => count + stream.deliveryReceipts.length,
         0,
       ),
-      terminalFailures: workflows.reduce(
-        (count, workflow) => count + workflow.terminalFailures.length,
+      terminalFailures: streams.reduce(
+        (count, stream) => count + stream.terminalFailures.length,
         0,
       ),
     };
   }
 
-  async #appendBranch(input: FullAttentionBranch): Promise<void> {
-    const branch = await validateFullAttentionBranch(input);
-    const partitionCellKey = await deriveAttentionPartitionKey({
-      applicationId: branch.applicationId,
-      tenantId: branch.tenantId,
-      channelId: branch.event.source.channelId,
-      installationId: branch.event.source.installationId,
-      partitionKey: branch.partitionKey,
-    });
-    const instanceKey = await deriveAttentionInstanceKey({
-      partitionCellKey,
-      monitorId: branch.monitorId,
-      definitionVersion: branch.definitionVersion,
-      correlationKey: branch.correlationKey,
-    });
-    const policyHash = await hashIdempotencyInput({ mode: branch.mode, policy: branch.policy });
-    await this.#withLock(`workflow:${instanceKey}`, async () => {
-      const now = this.#now();
-      let workflow = this.#workflows.get(instanceKey);
-      if (workflow === undefined) {
-        workflow = createAttentionWorkflow({ instanceKey, branch, policyHash });
-        this.#workflows.set(instanceKey, workflow);
-      }
-      appendAttentionBranch(workflow, branch, {
-        now,
-        dedupeMs: this.#dedupeMs,
-        policyHash,
+  async #appendStream(
+    expectedKey: AttentionInstanceKey,
+    input: AttentionStreamAppend,
+  ): Promise<AttentionStreamAppendReceipt> {
+    if (input.streamKey !== expectedKey) {
+      throw new TypeError("attention stream append was sent to the wrong stream");
+    }
+    for (const branch of input.branches) await this.#faults.beforeBranchAppend?.(clone(branch));
+    const receipt = await this.#withLock(`stream:${expectedKey}`, async () => {
+      const applied = await applyAttentionStreamAppend(this.#streams.get(expectedKey), input, {
+        now: this.#now(),
+        maxRecentMessages: this.#maxRecentMessages,
       });
+      this.#streams.set(expectedKey, applied.state);
+      return applied.receipt;
     });
+    for (const branch of input.branches) await this.#faults.afterBranchAppend?.(clone(branch));
+    return receipt;
   }
 
   async #processOne(instanceKey: AttentionInstanceKey): Promise<ProcessOutcome> {
-    const claimed = await this.#withLock(`workflow:${instanceKey}`, async () => {
-      const workflow = this.#workflows.get(instanceKey);
-      if (workflow === undefined) return undefined;
-      const active = await claimAttentionRun(workflow, {
+    const claimed = await this.#withLock(`stream:${instanceKey}`, async () => {
+      const stream = this.#streams.get(instanceKey);
+      if (stream === undefined) return undefined;
+      const active = await claimAttentionRun(stream, {
         now: this.#now(),
         leaseMs: this.#claimLeaseMs,
       });
@@ -294,71 +240,55 @@ export class MemoryAttentionEngine implements AttentionEngine {
     try {
       if (claimed.stage === "preparing") {
         const prepared = await this.#callbacks.prepare(deepFreeze(clone(claimed.batch)));
-        const transition = await this.#withLock(`workflow:${instanceKey}`, async () => {
-          const workflow = this.#workflows.get(instanceKey);
-          if (!isCurrentAttentionClaim(workflow, claimed, "preparing")) return "stale";
-          const outcome = await applyPreparedAttentionOutcome(workflow, prepared, {
+        const transition = await this.#withLock(`stream:${instanceKey}`, async () => {
+          const stream = this.#streams.get(instanceKey);
+          if (!isCurrentAttentionClaim(stream, claimed, "preparing")) return "stale";
+          return applyPreparedAttentionOutcome(stream, prepared, {
             now: this.#now(),
-            dedupeMs: this.#dedupeMs,
             maxPreparedWakeBytes: this.#maxPreparedWakeBytes,
+            maxRecentMessages: this.#maxRecentMessages,
           });
-          return outcome;
         });
         if (transition === "stale") return "none";
         if (transition !== "deliver") return transition;
       }
       failureStage = "delivering";
-      const wake = await this.#withLock(`workflow:${instanceKey}`, async () => {
-        const workflow = this.#workflows.get(instanceKey);
-        if (!isCurrentAttentionClaim(workflow, claimed, "delivering")) return undefined;
-        if (workflow.active?.wake === undefined) throw new Error("delivery stage has no prepared wake");
-        return clone(workflow.active.wake);
+      const wake = await this.#withLock(`stream:${instanceKey}`, async () => {
+        const stream = this.#streams.get(instanceKey);
+        if (!isCurrentAttentionClaim(stream, claimed, "delivering")) return undefined;
+        if (stream.active?.wake === undefined) throw new Error("delivery stage has no prepared wake");
+        return clone(stream.active.wake);
       });
       if (wake === undefined) return "none";
       const receipt = await this.#callbacks.deliver(deepFreeze(wake));
-      const committed = await this.#withLock(`workflow:${instanceKey}`, async () => {
-        const workflow = this.#workflows.get(instanceKey);
-        if (!isCurrentAttentionClaim(workflow, claimed, "delivering")) return false;
-        applyAttentionDeliveryReceipt(workflow, receipt, {
+      const committed = await this.#withLock(`stream:${instanceKey}`, async () => {
+        const stream = this.#streams.get(instanceKey);
+        if (!isCurrentAttentionClaim(stream, claimed, "delivering")) return false;
+        applyAttentionDeliveryReceipt(stream, receipt, {
           now: this.#now(),
-          dedupeMs: this.#dedupeMs,
+          maxRecentMessages: this.#maxRecentMessages,
         });
         return true;
       });
       return committed ? "delivered" : "none";
     } catch (error) {
-      return this.#withLock(`workflow:${instanceKey}`, async () => {
-        const workflow = this.#workflows.get(instanceKey);
-        if (!isCurrentAttentionClaim(workflow, claimed, failureStage)) {
-          return "none";
-        }
-        const outcome = failAttentionRun(workflow, error, {
+      return this.#withLock(`stream:${instanceKey}`, async () => {
+        const stream = this.#streams.get(instanceKey);
+        if (!isCurrentAttentionClaim(stream, claimed, failureStage)) return "none";
+        return failAttentionRun(stream, error, {
           now: this.#now(),
-          dedupeMs: this.#dedupeMs,
           retryDelayMs: this.#retryDelayMs,
           maxAttempts: this.#maxAttempts,
+          maxRecentMessages: this.#maxRecentMessages,
           terminalError: isTerminalError,
         });
-        return outcome;
       });
     }
   }
 
-  #purgeExpiredSync(): boolean {
+  #purgeExpiredSync(): void {
     const now = this.#now();
-    let changed = false;
-    for (const [key, coordinator] of this.#events) {
-      if (eventCoordinatorExpired(coordinator, now)) {
-        this.#events.delete(key);
-        changed = true;
-      }
-    }
-    for (const [key, workflow] of this.#workflows) {
-      const before = JSON.stringify(workflow);
-      if (purgeAttentionWorkflow(workflow, now) === "empty") this.#workflows.delete(key);
-      if (before !== JSON.stringify(workflow) || !this.#workflows.has(key)) changed = true;
-    }
-    return changed;
+    for (const stream of this.#streams.values()) purgeAttentionWorkflow(stream, now);
   }
 
   #now(): string {

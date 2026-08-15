@@ -7,8 +7,7 @@
   "type": "module",
   "scripts": {
     "build": "pnpm --recursive --if-present run build",
-    "check": "pnpm run build && pnpm run typecheck && pnpm run test && pnpm run check:eve-patch && pnpm run check:celld-worker && pnpm run pack:check && pnpm run check:consumer",
-    "check:celld-worker": "pnpm --filter @ewhauser/eve-ambient run check:celld-worker",
+    "check": "pnpm run build && pnpm run typecheck && pnpm run test && pnpm run check:eve-patch && pnpm run pack:check && pnpm run check:consumer",
     "check:consumer": "node scripts/check-clean-consumer.mjs",
     "check:eve-patch": "node scripts/check-eve-patch.mjs",
     "clean": "pnpm --recursive --if-present run clean",

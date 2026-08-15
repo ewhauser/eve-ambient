@@ -1,11 +1,17 @@
 # RFC: Full-Payload, End-to-End Idempotent Event Handoffs
 
 - Status: Accepted
-- Implementation: Complete for Eve Ambient's memory, PostgreSQL, and celld
-  engines and the official Eve adapter; external Kafka and SQS adapters are not
-  planned requirements
+- Implementation: Complete for the memory reference, correlation World engine,
+  and official Eve adapter. The former custom PostgreSQL, celld, and Workflow
+  World engines were retired by
+  [RFC 0004](0004-correlation-world-protocol.md).
 - Scope: Eve Ambient implementation through `wakeKey` delivery, plus a conditional conformance profile through final actions
 - Related: `ewhauser/eve-ambient` issue #3
+
+> Historical note: backend-specific PostgreSQL and celld sections below record
+> the design that originally established these invariants. RFC 0004 supersedes
+> their runtime and retention details; the full-payload lineage requirements
+> remain normative.
 
 ## Summary
 

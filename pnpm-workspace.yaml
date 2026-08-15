@@ -4,7 +4,13 @@ packages:
   - "integration/*"
 
 allowBuilds:
+  "@swc/core": true
+  cbor-extract: true
   esbuild: true
+
+overrides:
+  "nanoid@5.1.6": "5.1.16"
+  "undici@7.28.0": "7.29.0"
 
 # Hold new direct and transitive releases for one day. Security updates can
 # still be selected explicitly when a faster upgrade is required.

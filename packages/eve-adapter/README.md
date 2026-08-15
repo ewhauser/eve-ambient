@@ -60,7 +60,7 @@ const ambient = defineAmbientApplication({
   applicationId: "engineering-agent",
   rules: [rule],
   routes: [createEveGitHubAttentionRoute({ from: githubFrom, auth })],
-}).with(celldBackend);
+}).with(worldBackend);
 
 export default createEveGitHubAmbientChannel({
   publisher: ambient,

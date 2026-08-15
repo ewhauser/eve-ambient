@@ -1,5 +1,7 @@
 /** Advanced wire and backend-author surface. Most applications use the root API. */
 export * from "./attention.js";
+export * from "./stream-protocol.js";
+export * from "./workflow.js";
 export {
   createAmbientPublisher,
   createAttentionCallbacks,

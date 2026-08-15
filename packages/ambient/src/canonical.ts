@@ -8,7 +8,7 @@ import type { JsonValue } from "./types.js";
  * silently coerced by `JSON.stringify`.
  *
  * This module intentionally imports no Node built-ins so the same canonical
- * representation can be used by the Node runtime and celld worker.
+ * representation can be used across Node and remote runtime realms.
  */
 export function canonicalJson(value: unknown, name = "value"): string {
   const seen = new Set<object>();
@@ -37,7 +37,20 @@ export function canonicalJson(value: unknown, name = "value"): string {
         return current.map((item, index) => normalize(item, `${path}[${index}]`));
       }
       const prototype = Object.getPrototypeOf(current);
-      if (prototype !== Object.prototype && prototype !== null) {
+      // Remote runtimes may deserialize JSON into another realm. Their ordinary
+      // Object.prototype is not reference-equal to this realm's prototype, so
+      // recognize that shape without admitting class instances.
+      const ordinaryCrossRealmObject =
+        prototype !== null &&
+        Object.getPrototypeOf(prototype) === null &&
+        Object.prototype.hasOwnProperty.call(prototype, "constructor") &&
+        typeof prototype.constructor === "function" &&
+        prototype.constructor.name === "Object";
+      if (
+        prototype !== Object.prototype &&
+        prototype !== null &&
+        !ordinaryCrossRealmObject
+      ) {
         throw new TypeError(`${path} must contain only plain JSON objects`);
       }
       // A null prototype preserves JSON keys such as "__proto__" as data

@@ -43,7 +43,6 @@ jobs:
       CI: "true"
       COREPACK_DEFAULT_TO_LATEST: "0"
       COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
-      EVE_AMBIENT_POSTGRES_URL: postgresql:///eve_ambient_test?host=/var/run/postgresql
       RELEASE_PATHS: ${{ needs.release-please.outputs.paths-released }}
     steps:
       - name: Check out released source
@@ -62,12 +61,6 @@ jobs:
           corepack enable pnpm
           corepack install
           pnpm --version
-
-      - name: Start PostgreSQL conformance database
-        run: |
-          sudo systemctl start postgresql.service
-          sudo -u postgres createuser --superuser runner
-          sudo -u postgres createdb --owner=runner eve_ambient_test
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

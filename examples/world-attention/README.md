@@ -1,28 +1,20 @@
 # Ambient on a correlation World
 
-This workspace contains two typechecked application shapes:
+This workspace contains two typechecked application shapes built entirely from
+the checked-in `@ewhauser/eve-ambient` package:
 
 - `application.ts` defines a small provider-independent support rule and
   exercises it with the in-memory reference engine;
-- `github-pr-shepherd.ts` listens to Eve's typed GitHub PR and check-suite
-  events, debounces them per pull request, and invokes one idempotent Eve turn
-  for a current CI failure.
+- `slack-message-sequence.ts` defines a complete Slack message event, detects
+  “message A” followed by “message B” per channel, and invokes an application-
+  supplied durable turn sink.
 
-Both bind the production runtime with `world()`.
-
-```ts
-const application = createSupportWorldApplication({
-  world: createWorldCelld({ url: process.env.WORLD_CELLD_URL }),
-  callbackSecretEnv: "AMBIENT_CALLBACK_SECRET",
-  deliver: async (target, instruction) => dispatchAgent(target, instruction),
-});
-
-export const POST = application.fetch;
-```
+Both can bind the local reference runtime with `memory()` or the production
+runtime with `world()`.
 
 The supplied client only needs `world.stream(key).append(input)`. Resolving the
-stream handle is local; `append` is the single admission RPC. `world-celld` or
-another implementation owns the durable stream state and timers.
+stream handle is local; `append` is the single admission RPC. The supplied
+World implementation owns the durable stream state and timers.
 
 The same `AMBIENT_CALLBACK_SECRET` value must be available to the World runtime
 and the application. The secret authenticates prepare and delivery callbacks.

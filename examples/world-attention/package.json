@@ -9,9 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@ewhauser/eve-ambient": "workspace:*",
-    "@ewhauser/eve-ambient-eve": "workspace:*",
-    "eve": "0.38.1"
+    "@ewhauser/eve-ambient": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

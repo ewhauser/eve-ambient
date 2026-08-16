@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0](https://github.com/ewhauser/eve-ambient/compare/v0.5.0...v0.6.0) (2026-08-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* **ambient:** prepare verified Worlds release ([#32](https://github.com/ewhauser/eve-ambient/issues/32))
+
+### Features
+
+* **ambient:** prepare verified Worlds release ([#32](https://github.com/ewhauser/eve-ambient/issues/32)) ([1a90c78](https://github.com/ewhauser/eve-ambient/commit/1a90c789a83709bde7ea0c6d80b94a1ab3b98cd4))
+
 ## [0.5.0](https://github.com/ewhauser/eve-ambient/compare/v0.4.0...v0.5.0) (2026-08-16)
 
 

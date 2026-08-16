@@ -80,6 +80,8 @@ export interface AttentionStreamState {
   readonly mode: FullAttentionBranch["mode"];
   readonly policy: SerializableMailboxPolicy;
   readonly policyHash: InputHash;
+  /** Monotonic reducer time for the last non-duplicate append. */
+  lastAcceptedAt: string;
   recentMessages: AttentionRecentMessage[];
   branchLedger: AttentionBranchLedgerEntry[];
   open?: BufferedAttentionBatch | undefined;
@@ -110,6 +112,7 @@ function createAttentionStream(input: {
   readonly instanceKey: AttentionInstanceKey;
   readonly branch: FullAttentionBranch;
   readonly policyHash: InputHash;
+  readonly acceptedAt: string;
 }): AttentionStreamState {
   return {
     instanceKey: input.instanceKey,
@@ -122,6 +125,7 @@ function createAttentionStream(input: {
     mode: input.branch.mode,
     policy: clone(input.branch.policy),
     policyHash: input.policyHash,
+    lastAcceptedAt: input.acceptedAt,
     recentMessages: [],
     branchLedger: [],
     sealed: [],
@@ -159,18 +163,27 @@ export async function applyAttentionStreamAppend(
 
   const first = append.branches[0]!;
   const policyHash = await hashPolicy(first);
+  const reducerNow = current === undefined
+    ? input.now
+    : maxTimestamp(current.lastAcceptedAt, input.now)!;
   const state = current === undefined
-    ? createAttentionStream({ instanceKey: append.streamKey, branch: first, policyHash })
+    ? createAttentionStream({
+        instanceKey: append.streamKey,
+        branch: first,
+        policyHash,
+        acceptedAt: reducerNow,
+      })
     : clone(current);
+  state.lastAcceptedAt = reducerNow;
   for (const branch of append.branches) {
-    appendAttentionBranch(state, branch, { now: input.now, policyHash });
+    appendAttentionBranch(state, branch, { now: reducerNow, policyHash });
   }
   const receipt: AttentionStreamAppendReceipt = {
     streamKey: append.streamKey,
     eventKey: append.eventKey,
     inputHash: append.inputHash,
     status: "appended",
-    acceptedAt: input.now,
+    acceptedAt: reducerNow,
   };
   state.recentMessages.push({
     eventKey: append.eventKey,
@@ -179,6 +192,34 @@ export async function applyAttentionStreamAppend(
   });
   trimRing(state.recentMessages, input.maxRecentMessages);
   return { state, receipt: clone(receipt) };
+}
+
+/**
+ * Checks whether an append fits in the live reducer payload budget. Workflow
+ * callers can leave overflow queued in the durable hook until this becomes true.
+ */
+export function attentionStreamAppendFits(
+  stream: AttentionStreamState | undefined,
+  append: AttentionStreamAppend,
+  limits: {
+    readonly maxPendingBranches: number;
+    readonly maxPendingBytes: number;
+  },
+): boolean {
+  const pendingBranches = stream?.branchLedger.length ?? 0;
+  const pendingBytes = stream === undefined
+    ? 0
+    : (stream.open?.bytes ?? 0) +
+      stream.sealed.reduce((sum, batch) => sum + batch.bytes, 0) +
+      (stream.active?.batch.bytes ?? 0);
+  const appendBytes = append.branches.reduce(
+    (sum, branch) => sum + attentionValueBytes(branch),
+    0,
+  );
+  return (
+    pendingBranches + append.branches.length <= limits.maxPendingBranches &&
+    pendingBytes + appendBytes <= limits.maxPendingBytes
+  );
 }
 
 /** Appends a complete branch exactly once and updates only provisional state. */

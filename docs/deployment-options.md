@@ -1,39 +1,81 @@
-# World deployment
+# Workflow World deployment
 
-Ambient accepts one correlation-addressed World client. It does not know which
-database, queue, or runtime is behind that client.
+Ambient runs on the standard World selected by Workflow. It does not ship a
+Postgres client, a celld client, or a custom backend interface.
 
-| Ambient owns | World implementation owns |
+| Ambient owns | Workflow and its World own |
 |---|---|
-| canonical events, rules, keys, hashes | deterministic stream addressing |
-| grouping branches by correlation | atomic append and recent-message ring |
-| prepare and deliver callback contract | durable state, timers, leases, retries |
-| exact final `wakeKey` | encryption, backups, retention, erasure |
+| canonical events, rules, correlation keys, hashes | runs, hooks, event storage, queues, streams |
+| bounded correlation reducer and durable timers | execution, replay, retries, encryption |
+| prepare and deliver callback contract | deployment routing, retention, observability |
+| exact final `wakeKey` | backend durability, backups, and erasure |
+
+## Application binding
 
 ```ts
-const ambient = application.with(world({
-  world: createWorldCelld({ url: process.env.WORLD_CELLD_URL }),
+import { workflow } from "@ewhauser/eve-ambient/workflow";
+
+const ambient = application.with(workflow({
+  callbackUrl: "https://agent.example.com",
   callbackSecretEnv: "AMBIENT_CALLBACK_SECRET",
 }));
 ```
 
-`createWorldCelld()` is illustrative: `world-celld` is developed separately.
-Any implementation is conforming if `stream(key)` constructs a local handle
-and `append(input)` durably and atomically applies the exported stream reducer.
+The consumer must also configure Workflow for its framework and make the
+packaged workflow discoverable:
 
-A World can use celld, Postgres, Redis, or a combination internally. That
-composition remains below the stream contract; Ambient has no backend selector
-per rule and ships no custom storage adapter.
+```ts
+// workflows/ambient.ts
+export * from "@ewhauser/eve-ambient/workflows";
+```
+
+Without that re-export, `start()` cannot resolve the packaged workflow after a
+cold start.
+
+## Selecting a World
+
+Vercel deployments use the managed Vercel World automatically. Outside Vercel,
+set `WORKFLOW_TARGET_WORLD` when selecting a self-hosted or community World:
+
+```sh
+WORKFLOW_TARGET_WORLD=@workflow/world-postgres
+# or
+WORKFLOW_TARGET_WORLD=@ewhauser/world-celld
+```
+
+Useful starting points:
+
+- [Vercel World](https://workflow-sdk.dev/worlds/vercel)
+- [official Postgres World](https://workflow-sdk.dev/worlds/postgres)
+- [`world-celld`](https://github.com/ewhauser/world-celld)
+- [community Workflow Worlds](https://workflow-sdk.dev/worlds)
+
+World composition remains below Workflow's standard interface. A World may use
+Postgres, Redis, celld, or multiple services internally; Ambient does not select
+storage per rule.
 
 ## Callback endpoint
 
-The remote World needs the application callback base URL and the same bearer
-secret named by `callbackSecretEnv`. Keep the endpoint on a trusted network
-where possible. Rotate the secret in both deployments together.
+The Workflow steps need the application's public callback base URL and the same
+bearer secret named by `callbackSecretEnv`. Keep the endpoint on a trusted
+network where possible. Rotate the secret in the step and application
+environments together.
 
-## Cutover
+## Lifecycle and cutover
 
-The removed custom backends and the abandoned Workflow-run spike are not state
-compatible with correlation World cells. Drain or explicitly abandon old work,
-deploy the new World and callback endpoint, then switch ingress. Retries must
-preserve their original canonical source identity.
+One Workflow run owns each active correlation. The run does not rotate, even
+after its 48-entry recent-message ring wraps. This avoids the unsafe gap between
+disposing one hook owner and registering another, but means run history grows
+with correlation traffic.
+
+The hook token fingerprints immutable Workflow options. Deploying a changed
+callback URL or path, callback secret environment-variable name, retry or lease
+setting, ring size, or payload capacity starts a new correlation owner for new
+events. Existing state is not transferred. Drain or explicitly abandon the old
+owner as part of that configuration cutover. Rotating only the secret value in
+the same environment variable does not change ownership.
+
+The removed custom `AttentionWorld` protocol is not state-compatible with this
+runtime. Drain or explicitly abandon old correlation work, deploy the Workflow
+bundle and callback endpoint, then switch ingress. Retries must preserve their
+original canonical source identity.

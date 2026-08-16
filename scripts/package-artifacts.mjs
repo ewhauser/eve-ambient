@@ -28,8 +28,14 @@ export const packages = new Map([
         "dist/testing.js",
         "dist/stream-state.d.ts",
         "dist/stream-state.js",
-        "dist/world.d.ts",
-        "dist/world.js",
+        "dist/workflow.d.ts",
+        "dist/workflow.js",
+        "dist/workflow-protocol.d.ts",
+        "dist/workflow-protocol.js",
+        "dist/workflows/index.d.ts",
+        "dist/workflows/index.js",
+        "dist/workflows/correlation.d.ts",
+        "dist/workflows/correlation.js",
         "LICENSE",
         "README.md",
       ],
@@ -97,12 +103,17 @@ function validateManifest(packagePath, expected) {
     if (eveDependency !== undefined) {
       failures.push("provider-independent core must not depend on eve");
     }
-    if (
-      manifest.dependencies?.workflow !== undefined ||
-      manifest.devDependencies?.workflow !== undefined ||
-      manifest.peerDependencies?.workflow !== undefined
-    ) {
-      failures.push("core must not depend on the Workflow SDK");
+    if (manifest.dependencies?.workflow !== undefined) {
+      failures.push("Workflow must remain an optional peer, not a direct dependency");
+    }
+    if (manifest.devDependencies?.workflow !== "5.0.0-beta.42") {
+      failures.push("Workflow development dependency must be exactly 5.0.0-beta.42");
+    }
+    if (manifest.peerDependencies?.workflow !== ">=5.0.0-beta.42 <6") {
+      failures.push("Workflow peer range must cover the supported Workflow 5 runtime");
+    }
+    if (manifest.peerDependenciesMeta?.workflow?.optional !== true) {
+      failures.push("Workflow peer dependency must be optional");
     }
   }
 
@@ -160,8 +171,8 @@ function validateContents(packagePath, expected, packResult) {
     "dist/world-steps.js",
     "dist/world-workflows.d.ts",
     "dist/world-workflows.js",
-    "dist/workflow.d.ts",
-    "dist/workflow.js",
+    "dist/world.d.ts",
+    "dist/world.js",
     "bin/eve-ambient.mjs",
     "migrations/001_attention_engine.sql",
     "migrations/001_eve_ambient.sql",

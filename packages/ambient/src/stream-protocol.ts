@@ -34,16 +34,6 @@ export interface AttentionStreamAppendReceipt {
   readonly acceptedAt: string;
 }
 
-/** A correlation-owned remote object. `append` is the only admission RPC. */
-export interface AttentionStream {
-  append(input: AttentionStreamAppend): Promise<AttentionStreamAppendReceipt>;
-}
-
-/** Resolves deterministic stream handles without performing a lookup RPC. */
-export interface AttentionWorld {
-  stream(key: AttentionInstanceKey): AttentionStream;
-}
-
 /** Groups one accepted event into one append per distinct correlation stream. */
 export async function compileAttentionStreamAppends(
   input: AcceptedFanout,
@@ -118,32 +108,6 @@ export async function validateAttentionStreamAppend(
   return deepFreeze({ ...logical, inputHash: expectedHash });
 }
 
-export function validateAttentionStreamAppendReceipt(
-  receipt: AttentionStreamAppendReceipt,
-  input: AttentionStreamAppend,
-): AttentionStreamAppendReceipt {
-  assertRecord(receipt, "attention stream append receipt");
-  assertExactKeys(
-    receipt,
-    ["acceptedAt", "eventKey", "inputHash", "status", "streamKey"],
-    "attention stream append receipt",
-  );
-  if (
-    receipt.streamKey !== input.streamKey ||
-    receipt.eventKey !== input.eventKey ||
-    receipt.inputHash !== input.inputHash
-  ) {
-    throw new TypeError("attention stream append receipt does not match its request");
-  }
-  if (receipt.status !== "appended" && receipt.status !== "duplicate") {
-    throw new TypeError("attention stream append receipt status is invalid");
-  }
-  if (!isCanonicalTimestamp(receipt.acceptedAt)) {
-    throw new TypeError("attention stream append receipt acceptedAt must be an ISO timestamp");
-  }
-  return deepFreeze(structuredClone(receipt));
-}
-
 export async function streamKeyForBranch(
   branch: FullAttentionBranch,
 ): Promise<AttentionInstanceKey> {
@@ -203,12 +167,6 @@ function assertExactKeys(
   for (const key of allowed) {
     if (!(key in value)) throw new TypeError(`${name} is missing ${key}`);
   }
-}
-
-function isCanonicalTimestamp(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  const milliseconds = Date.parse(value);
-  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
 }
 
 function deepFreeze<T>(value: T): T {

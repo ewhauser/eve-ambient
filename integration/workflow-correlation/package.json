@@ -1,18 +1,20 @@
 {
-  "name": "eve-ambient-attention-world-integration",
+  "name": "eve-ambient-workflow-correlation-integration",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --config vitest.workflow.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@ewhauser/eve-ambient": "workspace:*"
+    "@ewhauser/eve-ambient": "workspace:*",
+    "workflow": "5.0.0-beta.42"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@workflow/vitest": "5.0.0-beta.42",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   }

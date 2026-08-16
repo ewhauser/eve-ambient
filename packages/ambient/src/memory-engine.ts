@@ -1,5 +1,7 @@
 import {
   AttentionCapacityError,
+  attentionValueBytes,
+  validateAcceptedFanout,
   type AcceptedFanout,
   type AttentionAcceptanceReceipt,
   type AttentionCallbacks,
@@ -11,9 +13,9 @@ import {
   type AttentionInstanceKey,
 } from "./idempotency.js";
 import {
+  compileAttentionStreamAppends,
   type AttentionStreamAppend,
   type AttentionStreamAppendReceipt,
-  type AttentionWorld,
 } from "./stream-protocol.js";
 import type { MonitorClock } from "./types.js";
 import {
@@ -26,7 +28,6 @@ import {
   isCurrentAttentionClaim,
   type AttentionStreamState,
 } from "./stream-state.js";
-import { WorldAttentionEngine } from "./world.js";
 
 const DEFAULT_MAX_RECENT_MESSAGES = 48;
 const DEFAULT_RETRY_DELAY_MS = 1_000;
@@ -88,9 +89,10 @@ export class MemoryAttentionEngine implements AttentionEngine {
   readonly #retryDelayMs: number;
   readonly #claimLeaseMs: number;
   readonly #maxAttempts: number;
+  readonly #maxBranches: number;
+  readonly #maxFanoutBytes: number;
   readonly #maxPreparedWakeBytes: number;
   readonly #faults: MemoryAttentionEngineFaults;
-  readonly #ingress: WorldAttentionEngine;
   readonly #streams = new Map<AttentionInstanceKey, AttentionStreamState>();
   readonly #locks = new Map<string, Promise<void>>();
 
@@ -121,25 +123,50 @@ export class MemoryAttentionEngine implements AttentionEngine {
       "claimLeaseMs",
     );
     this.#maxAttempts = positiveInteger(options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS, "maxAttempts");
+    this.#maxBranches = positiveInteger(
+      options.maxBranches ?? DEFAULT_MAX_BRANCHES,
+      "maxBranches",
+    );
+    this.#maxFanoutBytes = positiveInteger(
+      options.maxFanoutBytes ?? DEFAULT_MAX_FANOUT_BYTES,
+      "maxFanoutBytes",
+    );
     this.#maxPreparedWakeBytes = positiveInteger(
       options.maxPreparedWakeBytes ?? DEFAULT_MAX_PREPARED_WAKE_BYTES,
       "maxPreparedWakeBytes",
     );
     this.#faults = options.faults ?? {};
-
-    const world: AttentionWorld = {
-      stream: (key) => ({ append: (append) => this.#appendStream(key, append) }),
-    };
-    this.#ingress = new WorldAttentionEngine({
-      world,
-      clock: this.#clock,
-      maxBranches: options.maxBranches ?? DEFAULT_MAX_BRANCHES,
-      maxFanoutBytes: options.maxFanoutBytes ?? DEFAULT_MAX_FANOUT_BYTES,
-    });
   }
 
-  accept(input: AcceptedFanout): Promise<AttentionAcceptanceReceipt> {
-    return this.#ingress.accept(input);
+  async accept(input: AcceptedFanout): Promise<AttentionAcceptanceReceipt> {
+    const fanout = await validateAcceptedFanout(input);
+    if (fanout.branches.length > this.#maxBranches) {
+      throw new AttentionCapacityError(
+        `accepted fan-out exceeds the maximum of ${this.#maxBranches} branches`,
+      );
+    }
+    if (attentionValueBytes(fanout) > this.#maxFanoutBytes) {
+      throw new AttentionCapacityError(
+        `accepted fan-out exceeds the maximum of ${this.#maxFanoutBytes} bytes`,
+      );
+    }
+
+    const appends = await compileAttentionStreamAppends(fanout);
+    const settled = await Promise.allSettled(
+      appends.map((append) => this.#appendStream(append.streamKey, append)),
+    );
+    const receipts = settled.map((result) => {
+      if (result.status === "rejected") throw result.reason;
+      return result.value;
+    });
+    const acceptedAt = receipts.map((receipt) => receipt.acceptedAt).sort().at(-1) ?? this.#now();
+    return Object.freeze({
+      eventKey: fanout.eventKey,
+      occurrenceKey: fanout.occurrenceKey,
+      inputHash: fanout.inputHash,
+      branchKeys: Object.freeze(fanout.branches.map((branch) => branch.branchKey)),
+      acceptedAt,
+    });
   }
 
   async runDue(

@@ -378,12 +378,24 @@ deduplication. Ring eviction may allow an old event to be processed again, so
 final effects do not depend on that cache. The durable receiver must enforce
 the stable `wakeKey`.
 
+Applied full-value reducer state is capped per correlation (1,000 pending
+branches and 16 MiB by default). Once either limit is reached, the run holds at
+most the next validated append and stops consuming the hook until due work
+releases capacity; later appends remain in Workflow's durable queue. A single
+append larger than either configured limit is rejected before `resumeHook()`.
+
 Correlation runs are intentionally permanent: there is no automatic rotation
 or handoff protocol. Live reducer state remains bounded, but the underlying
 Workflow event history grows while a correlation stays active. Operators
 should monitor per-run history limits and choose correlation keys with bounded
 traffic; a future standard continue-as-new primitive can add compaction without
 reintroducing a custom World contract.
+
+The deterministic hook token includes a fingerprint of immutable Workflow
+options. Changing callback routing, retry, ring, lease, or capacity options
+therefore starts a new owner for subsequently admitted events instead of
+silently reusing an old run's captured configuration. Reducer state does not
+migrate across that cutover; drain or explicitly abandon the previous owner.
 
 There is no event coordinator, global attention run, custom storage adapter,
 or global correlation registry in the admission path.

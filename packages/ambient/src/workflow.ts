@@ -15,6 +15,7 @@ import type {
 } from "./application.js";
 import { IdempotencyConflictError } from "./idempotency.js";
 import { compileAttentionStreamAppends } from "./stream-protocol.js";
+import { attentionStreamAppendFits } from "./stream-state.js";
 import type { MonitorClock } from "./types.js";
 import {
   correlationToken,
@@ -32,6 +33,8 @@ const DEFAULT_MAX_ATTEMPTS = 10;
 const DEFAULT_MAX_BRANCHES = 1_000;
 const DEFAULT_MAX_FANOUT_BYTES = 16 * 1_024 * 1_024;
 const DEFAULT_MAX_PREPARED_WAKE_BYTES = 1 * 1_024 * 1_024;
+const DEFAULT_MAX_PENDING_BRANCHES = 1_000;
+const DEFAULT_MAX_PENDING_BYTES = 16 * 1_024 * 1_024;
 const DEFAULT_MAX_CALLBACK_REQUEST_BYTES = 16 * 1_024 * 1_024;
 const DEFAULT_REGISTRATION_TIMEOUT_MS = 10_000;
 
@@ -50,6 +53,10 @@ export interface WorkflowAttentionEngineOptions {
   readonly maxBranches?: number | undefined;
   readonly maxFanoutBytes?: number | undefined;
   readonly maxPreparedWakeBytes?: number | undefined;
+  /** Maximum full branch payloads applied to one correlation reducer at once. */
+  readonly maxPendingBranches?: number | undefined;
+  /** Maximum full branch bytes applied to one correlation reducer at once. */
+  readonly maxPendingBytes?: number | undefined;
   readonly registrationTimeoutMs?: number | undefined;
   readonly clock?: MonitorClock | undefined;
 }
@@ -125,6 +132,14 @@ export class WorkflowAttentionEngine implements AttentionEngine {
         options.maxPreparedWakeBytes ?? DEFAULT_MAX_PREPARED_WAKE_BYTES,
         "maxPreparedWakeBytes",
       ),
+      maxPendingBranches: positiveInteger(
+        options.maxPendingBranches ?? DEFAULT_MAX_PENDING_BRANCHES,
+        "maxPendingBranches",
+      ),
+      maxPendingBytes: positiveInteger(
+        options.maxPendingBytes ?? DEFAULT_MAX_PENDING_BYTES,
+        "maxPendingBytes",
+      ),
     };
     if (this.#config.preparePath === this.#config.deliverPath) {
       throw new TypeError("preparePath and deliverPath must be different");
@@ -159,6 +174,15 @@ export class WorkflowAttentionEngine implements AttentionEngine {
 
     const acceptedAt = this.#clock.now().toISOString();
     const appends = await compileAttentionStreamAppends(fanout);
+    for (const append of appends) {
+      if (!attentionStreamAppendFits(undefined, append, this.#config)) {
+        throw new AttentionCapacityError(
+          `one correlation append exceeds the reducer limit of ` +
+            `${this.#config.maxPendingBranches} branches or ` +
+            `${this.#config.maxPendingBytes} bytes`,
+        );
+      }
+    }
     await Promise.all(appends.map((append) => this.#publish({
       kind: "append",
       append,
@@ -174,7 +198,7 @@ export class WorkflowAttentionEngine implements AttentionEngine {
   }
 
   async #publish(command: CorrelationAppendCommand): Promise<void> {
-    const token = correlationToken(this.#config.namespace, command.append.streamKey);
+    const token = await correlationToken(this.#config, command.append.streamKey);
     let target: string | WorkflowHook = token;
     for (let attempt = 0; attempt < 4; attempt += 1) {
       try {

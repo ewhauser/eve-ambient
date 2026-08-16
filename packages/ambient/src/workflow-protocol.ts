@@ -1,3 +1,4 @@
+import { hashIdempotencyInput } from "./idempotency.js";
 import type { AttentionStreamAppend } from "./stream-protocol.js";
 
 /** Serializable configuration retained by one correlation Workflow run. */
@@ -12,6 +13,8 @@ export interface CorrelationWorkflowConfig {
   readonly retryDelayMs: number;
   readonly maxAttempts: number;
   readonly maxPreparedWakeBytes: number;
+  readonly maxPendingBranches: number;
+  readonly maxPendingBytes: number;
 }
 
 /** One transport-accepted message sent to a correlation Workflow hook. */
@@ -36,6 +39,13 @@ export interface CorrelationOwnerConflict {
   readonly ownerRunId: string;
 }
 
-export function correlationToken(namespace: string, streamKey: string): string {
-  return `eve-ambient:correlation:${namespace}:${streamKey}`;
+export async function correlationToken(
+  config: CorrelationWorkflowConfig,
+  streamKey: string,
+): Promise<string> {
+  const configHash = await hashIdempotencyInput({
+    protocolVersion: 1,
+    ...config,
+  });
+  return `eve-ambient:correlation:${config.namespace}:${configHash}:${streamKey}`;
 }

@@ -206,6 +206,201 @@ describe("standard Workflow correlation runtime", () => {
     expect(deliveryCalls[1]?.wakeKey).toBe(deliveryCalls[0]?.wakeKey);
   });
 
+  it("contains an oversized prepared wake and keeps the correlation owner alive", async () => {
+    let prepareCalls = 0;
+    let deliverCalls = 0;
+    const callbackUrl = await serve(createWorkflowAttentionCallbackHandler({
+      async prepare() {
+        prepareCalls += 1;
+        if (prepareCalls === 1) {
+          return {
+            kind: "wake",
+            routeId: "eve",
+            target: "session:incident-42",
+            instruction: "x".repeat(2_048),
+            decision: null,
+            evidence: null,
+          };
+        }
+        return { kind: "ignore", decision: null };
+      },
+      async deliver() {
+        deliverCalls += 1;
+        throw new Error("oversized prepared wake must not be delivered");
+      },
+    }, { secretEnv: SECRET_ENV }));
+    process.env[SECRET_ENV] = "integration-secret";
+    const before = await runIds();
+    const engine = new WorkflowAttentionEngine({
+      namespace: uniqueNamespace("oversized-wake"),
+      callbackUrl,
+      callbackSecretEnv: SECRET_ENV,
+      maxPreparedWakeBytes: 256,
+    });
+
+    await engine.accept(await fanout("oversized-wake", "01", {
+      buffer: { mode: "immediate" },
+    }));
+    await vi.waitFor(() => expect(prepareCalls).toBe(1), { timeout: 10_000 });
+    await engine.accept(await fanout("after-oversized-wake", "02", {
+      buffer: { mode: "immediate" },
+    }));
+
+    await vi.waitFor(() => expect(prepareCalls).toBe(2), { timeout: 10_000 });
+    expect(deliverCalls).toBe(0);
+    expect(await newRunIds(before)).toHaveLength(1);
+  });
+
+  it("contains an invalid delivery receipt and processes the next message", async () => {
+    let prepareCalls = 0;
+    let deliverCalls = 0;
+    const callbackUrl = await serve(createWorkflowAttentionCallbackHandler({
+      async prepare() {
+        prepareCalls += 1;
+        return {
+          kind: "wake",
+          routeId: "eve",
+          target: "session:incident-42",
+          instruction: "Investigate.",
+          decision: null,
+          evidence: null,
+        };
+      },
+      async deliver(wake): Promise<AttentionDeliveryReceipt> {
+        deliverCalls += 1;
+        return {
+          wakeKey: deliverCalls === 1 ? "invalid-wake-key" : wake.wakeKey,
+          inputHash: wake.inputHash,
+          deliveredAt: new Date().toISOString(),
+          result: null,
+        } as AttentionDeliveryReceipt;
+      },
+    }, { secretEnv: SECRET_ENV }));
+    process.env[SECRET_ENV] = "integration-secret";
+    const before = await runIds();
+    const engine = new WorkflowAttentionEngine({
+      namespace: uniqueNamespace("invalid-receipt"),
+      callbackUrl,
+      callbackSecretEnv: SECRET_ENV,
+    });
+
+    await engine.accept(await fanout("invalid-receipt", "01", {
+      buffer: { mode: "immediate" },
+    }));
+    await vi.waitFor(() => expect(deliverCalls).toBe(1), { timeout: 10_000 });
+    await engine.accept(await fanout("after-invalid-receipt", "02", {
+      buffer: { mode: "immediate" },
+    }));
+
+    await vi.waitFor(() => {
+      expect(prepareCalls).toBe(2);
+      expect(deliverCalls).toBe(2);
+    }, { timeout: 10_000 });
+    expect(await newRunIds(before)).toHaveLength(1);
+  });
+
+  it("leaves overflow queued in the hook while reducer payloads stay bounded", async () => {
+    const batches: string[][] = [];
+    const callbackUrl = await serve(createWorkflowAttentionCallbackHandler({
+      async prepare(batch) {
+        batches.push(batch.branches.map((branch) => branch.event.id));
+        return {
+          kind: "wake",
+          routeId: "eve",
+          target: "session:incident-42",
+          instruction: "Investigate.",
+          decision: null,
+          evidence: null,
+        };
+      },
+      async deliver(wake): Promise<AttentionDeliveryReceipt> {
+        return {
+          wakeKey: wake.wakeKey,
+          inputHash: wake.inputHash,
+          deliveredAt: new Date().toISOString(),
+          result: null,
+        };
+      },
+    }, { secretEnv: SECRET_ENV }));
+    process.env[SECRET_ENV] = "integration-secret";
+    const engine = new WorkflowAttentionEngine({
+      namespace: uniqueNamespace("backpressure"),
+      callbackUrl,
+      callbackSecretEnv: SECRET_ENV,
+      maxPendingBranches: 2,
+    });
+    const policy = {
+      buffer: { mode: "immediate" as const },
+      cooldownAfterWakeMs: 50,
+    };
+
+    await engine.accept(await fanout("bounded-0", "00", policy));
+    await vi.waitFor(() => expect(batches).toHaveLength(1), { timeout: 10_000 });
+    await Promise.all(Array.from({ length: 6 }, async (_, index) =>
+      engine.accept(await fanout(
+        `bounded-${index + 1}`,
+        String(index + 1).padStart(2, "0"),
+        policy,
+      ))));
+
+    const expectedEventIds = new Set(Array.from(
+      { length: 7 },
+      (_, index) => `bounded-${index}`,
+    ));
+    await vi.waitFor(() => {
+      expect(new Set(batches.flat())).toEqual(expectedEventIds);
+    }, { timeout: 20_000 });
+    expect(batches.every((batch) => batch.length <= 2)).toBe(true);
+  });
+
+  it("starts a new correlation owner when immutable Workflow configuration changes", async () => {
+    let firstCallbacks = 0;
+    let secondCallbacks = 0;
+    const firstCallbackUrl = await serve(createWorkflowAttentionCallbackHandler({
+      async prepare() {
+        firstCallbacks += 1;
+        return { kind: "ignore", decision: null };
+      },
+      async deliver() {
+        throw new Error("delivery must not run");
+      },
+    }, { secretEnv: SECRET_ENV }));
+    const secondCallbackUrl = await serve(createWorkflowAttentionCallbackHandler({
+      async prepare() {
+        secondCallbacks += 1;
+        return { kind: "ignore", decision: null };
+      },
+      async deliver() {
+        throw new Error("delivery must not run");
+      },
+    }, { secretEnv: SECRET_ENV }));
+    process.env[SECRET_ENV] = "integration-secret";
+    const before = await runIds();
+    const namespace = uniqueNamespace("config-cutover");
+    const first = new WorkflowAttentionEngine({
+      namespace,
+      callbackUrl: firstCallbackUrl,
+      callbackSecretEnv: SECRET_ENV,
+    });
+    const second = new WorkflowAttentionEngine({
+      namespace,
+      callbackUrl: secondCallbackUrl,
+      callbackSecretEnv: SECRET_ENV,
+    });
+
+    await first.accept(await fanout("before-cutover", "01", {
+      buffer: { mode: "immediate" },
+    }));
+    await vi.waitFor(() => expect(firstCallbacks).toBe(1), { timeout: 10_000 });
+    await second.accept(await fanout("after-cutover", "02", {
+      buffer: { mode: "immediate" },
+    }));
+
+    await vi.waitFor(() => expect(secondCallbacks).toBe(1), { timeout: 10_000 });
+    expect(firstCallbacks).toBe(1);
+    expect(await newRunIds(before)).toHaveLength(2);
+  });
+
   it("keeps one permanent run after the 48-message ring wraps", async () => {
     const callbackUrl = await serve(createWorkflowAttentionCallbackHandler({
       async prepare() {

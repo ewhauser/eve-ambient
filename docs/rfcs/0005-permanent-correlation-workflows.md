@@ -8,10 +8,10 @@
 
 ## Decision
 
-Each correlation address maps to one deterministic Workflow hook token. An
-event selected for that address is sent with `resumeHook()`. If the hook is
-missing, the publisher starts a candidate correlation run, waits for the hook
-owner, and resumes it.
+Each correlation address and immutable Workflow configuration map to one
+deterministic Workflow hook token. An event selected for that address is sent
+with `resumeHook()`. If the hook is missing, the publisher starts a candidate
+correlation run, waits for the hook owner, and resumes it.
 
 ```text
 event 1 -> correlation K -> start owner K -> resume hook K
@@ -29,6 +29,12 @@ The owner applies the existing pure reducer sequentially. It retains a bounded
 recent-message ring, open and sealed batches, one active claim, the exact
 prepared wake, retry timestamps, and cooldown. It races hook input against the
 next durable timer.
+
+Pending branch count and bytes are explicitly capped. Once applied state is at
+capacity, the owner holds at most the next validated append and stops advancing
+the hook iterator until a due run releases space. Remaining events stay in the
+standard World's durable hook queue rather than accumulating as reducer
+payloads.
 
 Prepare and deliver run as authenticated Workflow steps. They may repeat.
 Prepared wakes are checkpointed before delivery, and the final durable receiver
@@ -67,4 +73,6 @@ delivers a batch. Cold creation includes variable hook-registration polling.
 - source dedup remains bounded and best effort;
 - final-effect safety remains durable through `wakeKey`;
 - prepare and delivery remain at-least-once; and
+- changing immutable Workflow configuration cuts new events over to a fresh
+  owner without state migration; and
 - custom correlation-World state cannot migrate automatically.

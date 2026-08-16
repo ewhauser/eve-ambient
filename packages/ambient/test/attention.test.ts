@@ -11,6 +11,11 @@ import {
   defineChannelCanonicalization,
   hashIdempotencyInput,
 } from "../src/idempotency.js";
+import { compileAttentionStreamAppends } from "../src/stream-protocol.js";
+import {
+  applyAttentionStreamAppend,
+  nextAttentionDueAt,
+} from "../src/stream-state.js";
 
 describe("attention fan-out protocol", () => {
   it("carries the canonical event by value and erases declaration order", async () => {
@@ -157,9 +162,46 @@ describe("attention fan-out protocol", () => {
       "accepted fan-out contains unsupported fields",
     );
   });
+
+  it("keeps reducer time monotonic when accepted appends arrive out of order", async () => {
+    const policy = {
+      buffer: {
+        mode: "debounce" as const,
+        quietPeriodMs: 2 * 60_000,
+        maxWaitMs: 10 * 60_000,
+        maxEvents: 10,
+        maxBytes: 100_000,
+      },
+    };
+    const later = await compileAcceptedFanout({
+      source: await acceptedSource({ id: "later", body: "later" }),
+      branches: [branch({ orderKey: "002", policy })],
+    });
+    const earlier = await compileAcceptedFanout({
+      source: await acceptedSource({ id: "earlier", body: "earlier" }),
+      branches: [branch({ orderKey: "001", policy })],
+    });
+    const [laterAppend] = await compileAttentionStreamAppends(later);
+    const [earlierAppend] = await compileAttentionStreamAppends(earlier);
+    const first = await applyAttentionStreamAppend(undefined, laterAppend!, {
+      now: "2026-01-01T00:01:00.000Z",
+      maxRecentMessages: 48,
+    });
+    const second = await applyAttentionStreamAppend(first.state, earlierAppend!, {
+      now: "2026-01-01T00:00:00.000Z",
+      maxRecentMessages: 48,
+    });
+
+    expect(second.state.lastAcceptedAt).toBe("2026-01-01T00:01:00.000Z");
+    expect(second.state.open?.updatedAt).toBe("2026-01-01T00:01:00.000Z");
+    expect(nextAttentionDueAt(second.state)).toBe("2026-01-01T00:03:00.000Z");
+    expect(second.receipt.acceptedAt).toBe("2026-01-01T00:01:00.000Z");
+  });
 });
 
-async function acceptedSource() {
+async function acceptedSource(
+  overrides: { readonly id?: string; readonly body?: string } = {},
+) {
   return canonicalizeChannelDelivery(
     defineChannelCanonicalization<
       { readonly id: string; readonly body: string; readonly attempt: number },
@@ -169,7 +211,11 @@ async function acceptedSource() {
       partitionKey: () => "conversation-1",
       canonicalize: (raw) => event(raw.id, raw.body),
     }),
-    { id: "event-1", body: "semantic payload", attempt: 7 },
+    {
+      id: overrides.id ?? "event-1",
+      body: overrides.body ?? "semantic payload",
+      attempt: 7,
+    },
     { applicationId: "engineering-agent" },
   );
 }

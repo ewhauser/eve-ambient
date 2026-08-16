@@ -54,7 +54,8 @@ partitionKey -> partitionCellKey -> instanceKey -> batchKey -> runKey -> wakeKey
 
 `instanceKey` covers application, tenant, channel, installation, channel
 partition, rule ID, rule version, and correlation key. Its deterministic hook
-token is globally namespaced for the selected World.
+token is globally namespaced for the selected World and includes a fingerprint
+of the immutable correlation Workflow configuration.
 
 Each key binds to a canonical input hash. A remembered key with the same hash
 is a duplicate; the same key with another hash is an
@@ -68,6 +69,12 @@ One permanent correlation run owns:
 - open, sealed, and active full-value batches;
 - the exact prepared wake checkpoint; and
 - retry, lease, and cooldown timestamps.
+
+Applied full-value payloads are limited by `maxPendingBranches` and
+`maxPendingBytes` (1,000 and 16 MiB by default). The publisher rejects a single
+correlation append that cannot fit. At capacity, the run holds at most the next
+validated append and waits for its reducer timer without requesting another
+hook value. Remaining values stay in Workflow's durable hook queue.
 
 Terminal processing removes source payloads and in-flight branch entries. Ring
 entries contain only keys, hashes, timestamps, and receipts. Ring eviction
@@ -90,7 +97,9 @@ Prepare and deliver are authenticated Workflow steps that post complete frozen
 batches and prepared wakes to `/ambient/prepare` and `/ambient/deliver`.
 `prepare()` may repeat. A wake is recorded before delivery, and every delivery
 retry uses the exact checkpointed value. Routes must carry `wakeKey` into the
-final durable system.
+final durable system. Invalid or oversized prepare results and invalid delivery
+receipts terminate only the affected attention run; they do not terminate the
+permanent correlation owner.
 
 ## Measured call fanout
 
@@ -110,5 +119,6 @@ start and hook-registration polling, so its count varies with scheduler timing.
 
 The reference and integration suites check grouping, same-correlation reuse,
 bounded ring dedup, conflicts, capacity, ordering, debounce, cooldown, leases,
-callback validation, exact-wake retry, concurrent cold ownership, consumer
-workflow discovery, permanent-run behavior, and measured World calls.
+callback validation, exact-wake retry, reducer backpressure, configuration
+cutover, concurrent cold ownership, consumer workflow discovery, permanent-run
+behavior, and measured World calls.

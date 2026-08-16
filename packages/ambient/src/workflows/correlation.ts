@@ -1,8 +1,11 @@
+import { AttentionCapacityError } from "../attention.js";
 import { IdempotencyConflictError } from "../idempotency.js";
 import {
+  AttentionCallbackValidationError,
   applyAttentionDeliveryReceipt,
   applyPreparedAttentionOutcome,
   applyAttentionStreamAppend,
+  attentionStreamAppendFits,
   claimAttentionRun,
   failAttentionRun,
   nextAttentionDueAt,
@@ -32,20 +35,35 @@ export async function correlationWorkflow(
 ): Promise<CorrelationOwnerConflict> {
   "use workflow";
 
-  using inbox = createHook<CorrelationAppendCommand>({
-    token: correlationToken(config.namespace, streamKey),
-  });
+  const token = await correlationToken(config, streamKey);
+  using inbox = createHook<CorrelationAppendCommand>({ token });
   const conflict = await inbox.getConflict();
   if (conflict !== null) {
     return { kind: "owner-conflict", streamKey, ownerRunId: conflict.runId };
   }
 
   const iterator = inbox[Symbol.asyncIterator]();
-  let nextInput = iterator.next();
+  let nextInput: Promise<IteratorResult<CorrelationAppendCommand>> | undefined =
+    iterator.next();
+  let pendingInput: CorrelationAppendCommand | undefined;
   let state: AttentionStreamState | undefined;
   let timer: { readonly wakeAt: string; readonly promise: Promise<TimerWake> } | undefined;
 
   for (;;) {
+    if (
+      pendingInput !== undefined &&
+      attentionStreamAppendFits(state, pendingInput.append, config)
+    ) {
+      state = await applyCommand(pendingInput, state, config);
+      const currentDueAt = nextAttentionDueAt(state);
+      if (currentDueAt !== undefined && currentDueAt <= state.lastAcceptedAt) {
+        state = await processDue(state, state.lastAcceptedAt, config);
+      }
+      pendingInput = undefined;
+      nextInput = iterator.next();
+      continue;
+    }
+
     const dueAt = state === undefined ? undefined : nextAttentionDueAt(state);
     if (dueAt !== undefined && (timer === undefined || dueAt < timer.wakeAt)) {
       timer = {
@@ -54,21 +72,22 @@ export async function correlationWorkflow(
       };
     }
 
-    const selected = timer === undefined
-      ? await nextInput.then((received) => ({ kind: "input" as const, received }))
-      : await Promise.race([
-          nextInput.then((received) => ({ kind: "input" as const, received })),
-          timer.promise,
-        ]);
+    let selected: InputWake | TimerWake;
+    if (pendingInput !== undefined) {
+      if (timer === undefined) {
+        throw new Error("a full correlation reducer has no due work to release capacity");
+      }
+      selected = await timer.promise;
+    } else {
+      if (nextInput === undefined) throw new Error("correlation input iterator is not pending");
+      const input = nextInput.then((received) => ({ kind: "input" as const, received }));
+      selected = timer === undefined ? await input : await Promise.race([input, timer.promise]);
+    }
 
     if (selected.kind === "input") {
       if (selected.received.done) throw new Error("correlation hook closed unexpectedly");
-      nextInput = iterator.next();
-      state = await applyCommand(selected.received.value, state, config);
-      const currentDueAt = nextAttentionDueAt(state);
-      if (currentDueAt !== undefined && currentDueAt <= selected.received.value.acceptedAt) {
-        state = await processDue(state, selected.received.value.acceptedAt, config);
-      }
+      pendingInput = selected.received.value;
+      nextInput = undefined;
       continue;
     }
 
@@ -83,6 +102,11 @@ export async function correlationWorkflow(
 interface TimerWake {
   readonly kind: "timer";
   readonly wakeAt: string;
+}
+
+interface InputWake {
+  readonly kind: "input";
+  readonly received: IteratorResult<CorrelationAppendCommand>;
 }
 
 async function applyCommand(
@@ -138,10 +162,20 @@ async function processDue(
       });
       return state;
     }
-    await applyPreparedAttentionOutcome(state, prepared.value, {
-      now: prepared.completedAt,
-      maxPreparedWakeBytes: config.maxPreparedWakeBytes,
-    });
+    try {
+      await applyPreparedAttentionOutcome(state, prepared.value, {
+        now: prepared.completedAt,
+        maxPreparedWakeBytes: config.maxPreparedWakeBytes,
+      });
+    } catch (error) {
+      failAttentionRun(state, error, {
+        now: prepared.completedAt,
+        retryDelayMs: config.retryDelayMs,
+        maxAttempts: config.maxAttempts,
+        terminalError: isTerminalTransitionError,
+      });
+      return state;
+    }
   }
 
   const delivering = state.active;
@@ -161,6 +195,25 @@ async function processDue(
     });
     return state;
   }
-  applyAttentionDeliveryReceipt(state, delivered.value, { now: delivered.completedAt });
+  try {
+    applyAttentionDeliveryReceipt(state, delivered.value, {
+      now: delivered.completedAt,
+    });
+  } catch (error) {
+    failAttentionRun(state, error, {
+      now: delivered.completedAt,
+      retryDelayMs: config.retryDelayMs,
+      maxAttempts: config.maxAttempts,
+      terminalError: isTerminalTransitionError,
+    });
+  }
   return state;
+}
+
+function isTerminalTransitionError(error: unknown): boolean {
+  return (
+    error instanceof AttentionCapacityError ||
+    error instanceof IdempotencyConflictError ||
+    error instanceof AttentionCallbackValidationError
+  );
 }

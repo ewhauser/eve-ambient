@@ -49,7 +49,13 @@ const ambient = application.with(memory({ clock, maxRecentMessages: 48 }));
 await ambient.engine.runDue();
 ```
 
-Each correlation Workflow keeps bounded reducer state and a 48-entry recent
-message ring. It does not rotate automatically, so the Workflow event history
-continues to grow while that correlation remains active. Final effects must
-deduplicate the stable `wakeKey` because prepare and delivery are at-least-once.
+Each correlation Workflow keeps a 48-entry recent-message ring and caps applied
+full-value reducer state at 1,000 pending branches and 16 MiB by default. It
+stops consuming the durable hook while at capacity, leaving overflow queued in
+Workflow until due work drains state. It does not rotate automatically, so the
+Workflow event history continues to grow while that correlation remains active.
+
+Immutable Workflow options are fingerprinted into correlation ownership.
+Changing them starts a new owner for new events and does not migrate the old
+owner's reducer state. Final effects must deduplicate the stable `wakeKey`
+because prepare and delivery are at-least-once.

@@ -68,6 +68,13 @@ after its 48-entry recent-message ring wraps. This avoids the unsafe gap between
 disposing one hook owner and registering another, but means run history grows
 with correlation traffic.
 
+The hook token fingerprints immutable Workflow options. Deploying a changed
+callback URL or path, callback secret environment-variable name, retry or lease
+setting, ring size, or payload capacity starts a new correlation owner for new
+events. Existing state is not transferred. Drain or explicitly abandon the old
+owner as part of that configuration cutover. Rotating only the secret value in
+the same environment variable does not change ownership.
+
 The removed custom `AttentionWorld` protocol is not state-compatible with this
 runtime. Drain or explicitly abandon old correlation work, deploy the Workflow
 bundle and callback endpoint, then switch ingress. Retries must preserve their

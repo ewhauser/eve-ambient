@@ -21,10 +21,12 @@ signals; application callback and turn-queue signals remain application-owned.
 ## Permanent-run capacity
 
 Ambient does not rotate a live correlation run. Reducer payload state remains
-bounded, but the Workflow event log grows with every resume, timer, and step.
-Choose correlation keys that bound traffic, alert before the selected World's
-per-run event ceiling, and explicitly abandon or drain correlations that are no
-longer needed.
+bounded by the configured pending-branch and pending-byte limits; hook overflow
+remains durably queued until due work releases capacity. The Workflow event log
+still grows with every resume, timer, and step. Choose correlation keys that
+bound traffic, alert before the selected World's per-run event and queue
+ceilings, and explicitly abandon or drain correlations that are no longer
+needed.
 
 ## Secrets
 
@@ -48,10 +50,12 @@ application event-history or replay API.
 ## Definition rollout
 
 Rule ID, version, mode, policy, and correlation participate in run identity or
-policy conflict checks. Treat released definitions as immutable. Workflow IDs
-for packaged code include the package version, and running work depends on the
-deployment that compiled it; keep pinned deployments available according to
-the selected World's guarantees.
+policy conflict checks. Workflow runtime options are fingerprinted into hook
+ownership; changing one cuts new events over to a fresh owner without migrating
+old reducer state. Treat released definitions and runtime configurations as
+immutable, planned rollouts. Workflow IDs for packaged code include the package
+version, and running work depends on the deployment that compiled it; keep
+pinned deployments available according to the selected World's guarantees.
 
 ## Final action
 

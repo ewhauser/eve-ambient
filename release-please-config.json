@@ -5,6 +5,7 @@
   "force-tag-creation": true,
   "packages": {
     ".": {
+      "bump-minor-pre-major": true,
       "changelog-path": "packages/ambient/CHANGELOG.md",
       "component": "eve-ambient",
       "exclude-paths": [

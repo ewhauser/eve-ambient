@@ -32,23 +32,66 @@ export * from "@ewhauser/eve-ambient/workflows";
 Without that re-export, `start()` cannot resolve the packaged workflow after a
 cold start.
 
-## Selecting a World
+## Verified deployment paths
 
-Vercel deployments use the managed Vercel World automatically. Outside Vercel,
-set `WORKFLOW_TARGET_WORLD` when selecting a self-hosted or community World:
+### Vercel World
+
+[Vercel World](https://workflow-sdk.dev/worlds/vercel) is selected automatically
+when the Workflow application is deployed to Vercel. It requires no
+`WORKFLOW_TARGET_WORLD` setting. Enable Fluid compute as required by the
+official setup; Vercel supplies the storage, queues, authentication, and
+observability service.
+
+### Postgres World
+
+The [official Postgres World](https://workflow-sdk.dev/worlds/postgres) is the
+production self-hosted option for long-lived Node processes. Ambient targets
+Workflow 5, so install the package from its `beta` channel; npm `latest` still
+tracks Workflow 4.
 
 ```sh
-WORKFLOW_TARGET_WORLD=@workflow/world-postgres
-# or
-WORKFLOW_TARGET_WORLD=@ewhauser/world-celld
+pnpm add @ewhauser/eve-ambient@^0.6.0 \
+  workflow@5.0.0-beta.42 \
+  @workflow/world-postgres@beta
+
+export WORKFLOW_TARGET_WORLD=@workflow/world-postgres
+export WORKFLOW_POSTGRES_URL=postgres://user:password@host:5432/database
+pnpm dlx --package @workflow/world-postgres@beta bootstrap
 ```
 
-Useful starting points:
+The application must call `await world.start?.()` during server startup so
+Graphile Worker can poll PostgreSQL. Follow the official framework-specific
+startup example. The Postgres World is not suitable for a serverless process
+that cannot keep the worker running.
 
-- [Vercel World](https://workflow-sdk.dev/worlds/vercel)
-- [official Postgres World](https://workflow-sdk.dev/worlds/postgres)
-- [`world-celld`](https://github.com/ewhauser/world-celld)
-- [community Workflow Worlds](https://workflow-sdk.dev/worlds)
+### celld World
+
+[`@ewhauser/world-celld`](https://github.com/ewhauser/world-celld) is a published,
+open-source Workflow 5 World with an upstream conformance suite and a runnable
+demo. Version 0.3.0 is experimental and requires operating a celld fleet.
+
+```sh
+pnpm add @ewhauser/eve-ambient@^0.6.0 \
+  workflow@5.0.0-beta.42 \
+  @ewhauser/world-celld@^0.3.0
+
+export WORKFLOW_TARGET_WORLD=@ewhauser/world-celld
+export CELLD_FLEET_URL=http://fleet.internal:8080
+export CELLD_WORLD_SECRET=replace-with-a-secret
+export WORKFLOW_BASE_URL=https://workflow.example.com
+```
+
+Copy and deploy the package's `celld-worker` as described in its README. Every
+celld node must reach `WORKFLOW_BASE_URL`, and the fleet's object store must
+support celld's conditional-write requirements.
+
+### Other Worlds
+
+The [Workflow Worlds directory](https://workflow-sdk.dev/worlds) lists more
+official and community implementations. It is a discovery directory, not an
+Ambient compatibility guarantee. Confirm a candidate has a published package,
+supports Workflow 5, passes current hook/timer/queue/stream conformance, and
+documents a complete production startup path before selecting it.
 
 World composition remains below Workflow's standard interface. A World may use
 Postgres, Redis, celld, or multiple services internally; Ambient does not select

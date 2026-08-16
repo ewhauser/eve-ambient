@@ -3,6 +3,7 @@
   "bootstrap-sha": "dfb4b4f33cfc855b72cc3e9524265de5a235e6c4",
   "draft": true,
   "force-tag-creation": true,
+  "group-pull-request-title-pattern": "chore${scope}: release${component} ${version}",
   "packages": {
     ".": {
       "bump-minor-pre-major": true,

@@ -31,6 +31,24 @@ jobs:
         id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
 
+      - name: Reject untagged merged release pull requests
+        if: steps.release.outputs.releases_created != 'true'
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          pending_release="$(gh pr list \
+            --state merged \
+            --label 'autorelease: pending' \
+            --limit 1 \
+            --json number \
+            --jq '.[0].number // empty')"
+          if [[ -n "${pending_release}" ]]; then
+            echo "Release Please left merged PR #${pending_release} untagged" >&2
+            exit 1
+          fi
+
   build:
     name: Build release packages
     needs: release-please

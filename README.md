@@ -66,7 +66,7 @@ Everything below comes from `@ewhauser/eve-ambient` or is defined in the
 example itself:
 
 ```sh
-pnpm add @ewhauser/eve-ambient workflow@5.0.0-beta.42
+pnpm add @ewhauser/eve-ambient@^0.6.0 workflow@5.0.0-beta.42
 ```
 
 ### Define the event boundary
@@ -326,24 +326,24 @@ adapter. The chosen World owns Workflow storage, queues, streams, encryption,
 retention, and observability; Ambient's correlation run owns the bounded ring,
 batching state, timers, retries, and prepared wake.
 
-That makes the existing Workflow ecosystem directly usable:
+Ambient 0.6 has concrete deployment paths for these Worlds:
 
-| Option | Shape |
-|---|---|
-| [Vercel World](https://workflow-sdk.dev/worlds/vercel) | Fully managed storage, queuing, scaling, authentication, and observability on Vercel |
-| [Postgres World](https://workflow-sdk.dev/worlds/postgres) | Official open-source, self-hosted implementation using PostgreSQL and Graphile Worker |
-| [`world-celld`](https://github.com/ewhauser/world-celld) | Open-source standard World backed by a celld fleet |
-| [Turso, MongoDB, and Redis Worlds](https://github.com/mizzle-dev/workflow-worlds) | Community open-source implementations for several datastore choices |
-| [Redis, BullMQ, Cloudflare, MySQL, Azure, NATS, and Upstash Worlds](https://github.com/vinnymac/worlds) | Community open-source implementations spanning databases, queues, and edge runtimes |
+| World | Install and select it | Operational requirement |
+|---|---|---|
+| [Vercel](https://workflow-sdk.dev/worlds/vercel) | Deploy the Workflow application to Vercel; the managed World is selected automatically | Enable Fluid compute; Vercel owns storage, queues, authentication, and observability |
+| [Postgres](https://workflow-sdk.dev/worlds/postgres) | Install `@workflow/world-postgres@beta`, set `WORKFLOW_TARGET_WORLD=@workflow/world-postgres` and `WORKFLOW_POSTGRES_URL`, then run its idempotent `bootstrap` command | Run `world.start()` in a long-lived process so Graphile Worker can poll; this is not a serverless backend |
+| [`world-celld`](https://github.com/ewhauser/world-celld) | Install `@ewhauser/world-celld@^0.3.0`, set `WORKFLOW_TARGET_WORLD=@ewhauser/world-celld`, `CELLD_FLEET_URL`, `CELLD_WORLD_SECRET`, and `WORKFLOW_BASE_URL`, then deploy its packaged worker | Operate a celld fleet and a conditional-write-capable object store; the backend is experimental |
 
-See the [full Worlds directory](https://workflow-sdk.dev/worlds) for the
-maintainer-curated list of official and community implementations.
+The Postgres package must come from its `beta` npm channel while Ambient uses
+Workflow 5; its npm `latest` tag is still the Workflow 4 line. The linked setup
+pages include runnable examples, migrations or worker deployment, and the
+required application startup hooks.
 
-On Vercel, Workflow selects the managed World automatically. Elsewhere, set
-`WORKFLOW_TARGET_WORLD` to a standard implementation such as
-`@workflow/world-postgres` or `@ewhauser/world-celld`. See the
-[Workflow World configuration](https://workflow-sdk.dev/docs/configuration/worlds)
-for runtime selection and environment variables.
+The [full Worlds directory](https://workflow-sdk.dev/worlds) remains the place
+to explore other official and community implementations. Inclusion there is
+not an Ambient compatibility claim: before deploying another World, verify
+that its published package implements the Workflow 5 contract and that its
+queue, hook, timer, and stream conformance tests pass.
 
 For deterministic tests, the package includes `memory()`. It implements the
 same stream reducer and explicit `runDue()` scheduling, but it is not a
@@ -360,18 +360,32 @@ For each inbound event, Ambient:
 5. starts the correlation Workflow if that hook does not exist yet; and
 6. lets each run buffer, prepare, checkpoint, and deliver independently.
 
+### Ambient protocol fanout
+
 ```text
 0 selected correlations -> 0 hook resumes
 1 selected correlation  -> 1 hook resume
 N selected correlations -> N concurrent hook resumes
 ```
 
-The high-level warm path is one `resumeHook()` call per correlation. In the
-checked-in Workflow 5 integration, a warm buffer-only message currently maps
-to 7 public World method calls: one hook lookup, one run read, three event
-writes, and two queue publishes. A batch close with prepare and delivery maps
-to 15 World calls plus two application HTTP attempts. Cold creation also needs
-a start and hook-registration polling, so it does not have a fixed call count.
+This is Ambient's public protocol fanout: one high-level `resumeHook()` call per
+distinct selected correlation. Multiple matching rules that share a correlation
+are grouped into the same append.
+
+### Measured Workflow and storage work
+
+The Workflow runtime expands that protocol call into internal World activity.
+The checked-in Workflow 5.0.0-beta.42 integration currently observes:
+
+| Warm path | Ambient protocol calls | Standard World method calls | Application HTTP |
+|---|---:|---:|---:|
+| Buffer only | 1 `resumeHook()` | 7 | 0 |
+| Close, prepare, and deliver | 1 `resumeHook()` | 15 | 2 |
+
+The 7 internal calls are one hook lookup, one run read, three event writes, and
+two queue publishes. These counts describe the instrumented runtime and local
+test World, not a requirement imposed on every World. A cold correlation also
+needs `start()` and hook-registration polling, so its internal call count varies.
 
 Each run retains a bounded recent-message ring for best-effort admission
 deduplication. Ring eviction may allow an old event to be processed again, so

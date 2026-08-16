@@ -4,7 +4,7 @@ Provider-independent durable attention with one standard Workflow run per
 correlation.
 
 ```sh
-pnpm add @ewhauser/eve-ambient workflow@5.0.0-beta.42
+pnpm add @ewhauser/eve-ambient@^0.6.0 workflow@5.0.0-beta.42
 ```
 
 Bind an application to Workflow:
@@ -36,9 +36,10 @@ The binding provides:
   callbacks.
 
 Workflow selects its standard World. Vercel uses the managed World
-automatically; self-hosted applications can set `WORKFLOW_TARGET_WORLD` to
-`@workflow/world-postgres`, `@ewhauser/world-celld`, or another conforming
-implementation.
+automatically. For Workflow 5 self-hosting, use the official Postgres package's
+`beta` channel or published `@ewhauser/world-celld@^0.3.0`; both require the
+startup and infrastructure documented by their linked deployment guides in the
+[repository README](https://github.com/ewhauser/eve-ambient#choose-the-workflow-world).
 
 For deterministic tests:
 

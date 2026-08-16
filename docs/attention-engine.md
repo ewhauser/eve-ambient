@@ -101,19 +101,29 @@ final durable system. Invalid or oversized prepare results and invalid delivery
 receipts terminate only the affected attention run; they do not terminate the
 permanent correlation owner.
 
-## Measured call fanout
+## Protocol-level call fanout
+
+Ambient makes one high-level `resumeHook()` call for every distinct correlation
+selected from an inbound event. No selected correlations means no Workflow RPC;
+several matching branches with the same correlation are grouped into one RPC.
+
+This is the public admission protocol. It does not promise how many reads,
+writes, or queue operations a World uses to implement that RPC.
+
+## Measured Workflow and World calls
 
 The current Workflow 5 integration instruments public standard-World methods:
 
-| Path | Standard World calls | Application HTTP |
-|---|---:|---:|
-| Warm buffer-only append | 7 | 0 |
-| Append that closes, prepares, and delivers a batch | 15 | 2 |
+| Path | Ambient protocol calls | Standard World calls | Application HTTP |
+|---|---:|---:|---:|
+| Warm buffer-only append | 1 | 7 | 0 |
+| Append that closes, prepares, and delivers a batch | 1 | 15 | 2 |
 
 The 7-call warm path is one hook lookup, one run read, three event writes, and
-two queue publishes. These are Workflow implementation calls, not seven Ambient
-RPCs: Ambient makes one high-level `resumeHook()` call. Cold creation adds a run
-start and hook-registration polling, so its count varies with scheduler timing.
+two queue publishes. These are observations from Workflow 5.0.0-beta.42 and the
+instrumented local test World, not calls in Ambient's public contract and not a
+required implementation shape for other Worlds. Cold creation adds a run start
+and hook-registration polling, so its count varies with scheduler timing.
 
 ## Conformance
 

@@ -1,18 +1,19 @@
 # @ewhauser/eve-ambient
 
-Provider-independent durable attention with first-class correlation streams.
+Provider-independent durable attention with one standard Workflow run per
+correlation.
 
 ```sh
-pnpm add @ewhauser/eve-ambient
+pnpm add @ewhauser/eve-ambient workflow@5.0.0-beta.42
 ```
 
-Bind an application to any conforming `AttentionWorld`:
+Bind an application to Workflow:
 
 ```ts
-import { world } from "@ewhauser/eve-ambient/world";
+import { workflow } from "@ewhauser/eve-ambient/workflow";
 
-const ambient = application.with(world({
-  world: createWorldCelld({ url: process.env.WORLD_CELLD_URL }),
+const ambient = application.with(workflow({
+  callbackUrl: "https://agent.example.com",
   callbackSecretEnv: "AMBIENT_CALLBACK_SECRET",
   maxCallbackRequestBytes: 16 * 1024 * 1024,
 }));
@@ -20,16 +21,24 @@ const ambient = application.with(world({
 export const POST = ambient.fetch;
 ```
 
-`world.stream(key)` resolves a deterministic local handle. Ambient calls
-`append()` once per distinct correlation selected for an event. The World owns
-atomic append, a bounded recent-message ring, batching, timers, retries, and
-checkpointed delivery.
+Re-export the packaged workflow so the consumer's Workflow compiler discovers
+it:
+
+```ts
+// workflows/ambient.ts
+export * from "@ewhauser/eve-ambient/workflows";
+```
 
 The binding provides:
 
-- `engine.accept()` for grouped keyed admission; and
+- `engine.accept()` for grouped correlation admission; and
 - `fetch()` for authenticated `/ambient/prepare` and `/ambient/deliver`
   callbacks.
+
+Workflow selects its standard World. Vercel uses the managed World
+automatically; self-hosted applications can set `WORKFLOW_TARGET_WORLD` to
+`@workflow/world-postgres`, `@ewhauser/world-celld`, or another conforming
+implementation.
 
 For deterministic tests:
 
@@ -40,7 +49,7 @@ const ambient = application.with(memory({ clock, maxRecentMessages: 48 }));
 await ambient.engine.runDue();
 ```
 
-The package has no Workflow SDK, database driver, Redis client, celld client,
-public transaction, event lookup, history, or replay dependency. Backend
-authors can import the stream contract and reducer from
-`@ewhauser/eve-ambient/protocol`.
+Each correlation Workflow keeps bounded reducer state and a 48-entry recent
+message ring. It does not rotate automatically, so the Workflow event history
+continues to grow while that correlation remains active. Final effects must
+deduplicate the stable `wakeKey` because prepare and delivery are at-least-once.

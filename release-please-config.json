@@ -9,8 +9,10 @@
       "component": "eve-ambient",
       "exclude-paths": [
         "examples/world-attention",
+        "examples/slack-sequence",
         "integration/eve-conformance",
         "integration/attention-world",
+        "integration/workflow-correlation",
         "packages/eve-adapter"
       ],
       "extra-files": [

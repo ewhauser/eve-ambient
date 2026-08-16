@@ -1,7 +1,9 @@
 import { memory } from "@ewhauser/eve-ambient/memory";
 import { VirtualMonitorClock } from "@ewhauser/eve-ambient/testing";
+import { WorkflowAttentionEngine } from "@ewhauser/eve-ambient/workflow";
 import { expect, it } from "vitest";
 import {
+  createWorkflowSlackSequenceApplication,
   defineSlackSequenceApplication,
   slackMessages,
   type SlackMessageInput,
@@ -61,6 +63,29 @@ it("does not deliver when message B precedes message A", async () => {
 
   await expect(application.engine.runDue()).resolves.toMatchObject({ ignored: 1 });
   expect(turns).toEqual([]);
+});
+
+it("binds the definition to the standard Workflow runtime", async () => {
+  process.env.EXAMPLE_AMBIENT_SECRET = "test-secret";
+  const application = createWorkflowSlackSequenceApplication({
+    async enqueue() {
+      return null;
+    },
+  }, {
+    callbackUrl: "https://application.example.test",
+    callbackSecretEnv: "EXAMPLE_AMBIENT_SECRET",
+  });
+
+  expect(application.engine).toBeInstanceOf(WorkflowAttentionEngine);
+  const response = await application.fetch(
+    new Request("https://application.example.test/ambient/unknown", {
+      method: "POST",
+      headers: { authorization: "Bearer test-secret" },
+      body: "{}",
+    }),
+  );
+  expect(response.status).toBe(404);
+  delete process.env.EXAMPLE_AMBIENT_SECRET;
 });
 
 function message(eventId: string, text: string, occurredAt: string): SlackMessageInput {

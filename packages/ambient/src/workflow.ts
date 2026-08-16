@@ -14,47 +14,65 @@ import type {
   AmbientBackendBinding,
 } from "./application.js";
 import { IdempotencyConflictError } from "./idempotency.js";
-import {
-  compileAttentionStreamAppends,
-  validateAttentionStreamAppendReceipt,
-  type AttentionWorld,
-} from "./stream-protocol.js";
+import { compileAttentionStreamAppends } from "./stream-protocol.js";
 import type { MonitorClock } from "./types.js";
+import {
+  correlationToken,
+  type CorrelationAppendCommand,
+  type CorrelationWorkflowConfig,
+} from "./workflow-protocol.js";
+import { correlationWorkflow } from "./workflows/correlation.js";
+import { getHookByToken, resumeHook, start } from "workflow/api";
+import { HookNotFoundError } from "workflow/errors";
 
+const DEFAULT_MAX_RECENT_MESSAGES = 48;
+const DEFAULT_RETRY_DELAY_MS = 1_000;
+const DEFAULT_CLAIM_LEASE_MS = 30_000;
+const DEFAULT_MAX_ATTEMPTS = 10;
 const DEFAULT_MAX_BRANCHES = 1_000;
 const DEFAULT_MAX_FANOUT_BYTES = 16 * 1_024 * 1_024;
+const DEFAULT_MAX_PREPARED_WAKE_BYTES = 1 * 1_024 * 1_024;
 const DEFAULT_MAX_CALLBACK_REQUEST_BYTES = 16 * 1_024 * 1_024;
+const DEFAULT_REGISTRATION_TIMEOUT_MS = 10_000;
 
-export interface WorldAttentionEngineOptions {
-  /** Correlation-addressed World. Resolving a stream handle must be local. */
-  readonly world: AttentionWorld;
-  readonly clock?: MonitorClock | undefined;
-  readonly maxBranches?: number | undefined;
-  readonly maxFanoutBytes?: number | undefined;
-}
-
-export interface WorldAmbientOptions extends WorldAttentionEngineOptions {
+export interface WorkflowAttentionEngineOptions {
+  /** Public base URL at which this application's callback handler is mounted. */
+  readonly callbackUrl: string;
+  /** Optional isolation prefix when multiple deployments share one World. */
+  readonly namespace?: string | undefined;
   readonly callbackSecretEnv?: string | undefined;
   readonly preparePath?: string | undefined;
   readonly deliverPath?: string | undefined;
+  readonly maxRecentMessages?: number | undefined;
+  readonly retryDelayMs?: number | undefined;
+  readonly claimLeaseMs?: number | undefined;
+  readonly maxAttempts?: number | undefined;
+  readonly maxBranches?: number | undefined;
+  readonly maxFanoutBytes?: number | undefined;
+  readonly maxPreparedWakeBytes?: number | undefined;
+  readonly registrationTimeoutMs?: number | undefined;
+  readonly clock?: MonitorClock | undefined;
+}
+
+export interface WorkflowAmbientOptions extends WorkflowAttentionEngineOptions {
   readonly maxCallbackRequestBytes?: number | undefined;
 }
 
-export interface WorldAmbientBinding extends AmbientBackendBinding {
-  readonly engine: WorldAttentionEngine;
+export interface WorkflowAmbientBinding extends AmbientBackendBinding {
+  readonly engine: WorkflowAttentionEngine;
   readonly fetch: (request: Request) => Promise<Response>;
 }
 
-/** Binds Ambient to one correlation-addressed append RPC per distinct stream. */
-export function world(
-  options: WorldAmbientOptions,
-): AmbientApplicationBackend<WorldAmbientBinding> {
+/** Binds Ambient to one permanent standard Workflow run per correlation. */
+export function workflow(
+  options: WorkflowAmbientOptions,
+): AmbientApplicationBackend<WorkflowAmbientBinding> {
   return Object.freeze({
     ...(options.clock === undefined ? {} : { clock: options.clock }),
     bind(callbacks: AttentionCallbacks) {
       return Object.freeze({
-        engine: new WorldAttentionEngine(options),
-        fetch: createWorldAttentionCallbackHandler(callbacks, {
+        engine: new WorkflowAttentionEngine(options),
+        fetch: createWorkflowAttentionCallbackHandler(callbacks, {
           ...(options.callbackSecretEnv === undefined
             ? {}
             : { secretEnv: options.callbackSecretEnv }),
@@ -70,26 +88,52 @@ export function world(
   });
 }
 
-/** Fans one accepted event directly to its distinct correlation streams. */
-export class WorldAttentionEngine implements AttentionEngine {
-  readonly #world: AttentionWorld;
+/** Publishes each distinct correlation to its deterministic Workflow hook. */
+export class WorkflowAttentionEngine implements AttentionEngine {
+  readonly #config: CorrelationWorkflowConfig;
   readonly #clock: MonitorClock;
+  readonly #registrationTimeoutMs: number;
   readonly #maxBranches: number;
   readonly #maxFanoutBytes: number;
 
-  constructor(options: WorldAttentionEngineOptions) {
+  constructor(options: WorkflowAttentionEngineOptions) {
     if (options === null || typeof options !== "object") {
-      throw new TypeError("World attention engine options are required");
+      throw new TypeError("Workflow attention engine options are required");
     }
-    if (
-      options.world === null ||
-      typeof options.world !== "object" ||
-      typeof options.world.stream !== "function"
-    ) {
-      throw new TypeError("World attention engine requires a correlation-addressed world");
+    this.#config = {
+      namespace: nonEmpty(options.namespace ?? "default", "namespace"),
+      callbackUrl: callbackBaseUrl(options.callbackUrl),
+      callbackSecretEnv: environmentName(
+        options.callbackSecretEnv ?? "AMBIENT_CALLBACK_SECRET",
+      ),
+      preparePath: pathName(options.preparePath ?? "/ambient/prepare", "preparePath"),
+      deliverPath: pathName(options.deliverPath ?? "/ambient/deliver", "deliverPath"),
+      maxRecentMessages: positiveInteger(
+        options.maxRecentMessages ?? DEFAULT_MAX_RECENT_MESSAGES,
+        "maxRecentMessages",
+      ),
+      claimLeaseMs: positiveInteger(
+        options.claimLeaseMs ?? DEFAULT_CLAIM_LEASE_MS,
+        "claimLeaseMs",
+      ),
+      retryDelayMs: positiveInteger(
+        options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS,
+        "retryDelayMs",
+      ),
+      maxAttempts: positiveInteger(options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS, "maxAttempts"),
+      maxPreparedWakeBytes: positiveInteger(
+        options.maxPreparedWakeBytes ?? DEFAULT_MAX_PREPARED_WAKE_BYTES,
+        "maxPreparedWakeBytes",
+      ),
+    };
+    if (this.#config.preparePath === this.#config.deliverPath) {
+      throw new TypeError("preparePath and deliverPath must be different");
     }
-    this.#world = options.world;
     this.#clock = options.clock ?? { now: () => new Date() };
+    this.#registrationTimeoutMs = positiveInteger(
+      options.registrationTimeoutMs ?? DEFAULT_REGISTRATION_TIMEOUT_MS,
+      "registrationTimeoutMs",
+    );
     this.#maxBranches = positiveInteger(
       options.maxBranches ?? DEFAULT_MAX_BRANCHES,
       "maxBranches",
@@ -113,22 +157,13 @@ export class WorldAttentionEngine implements AttentionEngine {
       );
     }
 
+    const acceptedAt = this.#clock.now().toISOString();
     const appends = await compileAttentionStreamAppends(fanout);
-    const settled = await Promise.allSettled(
-      appends.map(async (append) => {
-        const stream = this.#world.stream(append.streamKey);
-        if (stream === null || typeof stream !== "object" || typeof stream.append !== "function") {
-          throw new TypeError(`World stream ${append.streamKey} must define append`);
-        }
-        return validateAttentionStreamAppendReceipt(await stream.append(append), append);
-      }),
-    );
-    const receipts = settled.map((result) => {
-      if (result.status === "rejected") throw result.reason;
-      return result.value;
-    });
-    const acceptedAt = receipts.map((receipt) => receipt.acceptedAt).sort().at(-1) ??
-      this.#clock.now().toISOString();
+    await Promise.all(appends.map((append) => this.#publish({
+      kind: "append",
+      append,
+      acceptedAt,
+    })));
     return Object.freeze({
       eventKey: fanout.eventKey,
       occurrenceKey: fanout.occurrenceKey,
@@ -137,9 +172,43 @@ export class WorldAttentionEngine implements AttentionEngine {
       acceptedAt,
     });
   }
+
+  async #publish(command: CorrelationAppendCommand): Promise<void> {
+    const token = correlationToken(this.#config.namespace, command.append.streamKey);
+    let target: string | WorkflowHook = token;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        await resumeHook(target, command);
+        return;
+      } catch (error) {
+        if (!isNotFound(error)) throw error;
+      }
+
+      await start(correlationWorkflow, [this.#config, command.append.streamKey]);
+      target = await this.#waitForHook(token);
+    }
+    throw new Error(`could not publish append to correlation hook ${token}`);
+  }
+
+  async #waitForHook(token: string): Promise<WorkflowHook> {
+    const deadline = Date.now() + this.#registrationTimeoutMs;
+    for (;;) {
+      try {
+        return await getHookByToken(token);
+      } catch (error) {
+        if (!isNotFound(error)) throw error;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`timed out waiting for Workflow hook ${token}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  }
 }
 
-export interface WorldAttentionCallbackHandlerOptions {
+type WorkflowHook = Awaited<ReturnType<typeof getHookByToken>>;
+
+export interface WorkflowAttentionCallbackHandlerOptions {
   readonly secretEnv?: string | undefined;
   readonly preparePath?: string | undefined;
   readonly deliverPath?: string | undefined;
@@ -147,7 +216,7 @@ export interface WorldAttentionCallbackHandlerOptions {
   readonly clock?: MonitorClock | undefined;
 }
 
-export type WorldAttentionCallbackEnvelope =
+export type WorkflowAttentionCallbackEnvelope =
   | { readonly ok: true; readonly completedAt: string; readonly value: unknown }
   | {
       readonly ok: false;
@@ -156,10 +225,10 @@ export type WorldAttentionCallbackEnvelope =
       readonly terminal: boolean;
     };
 
-/** Authenticated by-value prepare/deliver endpoint for remote stream cells. */
-export function createWorldAttentionCallbackHandler(
+/** Handles authenticated by-value prepare and deliver Workflow steps. */
+export function createWorkflowAttentionCallbackHandler(
   callbacks: AttentionCallbacks,
-  options: WorldAttentionCallbackHandlerOptions = {},
+  options: WorkflowAttentionCallbackHandlerOptions = {},
 ): (request: Request) => Promise<Response> {
   if (
     callbacks === null ||
@@ -172,6 +241,7 @@ export function createWorldAttentionCallbackHandler(
   const secretEnv = environmentName(options.secretEnv ?? "AMBIENT_CALLBACK_SECRET");
   const preparePath = pathName(options.preparePath ?? "/ambient/prepare", "preparePath");
   const deliverPath = pathName(options.deliverPath ?? "/ambient/deliver", "deliverPath");
+  if (preparePath === deliverPath) throw new TypeError("preparePath and deliverPath must be different");
   const maxRequestBytes = positiveInteger(
     options.maxRequestBytes ?? DEFAULT_MAX_CALLBACK_REQUEST_BYTES,
     "maxRequestBytes",
@@ -203,10 +273,9 @@ export function createWorldAttentionCallbackHandler(
     }
 
     try {
-      const value =
-        path === preparePath
-          ? await callbacks.prepare(deepFreeze(body as FrozenAttentionBatch))
-          : await callbacks.deliver(deepFreeze(body as PreparedAttentionWake));
+      const value = path === preparePath
+        ? await callbacks.prepare(deepFreeze(body as FrozenAttentionBatch))
+        : await callbacks.deliver(deepFreeze(body as PreparedAttentionWake));
       return callbackJson({ ok: true, completedAt: clock.now().toISOString(), value });
     } catch (error) {
       return callbackJson(
@@ -234,7 +303,7 @@ export function secretsMatch(left: string, right: string): boolean {
   return difference === 0;
 }
 
-function callbackJson(body: WorldAttentionCallbackEnvelope, status = 200): Response {
+function callbackJson(body: WorkflowAttentionCallbackEnvelope, status = 200): Response {
   return json(body, status);
 }
 
@@ -255,6 +324,17 @@ function positiveInteger(value: number, name: string): number {
     throw new TypeError(`${name} must be a positive safe integer`);
   }
   return value;
+}
+
+function callbackBaseUrl(value: string): string {
+  const url = new URL(nonEmpty(value, "callbackUrl"));
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new TypeError("callbackUrl must use http or https");
+  }
+  if (url.username.length > 0 || url.password.length > 0 || url.search.length > 0 || url.hash.length > 0) {
+    throw new TypeError("callbackUrl must not contain credentials, a query, or a fragment");
+  }
+  return url.toString().replace(/\/$/, "");
 }
 
 function environmentName(value: string): string {
@@ -278,6 +358,10 @@ function nonEmpty(value: string, name: string): string {
     throw new TypeError(`${name} must not be empty`);
   }
   return value;
+}
+
+function isNotFound(error: unknown): boolean {
+  return HookNotFoundError.is(error);
 }
 
 function message(error: unknown): string {

@@ -21,8 +21,8 @@ only when attention is warranted.
                  select and group by correlation
                          |             |
                          x ignore      v
-                                   World stream
-                             dedup / buffer / timer
+                           correlation Workflow
+                        ring / buffer / durable timer
                                        |
                                    prepare()
                                 ignore x | wake
@@ -49,7 +49,7 @@ process restarts, an event arrives twice, a hot correlation key overwhelms a
 worker, or the classifier succeeds and the final handoff fails.
 
 Eve Ambient makes those boundaries explicit. Each correlation address has one
-serialized stream. Active handoffs carry complete values rather than payload
+serialized Workflow run. Active handoffs carry complete values rather than payload
 references. A wake is checkpointed before delivery, and retries reuse the same
 bytes and durable `wakeKey`.
 
@@ -66,15 +66,15 @@ Everything below comes from `@ewhauser/eve-ambient` or is defined in the
 example itself:
 
 ```sh
-pnpm add @ewhauser/eve-ambient@^0.5.0
+pnpm add @ewhauser/eve-ambient workflow@5.0.0-beta.42
 ```
 
 ### Define the event boundary
 
 Your Slack adapter verifies the webhook and supplies this small normalized
 input. The channel contract converts it into the complete event Ambient hashes
-and routes. Choosing `channelId` as `partitionKey` creates one stream per Slack
-channel for this rule—not one stream per message.
+and routes. Choosing `channelId` as `partitionKey` creates one correlation per
+Slack channel for this rule—not one correlation per message.
 
 ```ts
 import {
@@ -131,7 +131,7 @@ The stable `eventId` must survive provider retries.
 
 ### Listen, correlate, and decide
 
-The rule admits only A and B messages. Its default correlation is one stream
+The rule admits only A and B messages. Its default correlation is one run
 per rule inside the channel partition. The debounce window gives related
 messages time to arrive before `decide()` receives the ordered batch. Ambient
 orders it by the canonical `occurredAt` value, so preserve Slack's event
@@ -250,35 +250,40 @@ Publish each verified Slack input with
 injected clock past the debounce deadline before calling
 `ambient.engine.runDue()`.
 
-In production, bind the same definition to a conforming `AttentionWorld`. The
-World client is a deployment dependency supplied by the application:
+In production, bind the same definition to Workflow. The application supplies
+its public callback URL; Workflow selects the configured standard World:
 
 ```ts
-import { world } from "@ewhauser/eve-ambient/world";
-import type { AttentionWorld } from "@ewhauser/eve-ambient/protocol";
+import { workflow } from "@ewhauser/eve-ambient/workflow";
 
-export function createProductionApplication(
-  turns: TurnSink,
-  attentionWorld: AttentionWorld,
-) {
-  return definition(turns).with(world({
-    world: attentionWorld,
+export function createProductionApplication(turns: TurnSink) {
+  return definition(turns).with(workflow({
+    callbackUrl: "https://agent.example.com",
     callbackSecretEnv: "AMBIENT_CALLBACK_SECRET",
   }));
 }
 ```
 
-Mount the returned application's `fetch` handler at its authenticated prepare
-and deliver callback paths.
+Re-export Ambient's packaged workflow from a file in the application's
+`workflows/` directory so the Workflow compiler discovers it:
+
+```ts
+// workflows/ambient.ts
+export * from "@ewhauser/eve-ambient/workflows";
+```
+
+Configure Workflow for the application's framework, and mount the returned
+`fetch` handler at its authenticated prepare and deliver callback paths.
 
 The complete typechecked example is
-[`examples/world-attention/src/slack-message-sequence.ts`](examples/world-attention/src/slack-message-sequence.ts).
+[`examples/slack-sequence/src/slack-message-sequence.ts`](examples/slack-sequence/src/slack-message-sequence.ts).
 
-With 100 joined channels, this produces at most 100 logical streams for this
-rule version. If every channel receives A followed by B, admission makes 200
-append RPCs. After the quiet period, the World makes 100 prepare callbacks and,
-because every sequence matches, 100 delivery callbacks; each delivery invokes
-the `TurnSink` once. That is 100 streams and up to 100 turns—not 200 workflows.
+With 100 joined channels, this produces at most 100 active correlation runs for
+this rule version. If every channel receives A followed by B, admission makes
+200 hook-resume operations into those same 100 runs. After the quiet period,
+there are up to 100 distinct wakes—not 200 workflows. Prepare and delivery are
+at-least-once steps, so callbacks may repeat; the `TurnSink` deduplicates them
+by `wakeKey`.
 
 ### Other patterns
 
@@ -313,32 +318,32 @@ directly, consume Slack signals from Kafka, and accept incidents from an
 existing detection service. Once an event crosses `publish()`, the same typed
 rules, correlation protocol, and final idempotency boundary apply.
 
-## Choose where streams live
+## Choose the Workflow World
 
-Ambient sends each selected correlation directly to an `AttentionWorld`. The
-World implementation owns deterministic stream addressing, atomic append,
-the bounded dedup ring, batches, timers, leases, retries, and checkpointed
-delivery. Ambient does not need to know whether those capabilities use
-Postgres, Redis, celld, a managed service, or a combination.
+Ambient is a Workflow library, so it uses the standard World selected by the
+Workflow runtime. There is no Ambient-specific `AttentionWorld` interface or
+adapter. The chosen World owns Workflow storage, queues, streams, encryption,
+retention, and observability; Ambient's correlation run owns the bounded ring,
+batching state, timers, retries, and prepared wake.
 
-The broader Workflow SDK ecosystem is a useful map of the available deployment
-shapes:
+That makes the existing Workflow ecosystem directly usable:
 
 | Option | Shape |
 |---|---|
 | [Vercel World](https://workflow-sdk.dev/worlds/vercel) | Fully managed storage, queuing, scaling, authentication, and observability on Vercel |
 | [Postgres World](https://workflow-sdk.dev/worlds/postgres) | Official open-source, self-hosted implementation using PostgreSQL and Graphile Worker |
+| [`world-celld`](https://github.com/ewhauser/world-celld) | Open-source standard World backed by a celld fleet |
 | [Turso, MongoDB, and Redis Worlds](https://github.com/mizzle-dev/workflow-worlds) | Community open-source implementations for several datastore choices |
 | [Redis, BullMQ, Cloudflare, MySQL, Azure, NATS, and Upstash Worlds](https://github.com/vinnymac/worlds) | Community open-source implementations spanning databases, queues, and edge runtimes |
 
 See the [full Worlds directory](https://workflow-sdk.dev/worlds) for the
 maintainer-curated list of official and community implementations.
 
-Ambient deliberately uses a smaller contract than the Workflow SDK runtime:
-`world.stream(key).append(value)`. The packages above are implementation
-foundations, not automatic drop-in Ambient bindings. A conforming adapter must
-construct stream handles locally and durably apply the exported correlation
-reducer in one atomic append.
+On Vercel, Workflow selects the managed World automatically. Elsewhere, set
+`WORKFLOW_TARGET_WORLD` to a standard implementation such as
+`@workflow/world-postgres` or `@ewhauser/world-celld`. See the
+[Workflow World configuration](https://workflow-sdk.dev/docs/configuration/worlds)
+for runtime selection and environment variables.
 
 For deterministic tests, the package includes `memory()`. It implements the
 same stream reducer and explicit `runDue()` scheduling, but it is not a
@@ -351,40 +356,54 @@ For each inbound event, Ambient:
 1. canonicalizes the typed channel event and derives stable identity;
 2. runs deterministic rule selection and correlation;
 3. groups selected branches by correlation address;
-4. calls `world.stream(key).append(...)` once per distinct address; and
-5. lets each stream buffer, prepare, checkpoint, and deliver independently.
+4. resumes the deterministic hook for each distinct correlation;
+5. starts the correlation Workflow if that hook does not exist yet; and
+6. lets each run buffer, prepare, checkpoint, and deliver independently.
 
 ```text
-0 selected correlations -> 0 append RPCs
-1 selected correlation  -> 1 append RPC
-N selected correlations -> N concurrent append RPCs
+0 selected correlations -> 0 hook resumes
+1 selected correlation  -> 1 hook resume
+N selected correlations -> N concurrent hook resumes
 ```
 
-Each stream retains a bounded recent-message ring for best-effort admission
-deduplication. A retry resends every append; streams that still remember the
-event return `duplicate`. Ring eviction may allow an old event to be processed
-again, so final effects do not depend on that cache. The durable receiver must
-enforce the stable `wakeKey`.
+The high-level warm path is one `resumeHook()` call per correlation. In the
+checked-in Workflow 5 integration, a warm buffer-only message currently maps
+to 7 public World method calls: one hook lookup, one run read, three event
+writes, and two queue publishes. A batch close with prepare and delivery maps
+to 15 World calls plus two application HTTP attempts. Cold creation also needs
+a start and hook-registration polling, so it does not have a fixed call count.
 
-There is no event coordinator, global fanout workflow, storage lookup, or
-global stream registry in the admission path.
+Each run retains a bounded recent-message ring for best-effort admission
+deduplication. Ring eviction may allow an old event to be processed again, so
+final effects do not depend on that cache. The durable receiver must enforce
+the stable `wakeKey`.
+
+Correlation runs are intentionally permanent: there is no automatic rotation
+or handoff protocol. Live reducer state remains bounded, but the underlying
+Workflow event history grows while a correlation stays active. Operators
+should monitor per-run history limits and choose correlation keys with bounded
+traffic; a future standard continue-as-new primitive can add compaction without
+reintroducing a custom World contract.
+
+There is no event coordinator, global attention run, custom storage adapter,
+or global correlation registry in the admission path.
 
 ## Repository
 
 | Workspace | Purpose | Published |
 |---|---|---|
-| [`packages/ambient`](packages/ambient) | Rules, protocol, reducer, memory reference, and World adapter | `@ewhauser/eve-ambient` |
-| [`examples/world-attention`](examples/world-attention) | Typechecked support and Slack sequence definitions bound to memory or a supplied World | No |
-| [`integration/attention-world`](integration/attention-world) | Executable RPC fanout and ring-dedup contract | No |
+| [`packages/ambient`](packages/ambient) | Rules, reducer, memory reference, and packaged Workflow runtime | `@ewhauser/eve-ambient` |
+| [`examples/slack-sequence`](examples/slack-sequence) | Complete typechecked Slack A-then-B application | No |
+| [`integration/workflow-correlation`](integration/workflow-correlation) | Consumer discovery, concurrency, retry, permanence, and call-count checks | No |
 
 ## Documentation
 
-- [Attention stream protocol](docs/attention-engine.md)
-- [World deployment](docs/deployment-options.md)
+- [Correlation Workflow protocol](docs/attention-engine.md)
+- [Workflow World deployment](docs/deployment-options.md)
 - [Monitoring and rules](docs/monitoring-model.md)
 - [Operations and security](docs/operations-and-security.md)
 - [Architecture decision index](docs/rfcs/README.md)
-- [RFC 0004: Correlation World protocol](docs/rfcs/0004-correlation-world-protocol.md)
+- [RFC 0005: Permanent correlation Workflows](docs/rfcs/0005-permanent-correlation-workflows.md)
 
 ## Development
 

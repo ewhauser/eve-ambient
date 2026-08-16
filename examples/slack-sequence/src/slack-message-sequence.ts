@@ -9,8 +9,10 @@ import {
   type JsonValue,
 } from "@ewhauser/eve-ambient";
 import { memory } from "@ewhauser/eve-ambient/memory";
-import type { AttentionWorld } from "@ewhauser/eve-ambient/protocol";
-import { world } from "@ewhauser/eve-ambient/world";
+import {
+  workflow,
+  type WorkflowAmbientOptions,
+} from "@ewhauser/eve-ambient/workflow";
 
 export interface SlackMessageInput {
   readonly eventId: string;
@@ -128,18 +130,15 @@ export function defineSlackSequenceApplication(turns: TurnSink) {
   return defineAmbientApplication({
     applicationId: "slack-sequence-agent",
     rules: [messageSequenceRule],
-    routes: [
-      {
-        id: "turns",
-        deliver: (prepared) =>
-          turns.enqueue({
-            idempotencyKey: prepared.wakeKey,
-            address: turnAddress(prepared.target),
-            instruction: prepared.instruction,
-            evidence: prepared.evidence,
-          }),
-      },
-    ],
+    routes: [{
+      id: "turns",
+      deliver: (prepared) => turns.enqueue({
+        idempotencyKey: prepared.wakeKey,
+        address: turnAddress(prepared.target),
+        instruction: prepared.instruction,
+        evidence: prepared.evidence,
+      }),
+    }],
   });
 }
 
@@ -147,14 +146,9 @@ export function createLocalSlackSequenceApplication(turns: TurnSink) {
   return defineSlackSequenceApplication(turns).with(memory());
 }
 
-export function createWorldSlackSequenceApplication(
+export function createWorkflowSlackSequenceApplication(
   turns: TurnSink,
-  attentionWorld: AttentionWorld,
+  options: WorkflowAmbientOptions,
 ) {
-  return defineSlackSequenceApplication(turns).with(
-    world({
-      world: attentionWorld,
-      callbackSecretEnv: "AMBIENT_CALLBACK_SECRET",
-    }),
-  );
+  return defineSlackSequenceApplication(turns).with(workflow(options));
 }

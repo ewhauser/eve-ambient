@@ -1,18 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createWorldAttentionCallbackHandler } from "../src/world.js";
+import { createWorkflowAttentionCallbackHandler } from "../src/workflow.js";
 
-const SECRET_ENV = "AMBIENT_WORLD_UNIT_SECRET";
+const SECRET_ENV = "AMBIENT_WORKFLOW_UNIT_SECRET";
 
 afterEach(() => {
   delete process.env[SECRET_ENV];
 });
 
-describe("World callback handler", () => {
+describe("Workflow callback handler", () => {
   it("rejects oversized callback values before application code runs", async () => {
     process.env[SECRET_ENV] = "test-secret";
     const prepare = vi.fn(async () => ({ kind: "ignore" as const, decision: null }));
     const deliver = vi.fn();
-    const handler = createWorldAttentionCallbackHandler(
+    const handler = createWorkflowAttentionCallbackHandler(
       { prepare, deliver },
       { secretEnv: SECRET_ENV, maxRequestBytes: 8 },
     );
@@ -36,7 +36,7 @@ describe("World callback handler", () => {
 
   it("authenticates before reading a callback body", async () => {
     process.env[SECRET_ENV] = "test-secret";
-    const handler = createWorldAttentionCallbackHandler({
+    const handler = createWorkflowAttentionCallbackHandler({
       async prepare() {
         return { kind: "ignore", decision: null };
       },
@@ -53,5 +53,17 @@ describe("World callback handler", () => {
     );
 
     expect(response.status).toBe(401);
+  });
+
+  it("rejects callback URLs that cannot be composed safely", () => {
+    expect(() => createWorkflowAttentionCallbackHandler({
+      async prepare() {
+        return { kind: "ignore", decision: null };
+      },
+      async deliver() {
+        throw new Error("not called");
+      },
+    }, { preparePath: "/ambient/callback", deliverPath: "/ambient/callback" }))
+      .toThrow("preparePath and deliverPath must be different");
   });
 });

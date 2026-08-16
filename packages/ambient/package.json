@@ -35,10 +35,15 @@
       "import": "./dist/testing.js",
       "default": "./dist/testing.js"
     },
-    "./world": {
-      "types": "./dist/world.d.ts",
-      "import": "./dist/world.js",
-      "default": "./dist/world.js"
+    "./workflow": {
+      "types": "./dist/workflow.d.ts",
+      "import": "./dist/workflow.js",
+      "default": "./dist/workflow.js"
+    },
+    "./workflows": {
+      "types": "./dist/workflows/index.d.ts",
+      "import": "./dist/workflows/index.js",
+      "default": "./dist/workflows/index.js"
     },
     "./package.json": "./package.json"
   },
@@ -53,7 +58,16 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "workflow": "5.0.0-beta.42"
+  },
+  "peerDependencies": {
+    "workflow": ">=5.0.0-beta.42 <6"
+  },
+  "peerDependenciesMeta": {
+    "workflow": {
+      "optional": true
+    }
   },
   "engines": {
     "node": ">=24"

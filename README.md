@@ -56,31 +56,86 @@ bytes and durable `wakeKey`.
 That gives applications one attention model without pretending that every
 event system has the same shape.
 
-## Canonical example: a pull-request shepherd
+## Canonical example: message A, then message B
 
-Suppose you want an engineering agent to watch pull requests without starting
-a turn for every push and CI update. The useful behavior is:
+Suppose a bot is present in 100 Slack channels. You want one rule to watch each
+channel and invoke a turn when someone says “message A” and a later message in
+the same collection window says “message B.”
 
-- listen to GitHub `pull_request` and `check_suite` webhooks;
-- collect the event burst for one pull request;
-- wait for CI to settle, with a maximum wait so a hot PR cannot wait forever;
-- ignore a closure, a later recovery, or an all-green batch; and
-- invoke one Eve turn when the latest observed check state still has a failure.
-
-Install Ambient and its Eve adapter:
+Everything below comes from `@ewhauser/eve-ambient` or is defined in the
+example itself:
 
 ```sh
-pnpm add @ewhauser/eve-ambient @ewhauser/eve-ambient-eve eve@0.38.1
+pnpm add @ewhauser/eve-ambient@^0.5.0
 ```
 
-The adapter targets that exact Eve version and requires its carried patch; see
-the [adapter installation instructions](packages/eve-adapter/README.md).
+### Define the event boundary
+
+Your Slack adapter verifies the webhook and supplies this small normalized
+input. The channel contract converts it into the complete event Ambient hashes
+and routes. Choosing `channelId` as `partitionKey` creates one stream per Slack
+channel for this rule—not one stream per message.
+
+```ts
+import {
+  defineChannelCanonicalization,
+  type CanonicalChannelEvent,
+} from "@ewhauser/eve-ambient";
+
+interface SlackMessageInput {
+  eventId: string;
+  occurredAt: string;
+  tenantId: string;
+  workspaceId: string;
+  channelId: string;
+  userId: string;
+  text: string;
+}
+
+type SlackMessageEvent = CanonicalChannelEvent<
+  "slack.message",
+  { workspaceId: string; channelId: string; text: string },
+  string
+>;
+
+const slackMessages = defineChannelCanonicalization<
+  SlackMessageInput,
+  SlackMessageEvent
+>({
+  version: 1,
+  partitionKey: event => event.data.channelId,
+  canonicalize: input => ({
+    id: input.eventId,
+    type: "slack.message",
+    version: 1,
+    occurredAt: input.occurredAt,
+    data: {
+      workspaceId: input.workspaceId,
+      channelId: input.channelId,
+      text: input.text,
+    },
+    source: {
+      channelId: "slack",
+      installationId: input.workspaceId,
+      tenantId: input.tenantId,
+    },
+    actor: { id: input.userId, principalType: "user" },
+    replyTarget: `slack:${input.workspaceId}:${input.channelId}`,
+    origin: { kind: "external", depth: 0 },
+  }),
+});
+```
+
+Authentication and transport acknowledgement remain the Slack adapter's job.
+The stable `eventId` must survive provider retries.
 
 ### Listen, correlate, and decide
 
-The Eve adapter supplies a typed channel that combines PR and check-suite
-activity. It already partitions events by pull request, so the rule only needs
-to define buffering and the condition that merits a turn:
+The rule admits only A and B messages. Its default correlation is one stream
+per rule inside the channel partition. The debounce window gives related
+messages time to arrive before `decide()` receives the ordered batch. Ambient
+orders it by the canonical `occurredAt` value, so preserve Slack's event
+timestamp during normalization.
 
 ```ts
 import {
@@ -89,142 +144,145 @@ import {
   ignore,
   wake,
 } from "@ewhauser/eve-ambient";
-import {
-  eveGitHubPullRequestActivity,
-  type EveGitHubCheckSuiteActivityEvent,
-} from "@ewhauser/eve-ambient-eve";
 
-const failing = new Set([
-  "action_required",
-  "cancelled",
-  "failure",
-  "startup_failure",
-  "timed_out",
-]);
+const text = (event: SlackMessageEvent) =>
+  event.data.text.trim().toLowerCase();
 
-const pullRequestShepherd = defineAmbientRule({
-  id: "pull-request-shepherd",
+const messageSequence = defineAmbientRule({
+  id: "message-a-then-b",
   version: "v1",
-  channel: eveGitHubPullRequestActivity,
+  channel: slackMessages,
+  matches: event => ["message a", "message b"].includes(text(event)),
   policy: debounce({
     quiet: "2m",
-    maxWait: "15m",
+    maxWait: "10m",
     cooldown: "30m",
-    maxEvents: 100,
+    maxEvents: 48,
   }),
   decide({ events, eventKeys }) {
-    const suites = new Map<string, EveGitHubCheckSuiteActivityEvent>();
-    let closed = false;
-
-    for (const event of events) {
-      if (event.type === "github.pull-request") {
-        if (["opened", "reopened", "synchronize"].includes(event.data.action)) {
-          closed = false;
-          suites.clear();
-        } else if (event.data.action === "closed") {
-          closed = true;
-        }
-      } else if (!closed) {
-        suites.set(event.data.appSlug ?? `suite:${event.data.checkSuiteId}`, event);
-      }
-    }
-
-    if (closed) return ignore({ reason: "pull request is closed" });
-    const failures = [...suites.values()].filter(
-      event => event.data.action === "completed" &&
-        event.data.conclusion !== null &&
-        failing.has(event.data.conclusion),
+    const firstA = events.findIndex(event => text(event) === "message a");
+    const followingB = events.findIndex(
+      (event, index) => index > firstA && text(event) === "message b",
     );
-    const failure = failures.at(-1);
-    if (failure?.replyTarget === undefined) {
-      return ignore({ reason: "current check suites do not show a failure" });
+
+    if (firstA < 0 || followingB < 0) {
+      return ignore({ reason: "the batch has no A-then-B sequence" });
     }
 
     return wake({
-      target: failure.replyTarget,
+      routeId: "turns",
+      target: events[followingB]!.replyTarget!,
       instruction:
-        "Inspect this pull request and fix the smallest safe CI blocker. " +
-        "If no safe fix is possible, report the exact blocker and next action.",
-      decision: { reason: "latest observed CI state is failing" },
+        "Review the Slack conversation and take the configured follow-up action.",
+      decision: { reason: "message A was followed by message B" },
       evidence: {
-        repository: failure.data.repository.fullName,
-        pullRequestNumber: failure.data.pullRequestNumber,
-        failures: failures.map(event => ({
-          app: event.data.appSlug,
-          conclusion: event.data.conclusion,
-          headSha: event.data.headSha,
-        })),
-        eventKeys,
+        channelId: events[followingB]!.data.channelId,
+        matchedEventKeys: [eventKeys[firstA]!, eventKeys[followingB]!],
       },
     });
   },
 });
 ```
 
-The rule receives a typed event union: TypeScript narrows PR fields and check
-suite fields from `event.type`. `ignore()` records a terminal no-turn decision.
-`wake()` separates the application's trusted instruction from untrusted event
-evidence and carries the PR's complete Eve continuation target.
+This detects the sequence inside one frozen batch. Ambient intentionally does
+not retain arbitrary rule history after a batch completes, so an unbounded
+“A at any time, then B days later” rule belongs in application-owned state.
 
-### Invoke the Eve turn
+### Invoke the turn
 
-Define the route once, bind the application to a World, and wrap Eve's normal
-GitHub channel. `attentionWorld`, `githubFrom`, `auth`, and `credentials` are
-deployment bindings supplied by the host application.
+The final side effect is an explicit application dependency. A `TurnSink` can
+be backed by Eve or another durable agent queue; it must deduplicate on the
+supplied `idempotencyKey`.
 
 ```ts
-import { defineAmbientApplication } from "@ewhauser/eve-ambient";
-import { world } from "@ewhauser/eve-ambient/world";
 import {
-  createEveGitHubAmbientChannel,
-  createEveGitHubAttentionRoute,
-} from "@ewhauser/eve-ambient-eve";
+  defineAmbientApplication,
+  type JsonValue,
+} from "@ewhauser/eve-ambient";
 
-const ambient = defineAmbientApplication({
-  applicationId: "engineering-agent",
-  rules: [pullRequestShepherd],
-  routes: [createEveGitHubAttentionRoute({ from: githubFrom, auth })],
-}).with(world({
-  world: attentionWorld,
-  callbackSecretEnv: "AMBIENT_CALLBACK_SECRET",
-}));
+interface TurnSink {
+  enqueue(request: {
+    idempotencyKey: string;
+    address: string;
+    instruction: string;
+    evidence: JsonValue;
+  }): Promise<JsonValue>;
+}
 
-export const github = createEveGitHubAmbientChannel({
-  publisher: ambient,
-  tenantId: context => context.repository.owner,
-  credentials,
+function address(target: JsonValue): string {
+  if (typeof target !== "string") {
+    throw new TypeError("the Slack turn target must be a string");
+  }
+  return target;
+}
+
+const definition = (turns: TurnSink) => defineAmbientApplication({
+  applicationId: "slack-sequence-agent",
+  rules: [messageSequence],
+  routes: [{
+    id: "turns",
+    deliver: wake => turns.enqueue({
+      idempotencyKey: wake.wakeKey,
+      address: address(wake.target),
+      instruction: wake.instruction,
+      evidence: wake.evidence,
+    }),
+  }],
 });
-
-// Mount as the World's authenticated prepare/deliver callback handler.
-export const POST = ambient.fetch;
 ```
 
-The returned `github` value is still Eve's normal GitHub channel. Mentions and
-other direct conversation events can invoke Eve normally, while PR and
-check-suite hooks take the ambient path above.
+No `TurnSink` implementation is hidden in Ambient: the application supplies
+it, and the interface above is its complete contract. The stable `wakeKey`
+becomes the downstream turn admission key.
 
-The resulting path is concrete:
+For local development, bind the definition to the included memory backend:
 
-```text
-GitHub webhook
-  -> Eve verifies and normalizes pull_request / check_suite
-  -> Ambient durably appends before GitHub receives 2xx
-  -> one correlation stream per pull request
-  -> debounce and decide
-  -> checkpoint wake
-  -> Eve route sends one queued turn with idempotencyKey = wakeKey
+```ts
+import { memory } from "@ewhauser/eve-ambient/memory";
+
+export function createLocalApplication(turns: TurnSink) {
+  return definition(turns).with(memory());
+}
 ```
 
-The final route creates or resumes the PR's Eve conversation with the stateful
-GitHub target carried by the event. A lost delivery response retries the same
-`wakeKey`, so Eve admits the same durable turn instead of starting another.
+Publish each verified Slack input with
+`ambient.publish(slackMessages, input)`. In deterministic tests, advance the
+injected clock past the debounce deadline before calling
+`ambient.engine.runDue()`.
 
-The complete, typechecked version lives in
-[`examples/world-attention/src/github-pr-shepherd.ts`](examples/world-attention/src/github-pr-shepherd.ts).
+In production, bind the same definition to a conforming `AttentionWorld`. The
+World client is a deployment dependency supplied by the application:
+
+```ts
+import { world } from "@ewhauser/eve-ambient/world";
+import type { AttentionWorld } from "@ewhauser/eve-ambient/protocol";
+
+export function createProductionApplication(
+  turns: TurnSink,
+  attentionWorld: AttentionWorld,
+) {
+  return definition(turns).with(world({
+    world: attentionWorld,
+    callbackSecretEnv: "AMBIENT_CALLBACK_SECRET",
+  }));
+}
+```
+
+Mount the returned application's `fetch` handler at its authenticated prepare
+and deliver callback paths.
+
+The complete typechecked example is
+[`examples/world-attention/src/slack-message-sequence.ts`](examples/world-attention/src/slack-message-sequence.ts).
+
+With 100 joined channels, this produces at most 100 logical streams for this
+rule version. If every channel receives A followed by B, admission makes 200
+append RPCs. After the quiet period, the World makes 100 prepare callbacks and,
+because every sequence matches, 100 delivery callbacks; each delivery invokes
+the `TurnSink` once. That is 100 streams and up to 100 turns—not 200 workflows.
 
 ### Other patterns
 
-The same shape applies beyond CI:
+The same shape applies beyond this Slack sequence:
 
 | Listen to | Correlate by | Invoke a turn when |
 |---|---|---|
@@ -280,8 +338,7 @@ Ambient deliberately uses a smaller contract than the Workflow SDK runtime:
 `world.stream(key).append(value)`. The packages above are implementation
 foundations, not automatic drop-in Ambient bindings. A conforming adapter must
 construct stream handles locally and durably apply the exported correlation
-reducer in one atomic append. `world-celld` is being developed directly against
-that contract.
+reducer in one atomic append.
 
 For deterministic tests, the package includes `memory()`. It implements the
 same stream reducer and explicit `runDue()` scheduling, but it is not a
@@ -317,10 +374,8 @@ global stream registry in the admission path.
 | Workspace | Purpose | Published |
 |---|---|---|
 | [`packages/ambient`](packages/ambient) | Rules, protocol, reducer, memory reference, and World adapter | `@ewhauser/eve-ambient` |
-| [`packages/eve-adapter`](packages/eve-adapter) | Eve ingress, attention delivery, and direct dispatch | `@ewhauser/eve-ambient-eve` |
-| [`examples/world-attention`](examples/world-attention) | Typechecked support and GitHub PR-shepherd definitions bound to memory or a supplied World | No |
+| [`examples/world-attention`](examples/world-attention) | Typechecked support and Slack sequence definitions bound to memory or a supplied World | No |
 | [`integration/attention-world`](integration/attention-world) | Executable RPC fanout and ring-dedup contract | No |
-| [`integration/eve-conformance`](integration/eve-conformance) | Exact Eve patch and adapter conformance | No |
 
 ## Documentation
 

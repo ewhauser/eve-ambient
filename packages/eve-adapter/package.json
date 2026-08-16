@@ -1,6 +1,6 @@
 {
   "name": "@ewhauser/eve-ambient-eve",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Official Eve ingress and delivery adapter for @ewhauser/eve-ambient.",
   "license": "MIT",
   "type": "module",

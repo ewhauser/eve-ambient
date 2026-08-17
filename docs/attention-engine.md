@@ -9,7 +9,7 @@ interface AttentionEngine {
 }
 
 // Conceptual Workflow APIs used by the implementation.
-resumeHook(correlationToken, append);
+resumeHook(cachedOwner ?? correlationToken, append);
 start(correlationWorkflow, [config, instanceKey, firstCommand]);
 ```
 
@@ -23,7 +23,11 @@ accept(fanout)
   +-> validate the complete fanout and capacity
   +-> derive instanceKey for every branch
   +-> group branches by instanceKey
-  +-> enter one process-local in-flight gate per instanceKey
+  +-> use the process-local cached owner when available
+       +-> inactive: evict it and continue with the unchanged append
+       |
+       +-> active: transport accepts the append without a token lookup
+  +-> on a cache miss, enter one process-local in-flight gate per instanceKey
        |
        +-> leader probes the deterministic hook
        |    +-> warm: probe accepts the leader append
@@ -51,9 +55,28 @@ and processes it only after `getConflict()` confirms ownership. Other processes
 may still start candidates because hook lookup and run creation are not globally
 atomic. Every candidate creates the same deterministic hook and awaits
 `getConflict()`; losing candidates exit, and their publishers resume the owner.
-Failed and completed promises are removed so later publications probe normally;
-this is not a persistent owner cache. The integration suite exercises both a
-20-publisher local cold race and an explicit two-candidate ownership race.
+Failed and completed promises are removed so later cache misses can probe
+normally. The integration suite exercises both a 20-publisher local cold race
+and an explicit two-candidate ownership race.
+
+Every successful resume returns its resolved hook owner, and cold registration
+polling discovers the same standard Workflow handle. Ambient keeps those
+handles in one process-local cache shared by all `WorkflowAttentionEngine`
+instances. The cache is capped at 1,024 least-recently-used entries, and an
+entry expires after 10 minutes without a successful resume. This retains a
+substantial hot set at fixed memory. The idle TTL favors burst reuse while
+periodically revalidating dormant correlations, and active permanent
+correlations keep refreshing their handle. Token keys already fingerprint the
+immutable Workflow configuration, so configuration cutovers cannot reuse an old
+owner.
+
+The cache is advisory. `HookNotFoundError` from a cached handle evicts that
+owner and routes the unchanged append through the token-keyed probe gate. The
+leader retries by deterministic token and only then uses the normal cold
+initialization path if the token is also absent. Conditional eviction prevents
+a late failure for an old run from removing a concurrently cached replacement.
+No application storage, custom World method, or deployment dependency is
+introduced.
 
 ## Correlation address and lineage
 
@@ -113,10 +136,11 @@ permanent correlation owner.
 
 ## Protocol-level call fanout
 
-For a warm correlation, Ambient makes one high-level `resumeHook()` call for
-every distinct correlation selected from an inbound event. No selected
-correlations means no Workflow call, and several matching branches with the
-same correlation are grouped into one append.
+For a cached warm correlation, Ambient makes one high-level `resumeHook()` call
+with the owner for every distinct correlation selected from an inbound event.
+An uncached warm leader makes the same call by token and caches the returned
+owner. No selected correlations means no Workflow call, and several matching
+branches with the same correlation are grouped into one append.
 
 A cold leader makes one failed `resumeHook()`, one `start()` seeded with the
 append, and a variable number of `getHookByToken()` registration lookups. It
@@ -138,16 +162,17 @@ The current Workflow 5 integration instruments public standard-World methods:
 |---|---:|---:|---:|
 | Cold buffer-only append | failed resume + start + polling | 16-17 observed | 0 |
 | 20-publisher immediate cold burst | failed probe + 19 follower resumes + start/polling | 215-226 observed | 20 |
-| Warm buffer-only append | 1 | 7 | 0 |
-| Append that closes, prepares, and delivers a batch | 1 | 15 | 2 |
+| Warm buffer-only append | 1 | 6 | 0 |
+| Append that closes, prepares, and delivers a batch | 1 | 14 | 2 |
 
-The 7-call warm path is one hook lookup, one run read, three event writes, and
-two queue publishes. These are observations from Workflow 5.0.0-beta.42 and the
-instrumented local test World, not calls in Ambient's public contract and not a
-required implementation shape for other Worlds. The cold count varied between
-16 and 17 in local runs, including six or seven hook lookups, versus 27 calls
-and 12 lookups with fixed 5 ms polling. Cold counts still vary with scheduler
-timing. In local before/after 20-publisher samples, the initial-probe gate
+The 6-call warm path uses a cached owner and performs one run read, three event
+writes, and two queue publishes, with no hook-token lookup. These are
+observations from Workflow 5.0.0-beta.42 and the instrumented local test World,
+not calls in Ambient's public contract and not a required implementation shape
+for other Worlds. The cold count varied between 16 and 17 in local runs,
+including six or seven hook lookups, versus 27 calls and 12 lookups with fixed
+5 ms polling. Cold counts still vary with scheduler timing. In local
+before/after 20-publisher samples, the initial-probe gate
 reduced public resumes from 39 to 20 and World hook lookups from 22 to 3.
 Post-change total World calls ranged from 215 to 226 versus 256 in pre-change
 samples, but that total includes its 20 immediate reducers and prepare callbacks,

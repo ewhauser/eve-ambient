@@ -9,7 +9,8 @@ It verifies that:
 - every transport-accepted append reaches that owner;
 - a 20-publisher in-flight cold burst creates one run and delivers 19 follower
   resumes after one failed leader probe;
-- warm admission stays within the measured standard-World call budget;
+- warm admission reuses the resolved owner without a hook-token lookup and
+  matches the measured standard-World call count;
 - prepare and delivery retries preserve the exact batch and `wakeKey`; and
 - a correlation run remains active after its 48-entry best-effort dedup ring
   has wrapped.

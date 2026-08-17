@@ -10,11 +10,11 @@
 
 Each correlation address and immutable Workflow configuration map to one
 deterministic Workflow hook token. An event selected for that address is sent
-with `resumeHook()`. Process-local publishers first share one transient,
-token-keyed probe. Its leader either finds the warm owner and accepts its append
-or starts a candidate seeded with the first append and waits for the hook owner
-with jittered exponential backoff. Followers resume their own appends to the
-returned owner.
+with `resumeHook()`, using a resolved owner cached by token when available. On a
+cache miss, process-local publishers share one transient token-keyed probe. Its
+leader either finds the warm owner and accepts its append or starts a candidate
+seeded with the first append and waits for the hook owner with jittered
+exponential backoff. Followers resume their own appends to the returned owner.
 
 ```text
 event 1 -> correlation K -> failed resume -> start owner K with event 1
@@ -26,8 +26,16 @@ The workflow creates the token and awaits `getConflict()` before processing its
 seed or hook messages. Same-process cold publications create one candidate.
 Candidates from different processes still converge on one owner. Losing
 candidates exit without processing their seed; their publishers deliver it to
-the registered owner. Failed and completed in-flight probes are removed; this
-decision does not retain a process-local owner cache.
+the registered owner. Failed and completed in-flight probes are removed.
+
+Successful resumes and cold owner discovery populate one cache shared by all
+engine instances in the process. It keeps at most 1,024 owners with LRU
+eviction, and expires an entry after 10 minutes without a successful resume.
+This is an advisory optimization over standard Workflow handles, not a new
+durability layer or World interface. Immutable configuration is already part of
+the token fingerprint, so configuration cutovers use distinct entries. A
+rejected cached owner is evicted, and the same append safely re-enters the
+token-keyed probe before cold initialization.
 
 ## State and effects
 
@@ -65,14 +73,16 @@ can add compaction later without changing the public Ambient binding.
 
 ## Calls
 
-For each selected warm correlation, Ambient makes one high-level `resumeHook()`
-call. A cold leader makes a failed resume, a seeded `start()`, and variable hook
-lookups; when its candidate wins, it skips the second resume. With Workflow
-`5.0.0-beta.42` and the local World, the checked-in integration measures 7
-public World calls for a warm buffer-only message and 15 World calls plus two
-application HTTP attempts when that message closes, prepares, and delivers a
-batch. Representative cold runs used 16-17 calls, including six or seven hook
-lookups, down from 27 calls and 12 lookups before backoff and seeded startup. A
+For each selected cached warm correlation, Ambient makes one high-level
+`resumeHook()` call with the owner. A cold leader makes a failed resume, a
+seeded `start()`, and variable hook lookups; when its candidate wins, it skips
+the second resume. With Workflow `5.0.0-beta.42` and the local World, the
+checked-in integration measures 6 public World calls for a cached warm
+buffer-only message and 14 World calls plus two application HTTP attempts when
+that message closes, prepares, and delivers a batch. The cached handle removes
+one token lookup from each path. Representative cold runs used 16-17 calls,
+including six or seven hook lookups, down from 27 calls and 12 lookups before
+backoff and seeded startup. A
 20-publisher winning cold burst makes 20 total resumes rather than 39: one
 failed leader probe and 19 follower resumes, with one start and one polling
 chain. Local before/after integration samples observed hook lookups fall from
@@ -84,6 +94,7 @@ scheduling and is not a latency measurement.
 
 - standard Workflow Worlds are direct deployment options;
 - no World is forced to implement an Ambient interface;
+- process-local owner reuse is bounded and never authoritative;
 - one event can still fan out to multiple independent correlation resumes;
 - source dedup remains bounded and best effort;
 - final-effect safety remains durable through `wakeKey`;

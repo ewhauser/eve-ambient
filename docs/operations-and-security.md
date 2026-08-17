@@ -9,6 +9,10 @@
   while in flight within one process; completed and failed gates are removed,
   and separate processes may still start candidates that resolve through hook
   ownership.
+- Resolved hook owners are shared across engine instances in a process-local
+  1,024-entry LRU and expire after 10 minutes without a successful resume.
+- A missing or inactive cached owner is evicted; the unchanged append re-enters
+  the token-keyed probe and cold initialization if no active owner exists.
 - Reducer deduplication and idempotency conflicts are asynchronous to that
   receipt.
 - Prepared output is checkpointed before delivery and retried with the same
@@ -16,7 +20,8 @@
 - Source-admission dedup is intentionally best effort and bounded by the
   recent-message ring.
 
-Monitor hook-resume latency and errors, cold-start frequency, registration
+Monitor hook-resume latency and errors, especially not-found retries that may
+indicate stale-owner recovery, along with cold-start frequency, registration
 polling, cross-process candidate-owner conflicts, active correlation runs,
 event-history growth, due timer lag, callback latency and status, retry
 exhaustion, ring capacity, and final delivery conflicts. Workflow and the

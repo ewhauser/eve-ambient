@@ -356,18 +356,20 @@ For each inbound event, Ambient:
 1. canonicalizes the typed channel event and derives stable identity;
 2. runs deterministic rule selection and correlation;
 3. groups selected branches by correlation address;
-4. enters a transient token-keyed gate before the initial hook probe;
-5. lets one leader resume the deterministic hook or, on a miss, start one
+4. resumes a cached hook owner when one is available;
+5. otherwise enters a transient token-keyed gate before the initial hook probe;
+6. lets one leader resume the deterministic hook or, on a miss, start one
    seeded candidate and poll for ownership with jittered exponential backoff;
-6. routes in-flight followers or losing-candidate appends to the elected
+7. routes in-flight followers or losing-candidate appends to the elected
    owner; and
-7. lets each run buffer, prepare, checkpoint, and deliver independently.
+8. lets each run buffer, prepare, checkpoint, and deliver independently.
 
 ### Ambient protocol fanout
 
 ```text
 0 selected correlations -> 0 Workflow calls
-warm correlation        -> 1 resumeHook()
+cached warm correlation -> 1 resumeHook(owner)
+uncached warm leader    -> 1 resumeHook(token)
 cold leader             -> 1 failed resumeHook() + 1 start() + registration lookups
 in-flight local follower -> join the leader result + 1 resumeHook(owner)
 20-publisher cold burst -> 20 total resumeHook() calls + 1 start/polling chain
@@ -381,8 +383,17 @@ hit the winning candidate receives the leader's append in `start()`, so that
 publisher does not perform a second `resumeHook()`. Candidates in different
 processes still converge through deterministic hook ownership; a losing
 publisher resumes the owner with its candidate's append. Completed and failed
-gates are removed immediately; Ambient does not retain a process-local owner
-cache.
+gates are removed immediately.
+
+Successful resumes and cold initialization cache the resolved hook owner in a
+process-local 1,024-entry LRU for 10 minutes after its last successful use. The
+token already fingerprints immutable Workflow configuration, so engines with
+the same token can safely reuse the handle while other configurations remain
+isolated. The cap retains a useful hot set at fixed memory, while the idle TTL
+keeps bursty correlations warm but periodically revalidates dormant owners. If
+Workflow rejects a cached owner as missing or inactive, Ambient evicts it and
+retries the unchanged append through the in-flight token probe and ordinary
+cold initialization path. The cache is advisory and adds no World requirement.
 
 ### Measured Workflow and storage work
 
@@ -393,11 +404,12 @@ The checked-in Workflow 5.0.0-beta.42 integration currently observes:
 |---|---:|---:|---:|
 | Cold buffer-only append | 1 failed `resumeHook()`, 1 `start()`, registration polling | 16-17 observed | 0 |
 | 20-publisher immediate cold burst | 1 failed probe + 19 follower resumes + 1 start/polling chain | 215-226 observed | 20 |
-| Buffer only | 1 `resumeHook()` | 7 | 0 |
-| Close, prepare, and deliver | 1 `resumeHook()` | 15 | 2 |
+| Buffer only | 1 `resumeHook()` | 6 | 0 |
+| Close, prepare, and deliver | 1 `resumeHook()` | 14 | 2 |
 
-The 7 internal calls are one hook lookup, one run read, three event writes, and
-two queue publishes. The cold count varied between 16 and 17 across local runs,
+The 6-call warm buffer path uses the cached owner and performs one run read,
+three event writes, and two queue publishes; it no longer performs a hook-token
+lookup. The cold count varied between 16 and 17 across local runs,
 including six or seven hook lookups; the previous fixed 5 ms polling loop used
 27 World calls and 12 lookups in the same harness. These counts describe the
 instrumented runtime and local test World, not a requirement imposed on every
@@ -434,7 +446,9 @@ silently reusing an old run's captured configuration. Reducer state does not
 migrate across that cutover; drain or explicitly abandon the previous owner.
 
 There is no event coordinator, global attention run, custom storage adapter,
-or global correlation registry in the admission path.
+or durable Ambient correlation registry in the admission path. The bounded
+process-local owner cache is only an advisory shortcut to standard Workflow
+hook resolution.
 
 ## Repository
 

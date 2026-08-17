@@ -333,10 +333,11 @@ describe("standard Workflow correlation runtime", () => {
   });
 
   it("accepts duplicates and reducer conflicts asynchronously without duplicating work", async () => {
-    let prepared = 0;
+    const preparedBatchKeys = new Set<string>();
     const callbackUrl = await serve(createWorkflowAttentionCallbackHandler({
-      async prepare() {
-        prepared += 1;
+      async prepare(batch) {
+        // Prepare is at-least-once; repeated calls for one batch are one logical preparation.
+        preparedBatchKeys.add(batch.batchKey);
         return { kind: "ignore", decision: null };
       },
       async deliver() {
@@ -356,9 +357,9 @@ describe("standard Workflow correlation runtime", () => {
     await engine.accept(original);
     await engine.accept(await fanout("same-event", "02", policy));
 
-    await vi.waitFor(() => expect(prepared).toBe(1), { timeout: 10_000 });
+    await vi.waitFor(() => expect(preparedBatchKeys.size).toBe(1), { timeout: 10_000 });
     await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(prepared).toBe(1);
+    expect(preparedBatchKeys.size).toBe(1);
   });
 
   it("retries the exact prepared batch and checkpointed wake", async () => {

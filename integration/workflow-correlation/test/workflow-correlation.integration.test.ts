@@ -114,19 +114,38 @@ describe("standard Workflow correlation runtime", () => {
     }, { secretEnv: SECRET_ENV }));
     process.env[SECRET_ENV] = "integration-secret";
     const before = await runIds();
+    const originalWorld = await getWorld();
+    const countingWorld = createCountingWorld(originalWorld);
+    setWorld(countingWorld.world);
     const engine = new WorkflowAttentionEngine({
       namespace: uniqueNamespace("cold-race"),
       callbackUrl,
       callbackSecretEnv: SECRET_ENV,
     });
     const policy = { buffer: { mode: "immediate" as const } };
+    const inputs = await Promise.all(Array.from({ length: 20 }, (_, index) =>
+      fanout(`cold-${index}`, String(index).padStart(2, "0"), policy)));
 
-    const receipts = await Promise.all(Array.from({ length: 20 }, async (_, index) =>
-      engine.accept(await fanout(`cold-${index}`, String(index).padStart(2, "0"), policy))));
+    try {
+      const receipts = await Promise.all(inputs.map((input) => engine.accept(input)));
 
-    expect(receipts).toHaveLength(20);
-    await vi.waitFor(() => expect(preparedBatchKeys.size).toBe(20), { timeout: 20_000 });
-    expect(await newRunIds(before)).toHaveLength(1);
+      expect(receipts).toHaveLength(20);
+      await vi.waitFor(() => expect(preparedBatchKeys.size).toBe(20), { timeout: 20_000 });
+      await waitForStableWorldCalls(countingWorld);
+      const coldBurst = countingWorld.snapshot();
+      process.stdout.write(`\nWORKFLOW_CORRELATION_COLD_BURST_REPORT ${JSON.stringify({
+        publishers: 20,
+        ...withoutTrace(coldBurst),
+      }, null, 2)}\n`);
+
+      expect(coldBurst.eventTypes["run_created"]).toBe(1);
+      // Workflow's resilient resume path records each accepted follower input
+      // from both the publisher and queue consumer; 38 writes represent 19 resumes.
+      expect(coldBurst.eventTypes["hook_received"]).toBe(38);
+      expect(await newRunIds(before)).toHaveLength(1);
+    } finally {
+      setWorld(originalWorld);
+    }
   });
 
   it("routes a seeded append from a losing cross-process candidate to the owner", async () => {

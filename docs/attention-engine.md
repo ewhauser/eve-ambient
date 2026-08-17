@@ -23,15 +23,16 @@ accept(fanout)
   +-> validate the complete fanout and capacity
   +-> derive instanceKey for every branch
   +-> group branches by instanceKey
-  +-> concurrently resume one deterministic hook per instanceKey
+  +-> enter one process-local in-flight gate per instanceKey
        |
-       +-> hook exists: transport accepts the append
+       +-> leader probes the deterministic hook
+       |    +-> warm: probe accepts the leader append
+       |    +-> cold: start one candidate with the leader append
+       |              wait with jittered exponential backoff
+       |              winner: seed is already accepted
+       |              loser: resume the elected owner
        |
-       +-> hook missing: join process-local initialization, or
-                         start one candidate with the first append
-                         wait with jittered exponential backoff
-                         winner: seed is already accepted
-                         follower/loser: resume the hook owner
+       +-> followers join the result and resume their own appends to the owner
   +-> return one payload-free application receipt
 ```
 
@@ -42,14 +43,17 @@ Duplicate and conflicting append outcomes are therefore asynchronous. A
 conflicting idempotency value is recorded as a named step in the Workflow run
 timeline; it does not terminate the correlation owner.
 
-Cold publishers in one process share a token-keyed initialization promise, so
-only one starts and polls. The winning candidate is seeded with that publisher's
-append and processes it only after `getConflict()` confirms ownership. Other
-processes may still start candidates because hook lookup and run creation are
-not globally atomic. Every candidate creates the same deterministic hook and
-awaits `getConflict()`; losing candidates exit, and their publishers resume the
-owner. The integration suite exercises both a 20-publisher local cold race and
-an explicit two-candidate ownership race.
+Concurrent publishers in one process share a token-keyed initial-probe promise.
+On a warm hit the leader's probe accepts its command; followers receive the
+owner handle but must resume their own commands. On a cold miss only the leader
+starts and polls. The winning candidate is seeded with that publisher's append
+and processes it only after `getConflict()` confirms ownership. Other processes
+may still start candidates because hook lookup and run creation are not globally
+atomic. Every candidate creates the same deterministic hook and awaits
+`getConflict()`; losing candidates exit, and their publishers resume the owner.
+Failed and completed promises are removed so later publications probe normally;
+this is not a persistent owner cache. The integration suite exercises both a
+20-publisher local cold race and an explicit two-candidate ownership race.
 
 ## Correlation address and lineage
 
@@ -117,8 +121,11 @@ same correlation are grouped into one append.
 A cold leader makes one failed `resumeHook()`, one `start()` seeded with the
 append, and a variable number of `getHookByToken()` registration lookups. It
 does not resume again when its candidate wins. Same-process followers share the
-start and polling result, then resume the owner; cross-process losers do the
-same after deterministic ownership resolves.
+probe, start, and polling result, then resume the owner; cross-process losers do
+the same after deterministic ownership resolves. A 20-publisher in-flight warm
+burst therefore makes 20 resumes. A winning cold burst also makes 20 total
+resumes—one failed leader probe plus 19 follower resumes—alongside one start and
+one registration polling chain. The previous post-probe gate made 39 resumes.
 
 This is the public admission protocol. It does not promise how many reads,
 writes, or queue operations a World uses to implement that RPC.
@@ -130,6 +137,7 @@ The current Workflow 5 integration instruments public standard-World methods:
 | Path | Ambient protocol calls | Standard World calls | Application HTTP |
 |---|---:|---:|---:|
 | Cold buffer-only append | failed resume + start + polling | 16-17 observed | 0 |
+| 20-publisher immediate cold burst | failed probe + 19 follower resumes + start/polling | 215-226 observed | 20 |
 | Warm buffer-only append | 1 | 7 | 0 |
 | Append that closes, prepares, and delivers a batch | 1 | 15 | 2 |
 
@@ -139,7 +147,11 @@ instrumented local test World, not calls in Ambient's public contract and not a
 required implementation shape for other Worlds. The cold count varied between
 16 and 17 in local runs, including six or seven hook lookups, versus 27 calls
 and 12 lookups with fixed 5 ms polling. Cold counts still vary with scheduler
-timing, and deployed latency includes World, network, database, and region costs.
+timing. In local before/after 20-publisher samples, the initial-probe gate
+reduced public resumes from 39 to 20 and World hook lookups from 22 to 3.
+Post-change total World calls ranged from 215 to 226 versus 256 in pre-change
+samples, but that total includes its 20 immediate reducers and prepare callbacks,
+whose scheduler work can vary; no latency conclusion is drawn from this harness.
 
 ## Conformance
 

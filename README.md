@@ -356,10 +356,11 @@ For each inbound event, Ambient:
 1. canonicalizes the typed channel event and derives stable identity;
 2. runs deterministic rule selection and correlation;
 3. groups selected branches by correlation address;
-4. resumes the deterministic hook for each distinct correlation;
-5. on a miss, coalesces process-local initialization, starts one seeded
-   candidate, and waits for hook ownership with jittered exponential backoff;
-6. routes follower or losing-candidate appends to the elected owner; and
+4. enters a transient token-keyed gate before the initial hook probe;
+5. lets one leader resume the deterministic hook or, on a miss, start one
+   seeded candidate and poll for ownership with jittered exponential backoff;
+6. routes in-flight followers or losing-candidate appends to the elected
+   owner; and
 7. lets each run buffer, prepare, checkpoint, and deliver independently.
 
 ### Ambient protocol fanout
@@ -368,15 +369,20 @@ For each inbound event, Ambient:
 0 selected correlations -> 0 Workflow calls
 warm correlation        -> 1 resumeHook()
 cold leader             -> 1 failed resumeHook() + 1 start() + registration lookups
-cold local follower     -> failed resume, join initialization, resume the owner
+in-flight local follower -> join the leader result + 1 resumeHook(owner)
+20-publisher cold burst -> 20 total resumeHook() calls + 1 start/polling chain
 ```
 
 Multiple matching rules that share a correlation are grouped into the same
-append. Cold initialization is singleflight per process and hook token. The
-winning candidate receives the leader's append in `start()`, so that publisher
-does not perform a second `resumeHook()`. Candidates in different processes
-still converge through deterministic hook ownership; a losing publisher resumes
-the owner with its candidate's append.
+append. The initial probe and any cold initialization are singleflight per
+process and hook token. On a warm hit the leader's probe accepts its append;
+followers still resume the returned owner with their own appends. On a cold
+hit the winning candidate receives the leader's append in `start()`, so that
+publisher does not perform a second `resumeHook()`. Candidates in different
+processes still converge through deterministic hook ownership; a losing
+publisher resumes the owner with its candidate's append. Completed and failed
+gates are removed immediately; Ambient does not retain a process-local owner
+cache.
 
 ### Measured Workflow and storage work
 
@@ -386,6 +392,7 @@ The checked-in Workflow 5.0.0-beta.42 integration currently observes:
 | Path | Ambient protocol calls | Standard World method calls | Application HTTP |
 |---|---:|---:|---:|
 | Cold buffer-only append | 1 failed `resumeHook()`, 1 `start()`, registration polling | 16-17 observed | 0 |
+| 20-publisher immediate cold burst | 1 failed probe + 19 follower resumes + 1 start/polling chain | 215-226 observed | 20 |
 | Buffer only | 1 `resumeHook()` | 7 | 0 |
 | Close, prepare, and deliver | 1 `resumeHook()` | 15 | 2 |
 
@@ -394,8 +401,13 @@ two queue publishes. The cold count varied between 16 and 17 across local runs,
 including six or seven hook lookups; the previous fixed 5 ms polling loop used
 27 World calls and 12 lookups in the same harness. These counts describe the
 instrumented runtime and local test World, not a requirement imposed on every
-World. Deployed counts and latency also include the chosen World's network,
-database, scheduler, and regional behavior.
+World. In local before/after 20-publisher samples, moving the in-flight gate
+ahead of the initial probe reduced high-level resumes from 39 to 20 and World
+hook lookups from 22 to 3. Post-change total World calls ranged from 215 to 226
+versus 256 in the pre-change samples, but that total also includes 20 immediate
+reducers and callbacks, so scheduler work can vary. Deployed counts and latency
+additionally depend on the chosen World's network, database, scheduler, and
+regional behavior.
 
 Each run retains a bounded recent-message ring for best-effort admission
 deduplication. Ring eviction may allow an old event to be processed again, so

@@ -10,13 +10,15 @@
 
 Each correlation address and immutable Workflow configuration map to one
 deterministic Workflow hook token. An event selected for that address is sent
-with `resumeHook()`. If the hook is missing, process-local publishers share one
-initialization. Its leader starts a candidate seeded with the first append and
-waits for the hook owner with jittered exponential backoff.
+with `resumeHook()`. Process-local publishers first share one transient,
+token-keyed probe. Its leader either finds the warm owner and accepts its append
+or starts a candidate seeded with the first append and waits for the hook owner
+with jittered exponential backoff. Followers resume their own appends to the
+returned owner.
 
 ```text
 event 1 -> correlation K -> failed resume -> start owner K with event 1
-event 2 -> correlation K -------------------> resume hook K
+event 2 -> correlation K -> join in-flight probe -> resume owner K
 event 3 -> correlation J -> failed resume -> start owner J with event 3
 ```
 
@@ -24,7 +26,8 @@ The workflow creates the token and awaits `getConflict()` before processing its
 seed or hook messages. Same-process cold publications create one candidate.
 Candidates from different processes still converge on one owner. Losing
 candidates exit without processing their seed; their publishers deliver it to
-the registered owner.
+the registered owner. Failed and completed in-flight probes are removed; this
+decision does not retain a process-local owner cache.
 
 ## State and effects
 
@@ -69,7 +72,13 @@ lookups; when its candidate wins, it skips the second resume. With Workflow
 public World calls for a warm buffer-only message and 15 World calls plus two
 application HTTP attempts when that message closes, prepares, and delivers a
 batch. Representative cold runs used 16-17 calls, including six or seven hook
-lookups, down from 27 calls and 12 lookups before backoff and seeded startup.
+lookups, down from 27 calls and 12 lookups before backoff and seeded startup. A
+20-publisher winning cold burst makes 20 total resumes rather than 39: one
+failed leader probe and 19 follower resumes, with one start and one polling
+chain. Local before/after integration samples observed hook lookups fall from
+22 to 3. Post-change total World calls ranged from 215 to 226 versus 256 in
+pre-change samples; that total includes all immediate reducer and callback
+scheduling and is not a latency measurement.
 
 ## Consequences
 

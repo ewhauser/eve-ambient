@@ -5,8 +5,10 @@
 - `accept()` returns after Workflow transport accepts every selected
   correlation append.
 - Distinct correlation resumes run concurrently.
-- Cold initialization is coalesced by hook token within one process; separate
-  processes may still start candidates that resolve through hook ownership.
+- The initial probe and any cold initialization are coalesced by hook token
+  while in flight within one process; completed and failed gates are removed,
+  and separate processes may still start candidates that resolve through hook
+  ownership.
 - Reducer deduplication and idempotency conflicts are asynchronous to that
   receipt.
 - Prepared output is checkpointed before delivery and retried with the same

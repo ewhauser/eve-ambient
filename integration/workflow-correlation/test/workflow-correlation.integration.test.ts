@@ -7,6 +7,11 @@ import type {
   FrozenAttentionBatch,
   PreparedAttentionWake,
 } from "@ewhauser/eve-ambient/protocol";
+import { compileAttentionStreamAppends } from "@ewhauser/eve-ambient/protocol";
+import { hashIdempotencyInput } from "@ewhauser/eve-ambient/idempotency";
+import { correlationWorkflow } from "@ewhauser/eve-ambient/workflows";
+import { getHookByToken, resumeHook, start } from "workflow/api";
+import { HookNotFoundError } from "workflow/errors";
 import { getWorld, setWorld } from "workflow/runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCountingWorld, waitForStableWorldCalls } from "./counting-world.js";
@@ -87,6 +92,8 @@ describe("standard Workflow correlation runtime", () => {
         applicationHttp: { warmBufferOnly: 0, batchCloseAndDelivery: 2 },
       }, null, 2)}\n`);
 
+      expect(cold.eventTypes["run_created"]).toBe(1);
+      expect(cold.eventTypes["hook_received"] ?? 0).toBe(0);
       expect(warm.total).toBeLessThanOrEqual(7);
       expect(close.total).toBeLessThanOrEqual(20);
     } finally {
@@ -106,6 +113,7 @@ describe("standard Workflow correlation runtime", () => {
       },
     }, { secretEnv: SECRET_ENV }));
     process.env[SECRET_ENV] = "integration-secret";
+    const before = await runIds();
     const engine = new WorkflowAttentionEngine({
       namespace: uniqueNamespace("cold-race"),
       callbackUrl,
@@ -118,6 +126,69 @@ describe("standard Workflow correlation runtime", () => {
 
     expect(receipts).toHaveLength(20);
     await vi.waitFor(() => expect(preparedBatchKeys.size).toBe(20), { timeout: 20_000 });
+    expect(await newRunIds(before)).toHaveLength(1);
+  });
+
+  it("routes a seeded append from a losing cross-process candidate to the owner", async () => {
+    const preparedEventIds: string[] = [];
+    const callbackUrl = await serve(createWorkflowAttentionCallbackHandler({
+      async prepare(batch) {
+        preparedEventIds.push(...batch.branches.map((branch) => branch.event.id));
+        return { kind: "ignore", decision: null };
+      },
+      async deliver() {
+        throw new Error("delivery must not run");
+      },
+    }, { secretEnv: SECRET_ENV }));
+    process.env[SECRET_ENV] = "integration-secret";
+    const before = await runIds();
+    const config = {
+      namespace: uniqueNamespace("candidate-conflict"),
+      callbackUrl,
+      callbackSecretEnv: SECRET_ENV,
+      preparePath: "/ambient/prepare",
+      deliverPath: "/ambient/deliver",
+      maxRecentMessages: 48,
+      claimLeaseMs: 30_000,
+      retryDelayMs: 1_000,
+      maxAttempts: 10,
+      maxPreparedWakeBytes: 1 * 1_024 * 1_024,
+      maxPendingBranches: 1_000,
+      maxPendingBytes: 16 * 1_024 * 1_024,
+    };
+    const policy = { buffer: { mode: "immediate" as const } };
+    const firstAppend = (await compileAttentionStreamAppends(
+      await fanout("candidate-first", "01", policy),
+    ))[0]!;
+    const secondAppend = (await compileAttentionStreamAppends(
+      await fanout("candidate-second", "02", policy),
+    ))[0]!;
+    const firstCommand = {
+      kind: "append" as const,
+      append: firstAppend,
+      acceptedAt: new Date().toISOString(),
+    };
+    const secondCommand = {
+      kind: "append" as const,
+      append: secondAppend,
+      acceptedAt: new Date().toISOString(),
+    };
+
+    const [firstCandidate, secondCandidate] = await Promise.all([
+      start(correlationWorkflow, [config, firstAppend.streamKey, firstCommand]),
+      start(correlationWorkflow, [config, secondAppend.streamKey, secondCommand]),
+    ]);
+    const configHash = await hashIdempotencyInput({ protocolVersion: 1, ...config });
+    const token = `eve-ambient:correlation:${config.namespace}:${configHash}:${firstAppend.streamKey}`;
+    const owner = await waitForHook(token);
+    const losingCommand = owner.runId === firstCandidate.runId ? secondCommand : firstCommand;
+    expect(owner.runId === firstCandidate.runId || owner.runId === secondCandidate.runId).toBe(true);
+
+    await resumeHook(owner, losingCommand);
+
+    await vi.waitFor(() => expect(preparedEventIds).toHaveLength(2), { timeout: 20_000 });
+    expect(preparedEventIds.sort()).toEqual(["candidate-first", "candidate-second"]);
+    expect(await newRunIds(before)).toHaveLength(2);
   });
 
   it("accepts duplicates and reducer conflicts asynchronously without duplicating work", async () => {
@@ -450,6 +521,18 @@ async function runIds(): Promise<Set<string>> {
 async function newRunIds(before: ReadonlySet<string>): Promise<string[]> {
   const current = await runIds();
   return [...current].filter((runId) => !before.has(runId)).sort();
+}
+
+async function waitForHook(token: string): Promise<Awaited<ReturnType<typeof getHookByToken>>> {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    try {
+      return await getHookByToken(token);
+    } catch (error) {
+      if (!HookNotFoundError.is(error) || Date.now() >= deadline) throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 function withoutTrace<T extends { readonly trace: readonly string[] }>(

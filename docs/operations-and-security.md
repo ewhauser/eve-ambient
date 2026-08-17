@@ -5,6 +5,8 @@
 - `accept()` returns after Workflow transport accepts every selected
   correlation append.
 - Distinct correlation resumes run concurrently.
+- Cold initialization is coalesced by hook token within one process; separate
+  processes may still start candidates that resolve through hook ownership.
 - Reducer deduplication and idempotency conflicts are asynchronous to that
   receipt.
 - Prepared output is checkpointed before delivery and retried with the same
@@ -12,11 +14,12 @@
 - Source-admission dedup is intentionally best effort and bounded by the
   recent-message ring.
 
-Monitor hook-resume latency and errors, cold-start frequency, candidate-owner
-conflicts, active correlation runs, event-history growth, due timer lag,
-callback latency and status, retry exhaustion, ring capacity, and final
-delivery conflicts. Workflow and the selected World provide the run and storage
-signals; application callback and turn-queue signals remain application-owned.
+Monitor hook-resume latency and errors, cold-start frequency, registration
+polling, cross-process candidate-owner conflicts, active correlation runs,
+event-history growth, due timer lag, callback latency and status, retry
+exhaustion, ring capacity, and final delivery conflicts. Workflow and the
+selected World provide the run and storage signals; application callback and
+turn-queue signals remain application-owned.
 
 ## Permanent-run capacity
 

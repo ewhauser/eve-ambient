@@ -11,7 +11,7 @@
 Each correlation address and immutable Workflow configuration map to one
 deterministic Workflow hook token. Appends selected for that address enter a
 process-local queue keyed by the token plus matching operational settings.
-After a fixed 2 ms window, the publisher sends one bounded `append-many`
+After a fixed 5 ms window, the publisher sends one bounded `append-many`
 command with `resumeHook()`. A resolved owner is reused from a bounded
 process-local cache when possible. Otherwise, publishers in that lane share
 the initial token probe. On a miss, its leader starts a candidate seeded with
@@ -28,10 +28,11 @@ The hook accepts only `append-many`. Because the protocol has no users yet,
 this decision is a hard cutover: it defines no legacy command handling, dual
 decode, migration, or version-negotiation machinery.
 
-Batching never crosses a process or deterministic token. The 2 ms window was
-selected by the local Workflow integration: 1 ms split the 20-event warm burst
-into two public resumes, while 2 ms produced one. This adds one nominal 2 ms
-timer window to a lone event; event-loop scheduling can extend it.
+Batching never crosses a process or deterministic token. A 2 ms window split
+the 20-event cold burst under CI and full-suite load. Repeated standalone and
+full-check runs at 5 ms each produced one public warm resume and one failed
+resume plus one seeded cold start. This adds one nominal 5 ms timer window to a
+lone event; event-loop scheduling can extend it.
 
 Commands are split in process-local queue-enrollment order by both command
 count and canonical serialized bytes. They are also constrained by aggregate
@@ -106,10 +107,10 @@ For each bounded warm same-token chunk, Ambient makes one high-level
 with the full first chunk, and variable hook lookups; when its candidate wins,
 it skips the second resume. With Workflow `5.0.0-beta.42` and the local World,
 the checked-in 20-event integration measures one public warm `resumeHook()`,
-6 standard World calls, and 25.3-28.2 ms local admission across two combined
-runs. The corresponding cold
+6 standard World calls, and 15.8-26.9 ms local admission across repeated
+standalone and full-check runs. The corresponding cold
 burst measures one failed public `resumeHook()`, one seeded public `start()`,
-two registration lookups, 13 standard World calls, and 40.3-59.3 ms local
+2-3 registration lookups, 13-14 standard World calls, and 58.2-68.3 ms local
 admission. Cached closing, preparing, and delivering uses
 14 World calls plus two application HTTP attempts. Registration timing makes
 the cold lookup count variable.
@@ -122,7 +123,7 @@ the cold lookup count variable.
 - process-local same-token bursts use bounded ordered `append-many` commands;
 - resolved hook owners are cached in a bounded process-local LRU;
 - local queued and publishing payloads are bounded with retryable backpressure;
-- a lone event pays one nominal 2 ms batching window;
+- a lone event pays one nominal 5 ms batching window;
 - source dedup remains bounded and best effort;
 - final-effect safety remains durable through `wakeKey`;
 - prepare and delivery remain at-least-once; and

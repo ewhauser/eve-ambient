@@ -189,7 +189,7 @@ describe("standard Workflow correlation runtime", () => {
 
       process.stdout.write(`\nWORKFLOW_CORRELATION_BURST_REPORT ${JSON.stringify({
         eventsPerBurst: 20,
-        flushWindowMs: 2,
+        flushWindowMs: 5,
         cold,
         warm,
         applicationHttp: { cold: 0, warm: 0 },

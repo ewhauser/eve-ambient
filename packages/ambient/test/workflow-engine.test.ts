@@ -554,12 +554,25 @@ describe("Workflow attention admission", () => {
       typeof target === "string" ? { runId: `owner-${target}` } : target);
     const admission = engine("cache-bounds");
 
-    for (let index = 0; index < 1_025; index += 1) {
-      await admission.accept(await fanout(
-        `cache-bounds-${index}`,
-        { correlationKey: `correlation-${index}` },
-      ));
-    }
+    await admission.accept(await fanout(
+      "cache-bounds-0",
+      { correlationKey: "correlation-0" },
+    ));
+    const concurrent = await Promise.all(Array.from(
+      { length: 1_023 },
+      (_, offset) => {
+        const index = offset + 1;
+        return fanout(
+          `cache-bounds-${index}`,
+          { correlationKey: `correlation-${index}` },
+        );
+      },
+    ));
+    await Promise.all(concurrent.map((input) => admission.accept(input)));
+    await admission.accept(await fanout(
+      "cache-bounds-1024",
+      { correlationKey: "correlation-1024" },
+    ));
     workflowApi.resumeHook.mockClear();
 
     await admission.accept(await fanout("cache-bounds-first-again", {

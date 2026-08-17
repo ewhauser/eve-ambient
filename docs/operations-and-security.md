@@ -8,10 +8,11 @@
   failed publication reject.
 - Distinct correlation tokens flush and resume independently. They are never
   combined.
-- Same-token arrivals in one process wait for a fixed 2 ms timer window. This
+- Same-token arrivals in one process wait for a fixed 5 ms timer window. This
   is the nominal added latency for a lone event; event-loop load may delay the
-  timer. The checked-in local integration found that 1 ms split a 20-event warm
-  burst into two resumes while 2 ms produced one.
+  timer. A 2 ms window split a 20-event cold burst under CI and full-suite load;
+  repeated standalone and full-check integration runs at 5 ms each produced one
+  warm resume and one seeded cold start.
 - Cold initialization is coalesced by hook token within one process when the
   registration timeout and local backpressure settings match. Other lanes or
   processes may still start candidates that resolve through hook ownership.

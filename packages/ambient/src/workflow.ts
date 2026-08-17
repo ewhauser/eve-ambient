@@ -49,8 +49,8 @@ const REGISTRATION_POLL_MAX_DELAY_MS = 50;
 const MAX_CACHED_CORRELATION_HOOKS = 1_024;
 const CACHED_CORRELATION_HOOK_TTL_MS = 10 * 60_000;
 const MAX_CORRELATION_PROBE_ATTEMPTS = 4;
-/** One timer turn collects async fan-outs without imposing a multi-millisecond delay. */
-const BATCH_FLUSH_WINDOW_MS = 2;
+/** A small bounded timer window collects async fan-outs with 5 ms nominal latency. */
+const BATCH_FLUSH_WINDOW_MS = 5;
 const EMPTY_APPEND_MANY_BYTES = correlationAppendManyBytes({
   kind: "append-many",
   commands: [],

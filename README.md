@@ -357,7 +357,7 @@ For each inbound event, Ambient:
 2. runs deterministic rule selection and correlation;
 3. groups selected branches by correlation address;
 4. queues each append by deterministic hook token and matching operational
-   limits for a 2 ms process-local flush window;
+   limits for a 5 ms process-local flush window;
 5. sends each bounded same-token chunk as one `append-many` hook command;
 6. resumes a cached hook owner when available, otherwise coalesces the initial
    token probe within the operational lane;
@@ -383,9 +383,11 @@ backpressure limits also match. Different tokens, operational lanes, and
 processes never share a batch. The hook protocol accepts only `append-many`;
 this is a hard command-shape cutover with no legacy decoder.
 
-The 2 ms timer window was selected in the checked-in local integration: a 1 ms
-window split the 20-event warm burst into two resumes, while 2 ms produced one.
-A lone event therefore waits for one nominal 2 ms window before publication;
+The 5 ms timer window was selected in the checked-in local integration after a
+2 ms window split the 20-event cold burst under CI and full-suite load. Repeated
+5 ms standalone and full-check runs each produced one warm resume and one seeded
+cold start.
+A lone event therefore waits for one nominal 5 ms window before publication;
 event-loop load can delay the timer further. The defaults cap a command at 64
 appends and 16 MiB of canonical serialized bytes, and chunking also respects
 the reducer's pending-branch and pending-byte limits. Entries retain their
@@ -413,14 +415,14 @@ The checked-in Workflow 5.0.0-beta.42 integration currently observes:
 
 | Path | Ambient protocol calls | Standard World method calls | Application HTTP |
 |---|---:|---:|---:|
-| Cold 20-event buffer-only burst | 1 failed `resumeHook()`, 1 seeded `start()`, 2 registration lookups | 13 in the latest run | 0 |
+| Cold 20-event buffer-only burst | 1 failed `resumeHook()`, 1 seeded `start()`, 2-3 registration lookups | 13-14 observed | 0 |
 | Cached warm 20-event buffer-only burst | 1 `resumeHook()` | 6 | 0 |
 | Cached close, prepare, and deliver | 1 `resumeHook()` | 14 | 2 |
 
 The 6 internal calls are one run read, three event writes, and two queue
-publishes; cached publication avoids the prior hook lookup. Two combined
-20-event runs measured 25.3-28.2 ms warm admission and 40.3-59.3 ms cold
-admission, with two public registration lookups and three World hook lookups.
+publishes; cached publication avoids the prior hook lookup. Repeated standalone
+and full-check 20-event runs measured 15.8-26.9 ms warm admission and 58.2-68.3 ms cold
+admission, with 2-3 public registration lookups and 3-4 World hook lookups.
 Cold counts vary with scheduler timing: the same suite's
 single-append cold path used 16 World calls and six hook lookups. The previous
 fixed 5 ms polling loop used 27 World calls and 12 lookups. These counts

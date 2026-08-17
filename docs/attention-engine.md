@@ -27,7 +27,7 @@ accept(fanout)
   +-> group branches by instanceKey
   +-> enqueue each append by complete deterministic hook token and
       matching operational queue settings
-  +-> after 2 ms, split by command count, serialized bytes,
+  +-> after 5 ms, split by command count, serialized bytes,
       pending branches, and pending branch bytes
   +-> publish chunks serially per token; independent tokens proceed concurrently
        |
@@ -55,10 +55,12 @@ timeline; it does not terminate the correlation owner.
 Batching is process-local and keyed by the complete deterministic hook token
 plus the publisher's registration timeout and local backpressure limits. It
 never combines different correlations or operational lanes, and separate
-processes publish their own chunks. The fixed 2 ms timer window is the smallest
-tested local window that collapsed the checked-in 20-event warm burst into one
-resume; 1 ms produced two resumes. A single event therefore incurs one nominal
-2 ms scheduling window, which may be extended by event-loop delay.
+processes publish their own chunks. A 2 ms timer window split the checked-in
+20-event cold burst under CI and full-suite load. Repeated standalone and
+full-check runs at the fixed 5 ms window each collapsed the warm burst to one
+resume and the cold burst to one failed resume plus one seeded start. A single
+event therefore incurs one nominal 5 ms scheduling window, which may be
+extended by event-loop delay.
 
 Commands default to at most 64 appends and 16 MiB of canonical serialized
 bytes. The splitter also caps aggregate branches and branch bytes at
@@ -174,13 +176,14 @@ The current Workflow 5 integration instruments public standard-World methods:
 
 | Path | Ambient protocol calls | Standard World calls | Application HTTP |
 |---|---:|---:|---:|
-| Cold 20-event buffer-only burst | 1 failed resume + 1 seeded start + 2 lookups | 13 in the latest run | 0 |
+| Cold 20-event buffer-only burst | 1 failed resume + 1 seeded start + 2-3 lookups | 13-14 observed | 0 |
 | Cached warm 20-event buffer-only burst | 1 resume | 6 | 0 |
 | Cached append that closes, prepares, and delivers a batch | 1 | 14 | 2 |
 
 The 6-call cached warm path is one run read, three event writes, and two queue
-publishes. Two combined 20-event runs took 25.3-28.2 ms warm and 40.3-59.3 ms
-cold, with 13 cold World calls and two public registration lookups; the
+publishes. Repeated standalone and full-check 20-event runs took 15.8-26.9 ms
+warm and 58.2-68.3 ms cold, with 13-14 cold World calls and 2-3 public
+registration lookups; the
 single-append cold scenario used 16-17
 World calls because registration timing varies. These are observations from
 Workflow 5.0.0-beta.42 and the instrumented local test World, not calls in

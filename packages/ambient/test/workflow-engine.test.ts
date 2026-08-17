@@ -41,6 +41,54 @@ afterEach(() => {
 });
 
 describe("Workflow attention admission", () => {
+  it("hashes immutable correlation configuration once per engine", async () => {
+    workflowApi.resumeHook.mockResolvedValue(undefined);
+    const inputs = await fanouts("config-hash", 20, { correlationKey: "shared" });
+    const digest = crypto.subtle.digest.bind(crypto.subtle);
+    let configurationDigests = 0;
+    vi.spyOn(crypto.subtle, "digest").mockImplementation((algorithm, data) => {
+      const serialized = new TextDecoder().decode(data as ArrayBuffer);
+      if (
+        serialized.includes('"protocolVersion":1') &&
+        serialized.includes('"namespace":"config-hash"')
+      ) {
+        configurationDigests += 1;
+      }
+      return digest(algorithm, data);
+    });
+    const shared = engine("config-hash");
+
+    await Promise.all(inputs.map((input) => shared.accept(input)));
+    await shared.accept(await fanout("config-hash-later", { correlationKey: "later" }));
+
+    expect(configurationDigests).toBe(1);
+  });
+
+  it("retries configuration hashing after a transient failure", async () => {
+    workflowApi.resumeHook.mockResolvedValue(undefined);
+    const input = await fanout("config-hash-retry");
+    const digest = crypto.subtle.digest.bind(crypto.subtle);
+    let configurationDigests = 0;
+    vi.spyOn(crypto.subtle, "digest").mockImplementation((algorithm, data) => {
+      const serialized = new TextDecoder().decode(data as ArrayBuffer);
+      if (
+        serialized.includes('"protocolVersion":1') &&
+        serialized.includes('"namespace":"config-hash-retry"')
+      ) {
+        configurationDigests += 1;
+        if (configurationDigests === 1) return Promise.reject(new Error("hash unavailable"));
+      }
+      return digest(algorithm, data);
+    });
+    const shared = engine("config-hash-retry");
+
+    await expect(shared.accept(input)).rejects.toThrow("hash unavailable");
+    await expect(shared.accept(input)).resolves.toMatchObject({ eventKey: input.eventKey });
+
+    expect(configurationDigests).toBe(2);
+    expect(workflowApi.resumeHook).toHaveBeenCalledTimes(1);
+  });
+
   it("coalesces 20 warm same-correlation commands into one hook resume", async () => {
     workflowApi.resumeHook.mockResolvedValue(undefined);
     const inputs = await fanouts("warm", 20);

@@ -32,73 +32,172 @@ afterEach(() => {
 });
 
 describe("Workflow attention admission", () => {
-  it("seeds the winning cold candidate and skips a second hook resume", async () => {
-    const owner = { runId: "candidate-run" };
-    workflowApi.resumeHook.mockRejectedValueOnce(new HookNotFoundError("missing"));
-    workflowApi.start.mockResolvedValueOnce(owner);
-    workflowApi.getHookByToken.mockResolvedValueOnce(owner);
-    const input = await fanout("winner");
-
-    await engine("winner").accept(input);
-
-    expect(workflowApi.resumeHook).toHaveBeenCalledTimes(1);
-    expect(workflowApi.start).toHaveBeenCalledTimes(1);
-    const startArguments = workflowApi.start.mock.calls[0]?.[1];
-    expect(startArguments).toHaveLength(3);
-    expect(startArguments?.[2]).toMatchObject({
-      kind: "append",
-      append: { eventKey: input.eventKey },
-    });
-  });
-
-  it("resumes the elected owner when its seeded candidate loses", async () => {
-    const candidate = { runId: "candidate-run" };
-    const owner = { runId: "owner-run" };
-    workflowApi.resumeHook
-      .mockRejectedValueOnce(new HookNotFoundError("missing"))
-      .mockResolvedValueOnce(owner);
-    workflowApi.start.mockResolvedValueOnce(candidate);
-    workflowApi.getHookByToken.mockResolvedValueOnce(owner);
-    const input = await fanout("loser");
-
-    await engine("loser").accept(input);
-
-    expect(workflowApi.resumeHook).toHaveBeenCalledTimes(2);
-    expect(workflowApi.resumeHook.mock.calls[1]?.[0]).toBe(owner);
-    expect(workflowApi.resumeHook.mock.calls[1]?.[1]).toMatchObject({
-      kind: "append",
-      append: { eventKey: input.eventKey },
-    });
-  });
-
-  it("singleflights cold initialization across engine instances", async () => {
-    const candidate = { runId: "candidate-run" };
-    let releaseStart!: (value: typeof candidate) => void;
+  it("singleflights a warm probe while every follower publishes its command", async () => {
+    const owner = { runId: "warm-owner" };
+    const probe = deferred<void>();
     workflowApi.resumeHook.mockImplementation(async (target: unknown) => {
-      if (typeof target === "string") throw new HookNotFoundError(target);
-      return target;
+      if (typeof target === "string") await probe.promise;
+      return owner;
     });
-    workflowApi.start.mockImplementationOnce(() =>
-      new Promise<typeof candidate>((resolve) => {
-        releaseStart = resolve;
-      }));
-    workflowApi.getHookByToken.mockResolvedValue(candidate);
-    const first = engine("singleflight");
-    const second = engine("singleflight");
-    const inputs = await Promise.all(Array.from(
-      { length: 20 },
-      (_, index) => fanout(`singleflight-${index}`),
-    ));
+    const first = engine("warm-singleflight");
+    const second = engine("warm-singleflight");
+    const inputs = await fanouts("warm", 20);
 
     const accepted = inputs.map((input, index) =>
       (index % 2 === 0 ? first : second).accept(input));
-    await vi.waitFor(() => expect(workflowApi.resumeHook).toHaveBeenCalledTimes(20));
-    releaseStart(candidate);
+    await vi.waitFor(() => expect(workflowApi.resumeHook).toHaveBeenCalledTimes(1));
+    probe.resolve();
+    await Promise.all(accepted);
+
+    expect(workflowApi.start).not.toHaveBeenCalled();
+    expect(workflowApi.getHookByToken).not.toHaveBeenCalled();
+    expect(workflowApi.resumeHook).toHaveBeenCalledTimes(20);
+    expect(typeof workflowApi.resumeHook.mock.calls[0]?.[0]).toBe("string");
+    expect(
+      workflowApi.resumeHook.mock.calls.slice(1).every(([target]) => target === owner),
+    ).toBe(true);
+    expect(resumedEventKeys(workflowApi.resumeHook.mock.calls).sort()).toEqual(
+      inputs.map((input) => input.eventKey).sort(),
+    );
+  });
+
+  it("singleflights the initial cold probe, candidate start, and registration polling", async () => {
+    const candidate = { runId: "candidate-run" };
+    const probe = deferred<void>();
+    workflowApi.resumeHook.mockImplementation(async (target: unknown) => {
+      if (typeof target === "string") {
+        await probe.promise;
+        throw new HookNotFoundError(target);
+      }
+      return target;
+    });
+    workflowApi.start.mockResolvedValueOnce(candidate);
+    workflowApi.getHookByToken.mockResolvedValue(candidate);
+    const first = engine("cold-singleflight");
+    const second = engine("cold-singleflight");
+    const inputs = await fanouts("cold", 20);
+
+    const accepted = inputs.map((input, index) =>
+      (index % 2 === 0 ? first : second).accept(input));
+    await vi.waitFor(() => expect(workflowApi.resumeHook).toHaveBeenCalledTimes(1));
+    probe.resolve();
     await Promise.all(accepted);
 
     expect(workflowApi.start).toHaveBeenCalledTimes(1);
     expect(workflowApi.getHookByToken).toHaveBeenCalledTimes(1);
-    expect(workflowApi.resumeHook).toHaveBeenCalledTimes(39);
+    expect(workflowApi.resumeHook).toHaveBeenCalledTimes(20);
+    const startArguments = workflowApi.start.mock.calls[0]?.[1];
+    const seededEventKey = startArguments?.[2]?.append.eventKey;
+    expect(startArguments).toHaveLength(3);
+    expect(startArguments?.[2]).toMatchObject({ kind: "append" });
+    expect([
+      seededEventKey,
+      ...resumedEventKeys(workflowApi.resumeHook.mock.calls.slice(1)),
+    ].sort()).toEqual(inputs.map((input) => input.eventKey).sort());
+  });
+
+  it("resumes both leader and follower commands when the seeded candidate loses", async () => {
+    const candidate = { runId: "candidate-run" };
+    const owner = { runId: "owner-run" };
+    const probe = deferred<void>();
+    workflowApi.resumeHook.mockImplementation(async (target: unknown) => {
+      if (typeof target === "string") {
+        await probe.promise;
+        throw new HookNotFoundError(target);
+      }
+      return owner;
+    });
+    workflowApi.start.mockResolvedValueOnce(candidate);
+    workflowApi.getHookByToken.mockResolvedValueOnce(owner);
+    const inputs = await fanouts("losing-candidate", 2);
+
+    const accepted = inputs.map((input) => engine("losing-candidate").accept(input));
+    await vi.waitFor(() => expect(workflowApi.resumeHook).toHaveBeenCalledTimes(1));
+    probe.resolve();
+    await Promise.all(accepted);
+
+    expect(workflowApi.start).toHaveBeenCalledTimes(1);
+    expect(workflowApi.resumeHook).toHaveBeenCalledTimes(3);
+    expect(
+      workflowApi.resumeHook.mock.calls.slice(1).every(([target]) => target === owner),
+    ).toBe(true);
+    expect(resumedEventKeys(workflowApi.resumeHook.mock.calls.slice(1)).sort()).toEqual(
+      inputs.map((input) => input.eventKey).sort(),
+    );
+  });
+
+  it("cleans up failed cold initialization so a later publication can retry", async () => {
+    const failure = new Error("start failed");
+    const owner = { runId: "retry-owner" };
+    const probe = deferred<void>();
+    let cold = true;
+    workflowApi.resumeHook.mockImplementation(async (target: unknown) => {
+      if (typeof target === "string" && cold) {
+        await probe.promise;
+        throw new HookNotFoundError(target);
+      }
+      return owner;
+    });
+    workflowApi.start.mockRejectedValueOnce(failure);
+    const admission = engine("failure-cleanup");
+    const inputs = await fanouts("failure", 3);
+
+    const failed = inputs.slice(0, 2).map((input) => admission.accept(input));
+    await vi.waitFor(() => expect(workflowApi.resumeHook).toHaveBeenCalledTimes(1));
+    probe.resolve();
+    const results = await Promise.allSettled(failed);
+
+    expect(results).toEqual([
+      { status: "rejected", reason: failure },
+      { status: "rejected", reason: failure },
+    ]);
+    expect(workflowApi.start).toHaveBeenCalledTimes(1);
+
+    cold = false;
+    await admission.accept(inputs[2]!);
+
+    expect(workflowApi.resumeHook).toHaveBeenCalledTimes(2);
+    expect(workflowApi.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("cleans up a completed probe instead of retaining an owner cache", async () => {
+    const owner = { runId: "warm-owner" };
+    workflowApi.resumeHook.mockResolvedValue(owner);
+    const admission = engine("completed-cleanup");
+    const inputs = await fanouts("completed", 2);
+
+    await admission.accept(inputs[0]!);
+    await admission.accept(inputs[1]!);
+
+    expect(workflowApi.resumeHook).toHaveBeenCalledTimes(2);
+    expect(
+      workflowApi.resumeHook.mock.calls.every(([target]) => typeof target === "string"),
+    ).toBe(true);
+    expect(workflowApi.start).not.toHaveBeenCalled();
+  });
+
+  it("does not serialize unrelated correlation tokens", async () => {
+    const blockedProbe = deferred<void>();
+    let blockedToken: string | undefined;
+    workflowApi.resumeHook.mockImplementation(async (target: unknown) => {
+      if (typeof target !== "string") return target;
+      if (blockedToken === undefined) {
+        blockedToken = target;
+        await blockedProbe.promise;
+      }
+      return { runId: `owner:${target}` };
+    });
+    const admission = engine("independent-tokens");
+    const blocked = admission.accept(await fanout("blocked", "blocked-correlation"));
+    await vi.waitFor(() => expect(workflowApi.resumeHook).toHaveBeenCalledTimes(1));
+
+    await admission.accept(await fanout("independent", "independent-correlation"));
+
+    expect(workflowApi.resumeHook).toHaveBeenCalledTimes(2);
+    expect(workflowApi.resumeHook.mock.calls[1]?.[0]).not.toBe(blockedToken);
+    blockedProbe.resolve();
+    await blocked;
+    expect(workflowApi.start).not.toHaveBeenCalled();
   });
 
   it("uses jittered exponential backoff for registration polling", async () => {
@@ -135,7 +234,38 @@ function engine(namespace: string): InstanceType<typeof WorkflowAttentionEngine>
   });
 }
 
-async function fanout(eventId: string): Promise<AcceptedFanout> {
+async function fanouts(prefix: string, count: number): Promise<AcceptedFanout[]> {
+  return Promise.all(Array.from(
+    { length: count },
+    (_, index) => fanout(`${prefix}-${index}`),
+  ));
+}
+
+function resumedEventKeys(calls: readonly unknown[][]): string[] {
+  return calls.map((call) => {
+    const command = call[1] as { readonly append: { readonly eventKey: string } };
+    return command.append.eventKey;
+  });
+}
+
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+  readonly reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function fanout(
+  eventId: string,
+  correlationKey = "incident-1",
+): Promise<AcceptedFanout> {
   const source = await canonicalizeChannelDelivery(
     defineChannelCanonicalization({
       version: 1,
@@ -157,14 +287,14 @@ async function fanout(eventId: string): Promise<AcceptedFanout> {
     { eventId },
     { applicationId: "workflow-engine-test" },
   );
-  return compileAcceptedFanout({ source, branches: [plan()] });
+  return compileAcceptedFanout({ source, branches: [plan(correlationKey)] });
 }
 
-function plan(): AttentionBranchPlan {
+function plan(correlationKey = "incident-1"): AttentionBranchPlan {
   return {
     monitorId: "monitor",
     definitionVersion: "definition-v1",
-    correlationKey: "incident-1",
+    correlationKey,
     orderKey: "001",
     mode: "active",
     policy: { buffer: { mode: "immediate" } },

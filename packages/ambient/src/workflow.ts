@@ -42,18 +42,18 @@ const REGISTRATION_POLL_MAX_DELAY_MS = 50;
 
 type WorkflowHook = Awaited<ReturnType<typeof getHookByToken>>;
 
-interface CorrelationInitialization {
-  readonly candidateRunId: string;
+interface CorrelationProbeResult {
   readonly owner: WorkflowHook;
+  readonly leaderCommandAccepted: boolean;
 }
 
-interface CorrelationInitializationAttempt {
-  readonly seeded: boolean;
-  readonly result: Promise<CorrelationInitialization>;
+interface CorrelationProbeAttempt {
+  readonly leader: boolean;
+  readonly result: Promise<CorrelationProbeResult>;
 }
 
-/** Process-local collapse of concurrent cold initialization for one hook token. */
-const correlationInitializations = new Map<string, Promise<CorrelationInitialization>>();
+/** Process-local collapse of the initial probe and any cold start for one hook token. */
+const correlationProbes = new Map<string, Promise<CorrelationProbeResult>>();
 
 export interface WorkflowAttentionEngineOptions {
   /** Public base URL at which this application's callback handler is mounted. */
@@ -216,58 +216,61 @@ export class WorkflowAttentionEngine implements AttentionEngine {
 
   async #publish(command: CorrelationAppendCommand): Promise<void> {
     const token = await correlationToken(this.#config, command.append.streamKey);
-    let target: string | WorkflowHook = token;
+    let probe = this.#probeCorrelation(token, command);
     for (let attempt = 0; attempt < 4; attempt += 1) {
+      const probed = await probe.result;
+      if (probe.leader && probed.leaderCommandAccepted) return;
       try {
-        await resumeHook(target, command);
+        await resumeHook(probed.owner, command);
         return;
       } catch (error) {
         if (!isNotFound(error)) throw error;
       }
-
-      const initialization = this.#initializeCorrelation(token, command);
-      const initialized = await initialization.result;
-      if (
-        initialization.seeded &&
-        initialized.owner.runId === initialized.candidateRunId
-      ) {
-        return;
-      }
-      target = initialized.owner;
+      probe = this.#probeCorrelation(token, command);
     }
     throw new Error(`could not publish append to correlation hook ${token}`);
   }
 
-  #initializeCorrelation(
+  #probeCorrelation(
     token: string,
     command: CorrelationAppendCommand,
-  ): CorrelationInitializationAttempt {
-    const existing = correlationInitializations.get(token);
-    if (existing !== undefined) return { seeded: false, result: existing };
+  ): CorrelationProbeAttempt {
+    const existing = correlationProbes.get(token);
+    if (existing !== undefined) return { leader: false, result: existing };
 
-    const result = this.#startCorrelation(token, command);
-    correlationInitializations.set(token, result);
+    const result = this.#probeOrStartCorrelation(token, command);
+    correlationProbes.set(token, result);
     const clear = (): void => {
-      if (correlationInitializations.get(token) === result) {
-        correlationInitializations.delete(token);
+      if (correlationProbes.get(token) === result) {
+        correlationProbes.delete(token);
       }
     };
     void result.then(clear, clear);
-    return { seeded: true, result };
+    return { leader: true, result };
   }
 
-  async #startCorrelation(
+  async #probeOrStartCorrelation(
     token: string,
     command: CorrelationAppendCommand,
-  ): Promise<CorrelationInitialization> {
+  ): Promise<CorrelationProbeResult> {
+    try {
+      return {
+        owner: await resumeHook(token, command),
+        leaderCommandAccepted: true,
+      };
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
+    }
+
     const candidate = await start(correlationWorkflow, [
       this.#config,
       command.append.streamKey,
       command,
     ]);
+    const owner = await this.#waitForHook(token);
     return {
-      candidateRunId: candidate.runId,
-      owner: await this.#waitForHook(token),
+      owner,
+      leaderCommandAccepted: owner.runId === candidate.runId,
     };
   }
 

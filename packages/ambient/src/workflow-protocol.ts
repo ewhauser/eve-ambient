@@ -1,5 +1,5 @@
 import { attentionValueBytes } from "./attention.js";
-import { hashIdempotencyInput } from "./idempotency.js";
+import { hashIdempotencyInput, type InputHash } from "./idempotency.js";
 import type { AttentionStreamAppend } from "./stream-protocol.js";
 
 /** Serializable configuration retained by one correlation Workflow run. */
@@ -59,13 +59,32 @@ export interface CorrelationOwnerConflict {
   readonly ownerRunId: string;
 }
 
+/** Hashes the immutable configuration portion of a correlation address. */
+export function correlationConfigHash(
+  config: CorrelationWorkflowConfig,
+): Promise<InputHash> {
+  return hashIdempotencyInput({
+    protocolVersion: 1,
+    ...config,
+  });
+}
+
+/** Builds a correlation hook token from a previously computed configuration hash. */
+export function correlationTokenFromConfigHash(
+  config: Pick<CorrelationWorkflowConfig, "namespace">,
+  configHash: InputHash,
+  streamKey: string,
+): string {
+  return `eve-ambient:correlation:${config.namespace}:${configHash}:${streamKey}`;
+}
+
 export async function correlationToken(
   config: CorrelationWorkflowConfig,
   streamKey: string,
 ): Promise<string> {
-  const configHash = await hashIdempotencyInput({
-    protocolVersion: 1,
-    ...config,
-  });
-  return `eve-ambient:correlation:${config.namespace}:${configHash}:${streamKey}`;
+  return correlationTokenFromConfigHash(
+    config,
+    await correlationConfigHash(config),
+    streamKey,
+  );
 }

@@ -14,14 +14,15 @@ import type {
   AmbientApplicationBackend,
   AmbientBackendBinding,
 } from "./application.js";
-import { IdempotencyConflictError } from "./idempotency.js";
+import { IdempotencyConflictError, type InputHash } from "./idempotency.js";
 import { compileAttentionStreamAppends } from "./stream-protocol.js";
 import { attentionStreamAppendFits } from "./stream-state.js";
 import type { MonitorClock } from "./types.js";
 import {
   correlationAppendInputBytes,
   correlationAppendManyBytes,
-  correlationToken,
+  correlationConfigHash,
+  correlationTokenFromConfigHash,
   type CorrelationAppendInput,
   type CorrelationAppendManyCommand,
   type CorrelationWorkflowConfig,
@@ -204,6 +205,7 @@ export function workflow(
 /** Publishes each distinct correlation to its deterministic Workflow hook. */
 export class WorkflowAttentionEngine implements AttentionEngine {
   readonly #config: CorrelationWorkflowConfig;
+  #configHash: Promise<InputHash> | undefined;
   readonly #clock: MonitorClock;
   readonly #registrationTimeoutMs: number;
   readonly #maxBranches: number;
@@ -341,7 +343,7 @@ export class WorkflowAttentionEngine implements AttentionEngine {
         }
       }
       const prepared = await Promise.all(commands.map(async (command) => {
-        const token = await correlationToken(this.#config, command.append.streamKey);
+        const token = await this.#correlationToken(command.append.streamKey);
         const queueKey = correlationQueueKey({
           token,
           registrationTimeoutMs: this.#registrationTimeoutMs,
@@ -378,6 +380,19 @@ export class WorkflowAttentionEngine implements AttentionEngine {
     } finally {
       if (!preparationsFinished) finishCorrelationPreparations(preparations);
     }
+  }
+
+  #correlationToken(streamKey: string): Promise<string> {
+    let configHash = this.#configHash;
+    if (configHash === undefined) {
+      configHash = correlationConfigHash(this.#config);
+      this.#configHash = configHash;
+      void configHash.catch(() => {
+        if (this.#configHash === configHash) this.#configHash = undefined;
+      });
+    }
+    return configHash.then((resolved) =>
+      correlationTokenFromConfigHash(this.#config, resolved, streamKey));
   }
 
   async #publishBatch(

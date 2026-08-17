@@ -18,8 +18,11 @@ import { compileAttentionStreamAppends } from "./stream-protocol.js";
 import { attentionStreamAppendFits } from "./stream-state.js";
 import type { MonitorClock } from "./types.js";
 import {
+  correlationAppendInputBytes,
+  correlationAppendManyBytes,
   correlationToken,
-  type CorrelationAppendCommand,
+  type CorrelationAppendInput,
+  type CorrelationAppendManyCommand,
   type CorrelationWorkflowConfig,
 } from "./workflow-protocol.js";
 import { correlationWorkflow } from "./workflows/correlation.js";
@@ -35,6 +38,10 @@ const DEFAULT_MAX_FANOUT_BYTES = 16 * 1_024 * 1_024;
 const DEFAULT_MAX_PREPARED_WAKE_BYTES = 1 * 1_024 * 1_024;
 const DEFAULT_MAX_PENDING_BRANCHES = 1_000;
 const DEFAULT_MAX_PENDING_BYTES = 16 * 1_024 * 1_024;
+const DEFAULT_MAX_BATCH_COMMANDS = 64;
+const DEFAULT_MAX_BATCH_BYTES = 16 * 1_024 * 1_024;
+const DEFAULT_MAX_LOCAL_PENDING_COMMANDS = 1_000;
+const DEFAULT_MAX_LOCAL_PENDING_BYTES = 64 * 1_024 * 1_024;
 const DEFAULT_MAX_CALLBACK_REQUEST_BYTES = 16 * 1_024 * 1_024;
 const DEFAULT_REGISTRATION_TIMEOUT_MS = 10_000;
 const REGISTRATION_POLL_INITIAL_DELAY_MS = 5;
@@ -42,6 +49,12 @@ const REGISTRATION_POLL_MAX_DELAY_MS = 50;
 const MAX_CACHED_CORRELATION_HOOKS = 1_024;
 const CACHED_CORRELATION_HOOK_TTL_MS = 10 * 60_000;
 const MAX_CORRELATION_PROBE_ATTEMPTS = 4;
+/** One timer turn collects async fan-outs without imposing a multi-millisecond delay. */
+const BATCH_FLUSH_WINDOW_MS = 2;
+const EMPTY_APPEND_MANY_BYTES = correlationAppendManyBytes({
+  kind: "append-many",
+  commands: [],
+});
 
 type WorkflowHook = Awaited<ReturnType<typeof getHookByToken>>;
 
@@ -60,11 +73,48 @@ interface CachedCorrelationHook {
   readonly expiresAt: number;
 }
 
-/** Process-local collapse of the initial probe and any cold start for one hook token. */
+/** Process-local collapse of probes within one operational publication lane. */
 const correlationProbes = new Map<string, Promise<CorrelationProbeResult>>();
 
 /** Process-local hot set shared by every engine using the active Workflow World. */
 const cachedCorrelationHooks = new Map<string, CachedCorrelationHook>();
+
+interface QueuedCorrelationAppend {
+  readonly input: CorrelationAppendInput;
+  readonly branchCount: number;
+  readonly branchBytes: number;
+  readonly serializedBytes: number;
+  readonly publish: (command: CorrelationAppendManyCommand) => Promise<void>;
+  readonly resolve: () => void;
+  readonly reject: (error: unknown) => void;
+  settled: boolean;
+}
+
+interface CorrelationPublishQueue {
+  readonly key: string;
+  readonly token: string;
+  readonly config: CorrelationWorkflowConfig;
+  readonly maxPendingCommands: number;
+  readonly maxPendingBytes: number;
+  readonly queued: QueuedCorrelationAppend[];
+  pendingCommands: number;
+  pendingBytes: number;
+  scheduled: boolean;
+  flushing: boolean;
+}
+
+/** Process-local queues are isolated by hook token and operational settings. */
+const correlationPublishQueues = new Map<string, CorrelationPublishQueue>();
+
+/** Retryable rejection when one process already holds its bounded local backlog. */
+export class WorkflowAdmissionBackpressureError extends Error {
+  readonly retryable = true;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkflowAdmissionBackpressureError";
+  }
+}
 
 export interface WorkflowAttentionEngineOptions {
   /** Public base URL at which this application's callback handler is mounted. */
@@ -85,6 +135,14 @@ export interface WorkflowAttentionEngineOptions {
   readonly maxPendingBranches?: number | undefined;
   /** Maximum full branch bytes applied to one correlation reducer at once. */
   readonly maxPendingBytes?: number | undefined;
+  /** Maximum independently accepted appends in one Workflow hook command. */
+  readonly maxBatchCommands?: number | undefined;
+  /** Maximum canonical serialized bytes in one Workflow hook command. */
+  readonly maxBatchBytes?: number | undefined;
+  /** Maximum accepted appends queued or publishing per process-local lane. */
+  readonly maxLocalPendingCommands?: number | undefined;
+  /** Maximum canonical append bytes queued or publishing per process-local lane. */
+  readonly maxLocalPendingBytes?: number | undefined;
   readonly registrationTimeoutMs?: number | undefined;
   readonly clock?: MonitorClock | undefined;
 }
@@ -130,6 +188,8 @@ export class WorkflowAttentionEngine implements AttentionEngine {
   readonly #registrationTimeoutMs: number;
   readonly #maxBranches: number;
   readonly #maxFanoutBytes: number;
+  readonly #maxLocalPendingCommands: number;
+  readonly #maxLocalPendingBytes: number;
 
   constructor(options: WorkflowAttentionEngineOptions) {
     if (options === null || typeof options !== "object") {
@@ -168,6 +228,14 @@ export class WorkflowAttentionEngine implements AttentionEngine {
         options.maxPendingBytes ?? DEFAULT_MAX_PENDING_BYTES,
         "maxPendingBytes",
       ),
+      maxBatchCommands: positiveInteger(
+        options.maxBatchCommands ?? DEFAULT_MAX_BATCH_COMMANDS,
+        "maxBatchCommands",
+      ),
+      maxBatchBytes: positiveInteger(
+        options.maxBatchBytes ?? DEFAULT_MAX_BATCH_BYTES,
+        "maxBatchBytes",
+      ),
     };
     if (this.#config.preparePath === this.#config.deliverPath) {
       throw new TypeError("preparePath and deliverPath must be different");
@@ -184,6 +252,14 @@ export class WorkflowAttentionEngine implements AttentionEngine {
     this.#maxFanoutBytes = positiveInteger(
       options.maxFanoutBytes ?? DEFAULT_MAX_FANOUT_BYTES,
       "maxFanoutBytes",
+    );
+    this.#maxLocalPendingCommands = positiveInteger(
+      options.maxLocalPendingCommands ?? DEFAULT_MAX_LOCAL_PENDING_COMMANDS,
+      "maxLocalPendingCommands",
+    );
+    this.#maxLocalPendingBytes = positiveInteger(
+      options.maxLocalPendingBytes ?? DEFAULT_MAX_LOCAL_PENDING_BYTES,
+      "maxLocalPendingBytes",
     );
   }
 
@@ -211,11 +287,46 @@ export class WorkflowAttentionEngine implements AttentionEngine {
         );
       }
     }
-    await Promise.all(appends.map((append) => this.#publish({
-      kind: "append",
+    const commands = appends.map((append): CorrelationAppendInput => ({
       append,
       acceptedAt,
-    })));
+    }));
+    for (const command of commands) {
+      const serializedBytes = correlationAppendManyBytes({
+        kind: "append-many",
+        commands: [command],
+      });
+      if (serializedBytes > this.#config.maxBatchBytes) {
+        throw new AttentionCapacityError(
+          `one correlation command exceeds the serialized batch limit of ` +
+            `${this.#config.maxBatchBytes} bytes`,
+        );
+      }
+      if (correlationAppendInputBytes(command) > this.#maxLocalPendingBytes) {
+        throw new AttentionCapacityError(
+          `one correlation command exceeds the process-local pending limit of ` +
+            `${this.#maxLocalPendingBytes} bytes`,
+        );
+      }
+    }
+    await Promise.all(commands.map(async (command) => {
+      const token = await correlationToken(this.#config, command.append.streamKey);
+      const queueKey = correlationQueueKey({
+        token,
+        registrationTimeoutMs: this.#registrationTimeoutMs,
+        maxLocalPendingCommands: this.#maxLocalPendingCommands,
+        maxLocalPendingBytes: this.#maxLocalPendingBytes,
+      });
+      await enqueueCorrelationAppend({
+        queueKey,
+        token,
+        config: this.#config,
+        maxPendingCommands: this.#maxLocalPendingCommands,
+        maxPendingBytes: this.#maxLocalPendingBytes,
+        input: command,
+        publish: (batch) => this.#publishBatch(queueKey, token, batch),
+      });
+    }));
     return Object.freeze({
       eventKey: fanout.eventKey,
       occurrenceKey: fanout.occurrenceKey,
@@ -225,8 +336,11 @@ export class WorkflowAttentionEngine implements AttentionEngine {
     });
   }
 
-  async #publish(command: CorrelationAppendCommand): Promise<void> {
-    const token = await correlationToken(this.#config, command.append.streamKey);
+  async #publishBatch(
+    publicationLaneKey: string,
+    token: string,
+    command: CorrelationAppendManyCommand,
+  ): Promise<void> {
     const cached = cachedCorrelationHook(token);
     if (cached !== undefined) {
       try {
@@ -239,7 +353,7 @@ export class WorkflowAttentionEngine implements AttentionEngine {
       }
     }
 
-    let probe = this.#probeCorrelation(token, command);
+    let probe = this.#probeCorrelation(publicationLaneKey, token, command);
     for (let attempt = 0; attempt < MAX_CORRELATION_PROBE_ATTEMPTS; attempt += 1) {
       const probed = await probe.result;
       cacheCorrelationHook(token, probed.owner);
@@ -252,23 +366,24 @@ export class WorkflowAttentionEngine implements AttentionEngine {
         if (!isNotFound(error)) throw error;
         evictCachedCorrelationHook(token, probed.owner);
       }
-      probe = this.#probeCorrelation(token, command);
+      probe = this.#probeCorrelation(publicationLaneKey, token, command);
     }
     throw new Error(`could not publish append to correlation hook ${token}`);
   }
 
   #probeCorrelation(
+    publicationLaneKey: string,
     token: string,
-    command: CorrelationAppendCommand,
+    command: CorrelationAppendManyCommand,
   ): CorrelationProbeAttempt {
-    const existing = correlationProbes.get(token);
+    const existing = correlationProbes.get(publicationLaneKey);
     if (existing !== undefined) return { leader: false, result: existing };
 
     const result = this.#probeOrStartCorrelation(token, command);
-    correlationProbes.set(token, result);
+    correlationProbes.set(publicationLaneKey, result);
     const clear = (): void => {
-      if (correlationProbes.get(token) === result) {
-        correlationProbes.delete(token);
+      if (correlationProbes.get(publicationLaneKey) === result) {
+        correlationProbes.delete(publicationLaneKey);
       }
     };
     void result.then(clear, clear);
@@ -277,7 +392,7 @@ export class WorkflowAttentionEngine implements AttentionEngine {
 
   async #probeOrStartCorrelation(
     token: string,
-    command: CorrelationAppendCommand,
+    command: CorrelationAppendManyCommand,
   ): Promise<CorrelationProbeResult> {
     try {
       return {
@@ -287,10 +402,9 @@ export class WorkflowAttentionEngine implements AttentionEngine {
     } catch (error) {
       if (!isNotFound(error)) throw error;
     }
-
     const candidate = await start(correlationWorkflow, [
       this.#config,
-      command.append.streamKey,
+      command.commands[0]!.append.streamKey,
       command,
     ]);
     const owner = await this.#waitForHook(token);
@@ -323,6 +437,200 @@ export class WorkflowAttentionEngine implements AttentionEngine {
       delayMs = Math.min(delayMs * 2, REGISTRATION_POLL_MAX_DELAY_MS);
     }
   }
+}
+
+function enqueueCorrelationAppend(input: {
+  readonly queueKey: string;
+  readonly token: string;
+  readonly config: CorrelationWorkflowConfig;
+  readonly maxPendingCommands: number;
+  readonly maxPendingBytes: number;
+  readonly input: CorrelationAppendInput;
+  readonly publish: (command: CorrelationAppendManyCommand) => Promise<void>;
+}): Promise<void> {
+  let queue = correlationPublishQueues.get(input.queueKey);
+  if (queue === undefined) {
+    queue = {
+      key: input.queueKey,
+      token: input.token,
+      config: input.config,
+      maxPendingCommands: input.maxPendingCommands,
+      maxPendingBytes: input.maxPendingBytes,
+      queued: [],
+      pendingCommands: 0,
+      pendingBytes: 0,
+      scheduled: false,
+      flushing: false,
+    };
+    correlationPublishQueues.set(input.queueKey, queue);
+  }
+  const branchBytes = input.input.append.branches.reduce(
+    (total, branch) => total + attentionValueBytes(branch),
+    0,
+  );
+  const serializedBytes = correlationAppendInputBytes(input.input);
+  if (
+    queue.pendingCommands + 1 > queue.maxPendingCommands ||
+    queue.pendingBytes + serializedBytes > queue.maxPendingBytes
+  ) {
+    return Promise.reject(new WorkflowAdmissionBackpressureError(
+      `process-local correlation queue ${input.token} exceeds ` +
+        `${queue.maxPendingCommands} commands or ${queue.maxPendingBytes} bytes`,
+    ));
+  }
+  queue.pendingCommands += 1;
+  queue.pendingBytes += serializedBytes;
+  const result = new Promise<void>((resolve, reject) => {
+    queue!.queued.push({
+      input: input.input,
+      branchCount: input.input.append.branches.length,
+      branchBytes,
+      serializedBytes,
+      publish: input.publish,
+      resolve,
+      reject,
+      settled: false,
+    });
+  });
+  scheduleCorrelationFlush(queue);
+  return result;
+}
+
+function scheduleCorrelationFlush(queue: CorrelationPublishQueue): void {
+  if (queue.scheduled) return;
+  queue.scheduled = true;
+  setTimeout(() => {
+    queue.scheduled = false;
+    void flushCorrelationQueue(queue);
+  }, BATCH_FLUSH_WINDOW_MS);
+}
+
+async function flushCorrelationQueue(queue: CorrelationPublishQueue): Promise<void> {
+  if (queue.flushing) return;
+  if (queue.queued.length === 0) {
+    if (correlationPublishQueues.get(queue.key) === queue) {
+      correlationPublishQueues.delete(queue.key);
+    }
+    return;
+  }
+
+  queue.flushing = true;
+  const pending = queue.queued.splice(0);
+  try {
+    const chunks = splitCorrelationChunks(pending, queue.config);
+    for (let index = 0; index < chunks.length; index += 1) {
+      const chunk = chunks[index]!;
+      const command: CorrelationAppendManyCommand = Object.freeze({
+        kind: "append-many",
+        commands: Object.freeze(chunk.map((entry) => entry.input)),
+      });
+      try {
+        await chunk[0]!.publish(command);
+        for (const entry of chunk) settleCorrelationAppend(queue, entry, true);
+      } catch (error) {
+        for (const entry of chunk) settleCorrelationAppend(queue, entry, false, error);
+        for (const remaining of chunks.slice(index + 1)) {
+          for (const entry of remaining) {
+            settleCorrelationAppend(queue, entry, false, error);
+          }
+        }
+        break;
+      }
+    }
+  } catch (error) {
+    for (const entry of pending) settleCorrelationAppend(queue, entry, false, error);
+  } finally {
+    queue.flushing = false;
+    if (queue.queued.length > 0) {
+      scheduleCorrelationFlush(queue);
+    } else if (!queue.scheduled && correlationPublishQueues.get(queue.key) === queue) {
+      correlationPublishQueues.delete(queue.key);
+    }
+  }
+}
+
+function settleCorrelationAppend(
+  queue: CorrelationPublishQueue,
+  entry: QueuedCorrelationAppend,
+  accepted: boolean,
+  error?: unknown,
+): void {
+  if (entry.settled) return;
+  entry.settled = true;
+  queue.pendingCommands -= 1;
+  queue.pendingBytes -= entry.serializedBytes;
+  if (accepted) {
+    entry.resolve();
+  } else {
+    entry.reject(error);
+  }
+}
+
+function correlationQueueKey(input: {
+  readonly token: string;
+  readonly registrationTimeoutMs: number;
+  readonly maxLocalPendingCommands: number;
+  readonly maxLocalPendingBytes: number;
+}): string {
+  return JSON.stringify([
+    input.token,
+    input.registrationTimeoutMs,
+    input.maxLocalPendingCommands,
+    input.maxLocalPendingBytes,
+  ]);
+}
+
+function splitCorrelationChunks(
+  pending: readonly QueuedCorrelationAppend[],
+  config: CorrelationWorkflowConfig,
+): readonly (readonly QueuedCorrelationAppend[])[] {
+  const chunks: QueuedCorrelationAppend[][] = [];
+  let chunk: QueuedCorrelationAppend[] = [];
+  let branchCount = 0;
+  let branchBytes = 0;
+  let serializedInputBytes = 0;
+
+  const flush = (): void => {
+    if (chunk.length === 0) return;
+    chunks.push(chunk);
+    chunk = [];
+    branchCount = 0;
+    branchBytes = 0;
+    serializedInputBytes = 0;
+  };
+
+  for (const entry of pending) {
+    const candidateCount = chunk.length + 1;
+    const candidateSerializedBytes = populatedAppendManyBytes(
+      serializedInputBytes + entry.serializedBytes,
+      candidateCount,
+    );
+    const exceeds =
+      candidateCount > config.maxBatchCommands ||
+      candidateSerializedBytes > config.maxBatchBytes ||
+      branchCount + entry.branchCount > config.maxPendingBranches ||
+      branchBytes + entry.branchBytes > config.maxPendingBytes;
+    if (exceeds) flush();
+
+    chunk.push(entry);
+    branchCount += entry.branchCount;
+    branchBytes += entry.branchBytes;
+    serializedInputBytes += entry.serializedBytes;
+    if (
+      chunk.length > config.maxBatchCommands ||
+      populatedAppendManyBytes(serializedInputBytes, chunk.length) > config.maxBatchBytes ||
+      branchCount > config.maxPendingBranches ||
+      branchBytes > config.maxPendingBytes
+    ) {
+      throw new AttentionCapacityError("one correlation command cannot fit a bounded batch");
+    }
+  }
+  flush();
+  return chunks;
+}
+
+function populatedAppendManyBytes(serializedInputBytes: number, count: number): number {
+  return EMPTY_APPEND_MANY_BYTES + serializedInputBytes + count - 1;
 }
 
 export interface WorkflowAttentionCallbackHandlerOptions {

@@ -7,8 +7,8 @@ It verifies that:
 
 - a deterministic hook has one active owner under concurrent cold starts;
 - every transport-accepted append reaches that owner;
-- a 20-publisher in-flight cold burst creates one run and delivers 19 follower
-  resumes after one failed leader probe;
+- a 20-publisher same-correlation cold burst creates one run seeded with one
+  bounded 20-command batch after one failed token probe;
 - warm admission reuses the resolved owner without a hook-token lookup and
   matches the measured standard-World call count;
 - prepare and delivery retries preserve the exact batch and `wakeKey`; and

@@ -62,6 +62,12 @@ stops consuming the durable hook while at capacity, leaving overflow queued in
 Workflow until due work drains state. It does not rotate automatically, so the
 Workflow event history continues to grow while that correlation remains active.
 
+The Workflow publisher also bounds each process-local operational lane at
+1,000 queued-or-publishing appends and 64 MiB of canonical append bytes by
+default. Overflow rejects with retryable
+`WorkflowAdmissionBackpressureError`; retry the original stable input after
+capacity becomes available.
+
 Immutable Workflow options are fingerprinted into correlation ownership.
 Changing them starts a new owner for new events and does not migrate the old
 owner's reducer state. Final effects must deduplicate the stable `wakeKey`

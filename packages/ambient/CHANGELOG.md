@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.1](https://github.com/ewhauser/eve-ambient/compare/v0.6.0...v0.6.1) (2026-08-17)
+
+
+### Performance Improvements
+
+* **ambient:** batch same-correlation admissions ([#41](https://github.com/ewhauser/eve-ambient/issues/41)) ([f62489b](https://github.com/ewhauser/eve-ambient/commit/f62489baecabcc0e64825a10c1838d3f7c0d8f3a))
+* **ambient:** cache resolved workflow hook owners ([#39](https://github.com/ewhauser/eve-ambient/issues/39)) ([453c776](https://github.com/ewhauser/eve-ambient/commit/453c77607fce567ce58e6707a18f4e40af89502d))
+* **ambient:** coalesce cold correlation initialization ([#37](https://github.com/ewhauser/eve-ambient/issues/37)) ([f332c97](https://github.com/ewhauser/eve-ambient/commit/f332c97a929ecd79e4ea841fd964597466211977))
+* **ambient:** coalesce initial correlation probes ([#40](https://github.com/ewhauser/eve-ambient/issues/40)) ([7aec0e8](https://github.com/ewhauser/eve-ambient/commit/7aec0e80bdf836173d1d35e56ab470a471febc98))
+* **ambient:** memoize correlation config hashing ([#42](https://github.com/ewhauser/eve-ambient/issues/42)) ([1c8e33e](https://github.com/ewhauser/eve-ambient/commit/1c8e33e28c918ba17d3a78e8c0db4e017a0a3e10))
+
 ## [0.6.0](https://github.com/ewhauser/eve-ambient/compare/v0.5.0...v0.6.0) (2026-08-16)
 
 

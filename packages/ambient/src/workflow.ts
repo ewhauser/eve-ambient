@@ -7,6 +7,7 @@ import {
   type AttentionCallbacks,
   type AttentionEngine,
   type FrozenAttentionBatch,
+  type FullAttentionBranch,
   type PreparedAttentionWake,
 } from "./attention.js";
 import type {
@@ -49,6 +50,8 @@ const REGISTRATION_POLL_MAX_DELAY_MS = 50;
 const MAX_CACHED_CORRELATION_HOOKS = 1_024;
 const CACHED_CORRELATION_HOOK_TTL_MS = 10 * 60_000;
 const MAX_CORRELATION_PROBE_ATTEMPTS = 4;
+/** A ready append cannot wait indefinitely for slower concurrent preparation. */
+const BATCH_PREPARATION_MAX_WAIT_MS = 50;
 /** A small bounded timer window collects async fan-outs with 5 ms nominal latency. */
 const BATCH_FLUSH_WINDOW_MS = 5;
 const EMPTY_APPEND_MANY_BYTES = correlationAppendManyBytes({
@@ -103,8 +106,25 @@ interface CorrelationPublishQueue {
   flushing: boolean;
 }
 
+interface CorrelationPreparationGroup {
+  pendingAccepts: number;
+  readonly waitingQueues: Set<CorrelationPublishQueue>;
+  releaseTimer: ReturnType<typeof setTimeout> | undefined;
+  released: boolean;
+}
+
+interface CorrelationPreparationOptions {
+  readonly config: CorrelationWorkflowConfig;
+  readonly registrationTimeoutMs: number;
+  readonly maxLocalPendingCommands: number;
+  readonly maxLocalPendingBytes: number;
+}
+
 /** Process-local queues are isolated by hook token and operational settings. */
 const correlationPublishQueues = new Map<string, CorrelationPublishQueue>();
+
+/** Concurrent accept preparation is isolated by the complete raw correlation address. */
+const correlationPreparations = new Map<string, CorrelationPreparationGroup>();
 
 /** Retryable rejection when one process already holds its bounded local backlog. */
 export class WorkflowAdmissionBackpressureError extends Error {
@@ -264,76 +284,100 @@ export class WorkflowAttentionEngine implements AttentionEngine {
   }
 
   async accept(input: AcceptedFanout): Promise<AttentionAcceptanceReceipt> {
-    const fanout = await validateAcceptedFanout(input);
-    if (fanout.branches.length > this.#maxBranches) {
-      throw new AttentionCapacityError(
-        `accepted fan-out exceeds the maximum of ${this.#maxBranches} branches`,
-      );
-    }
-    if (attentionValueBytes(fanout) > this.#maxFanoutBytes) {
-      throw new AttentionCapacityError(
-        `accepted fan-out exceeds the maximum of ${this.#maxFanoutBytes} bytes`,
-      );
-    }
+    const preparationOptions = {
+      config: this.#config,
+      registrationTimeoutMs: this.#registrationTimeoutMs,
+      maxLocalPendingCommands: this.#maxLocalPendingCommands,
+      maxLocalPendingBytes: this.#maxLocalPendingBytes,
+    } satisfies CorrelationPreparationOptions;
+    const preparations = beginCorrelationPreparations(
+      correlationPreparationKeys(input, preparationOptions),
+    );
+    let preparationsFinished = false;
+    try {
+      const fanout = await validateAcceptedFanout(input);
+      if (fanout.branches.length > this.#maxBranches) {
+        throw new AttentionCapacityError(
+          `accepted fan-out exceeds the maximum of ${this.#maxBranches} branches`,
+        );
+      }
+      if (attentionValueBytes(fanout) > this.#maxFanoutBytes) {
+        throw new AttentionCapacityError(
+          `accepted fan-out exceeds the maximum of ${this.#maxFanoutBytes} bytes`,
+        );
+      }
 
-    const acceptedAt = this.#clock.now().toISOString();
-    const appends = await compileAttentionStreamAppends(fanout);
-    for (const append of appends) {
-      if (!attentionStreamAppendFits(undefined, append, this.#config)) {
-        throw new AttentionCapacityError(
-          `one correlation append exceeds the reducer limit of ` +
-            `${this.#config.maxPendingBranches} branches or ` +
-            `${this.#config.maxPendingBytes} bytes`,
-        );
+      const acceptedAt = this.#clock.now().toISOString();
+      const appends = await compileAttentionStreamAppends(fanout);
+      for (const append of appends) {
+        if (!attentionStreamAppendFits(undefined, append, this.#config)) {
+          throw new AttentionCapacityError(
+            `one correlation append exceeds the reducer limit of ` +
+              `${this.#config.maxPendingBranches} branches or ` +
+              `${this.#config.maxPendingBytes} bytes`,
+          );
+        }
       }
+      const commands = appends.map((append): CorrelationAppendInput => ({
+        append,
+        acceptedAt,
+      }));
+      for (const command of commands) {
+        const serializedBytes = correlationAppendManyBytes({
+          kind: "append-many",
+          commands: [command],
+        });
+        if (serializedBytes > this.#config.maxBatchBytes) {
+          throw new AttentionCapacityError(
+            `one correlation command exceeds the serialized batch limit of ` +
+              `${this.#config.maxBatchBytes} bytes`,
+          );
+        }
+        if (correlationAppendInputBytes(command) > this.#maxLocalPendingBytes) {
+          throw new AttentionCapacityError(
+            `one correlation command exceeds the process-local pending limit of ` +
+              `${this.#maxLocalPendingBytes} bytes`,
+          );
+        }
+      }
+      const prepared = await Promise.all(commands.map(async (command) => {
+        const token = await correlationToken(this.#config, command.append.streamKey);
+        const queueKey = correlationQueueKey({
+          token,
+          registrationTimeoutMs: this.#registrationTimeoutMs,
+          maxLocalPendingCommands: this.#maxLocalPendingCommands,
+          maxLocalPendingBytes: this.#maxLocalPendingBytes,
+        });
+        const preparationKey = correlationPreparationKey(
+          command.append.branches[0]!,
+          preparationOptions,
+        );
+        return { command, token, queueKey, preparation: preparations.get(preparationKey) };
+      }));
+      const publications = prepared.map(({ command, token, queueKey, preparation }) =>
+        enqueueCorrelationAppend({
+          queueKey,
+          token,
+          config: this.#config,
+          maxPendingCommands: this.#maxLocalPendingCommands,
+          maxPendingBytes: this.#maxLocalPendingBytes,
+          input: command,
+          publish: (batch) => this.#publishBatch(queueKey, token, batch),
+          preparation,
+        }));
+      finishCorrelationPreparations(preparations);
+      preparationsFinished = true;
+      await Promise.all(publications);
+      return Object.freeze({
+        eventKey: fanout.eventKey,
+        occurrenceKey: fanout.occurrenceKey,
+        inputHash: fanout.inputHash,
+        branchKeys: Object.freeze(fanout.branches.map((branch) => branch.branchKey)),
+        acceptedAt,
+      });
+    } finally {
+      if (!preparationsFinished) finishCorrelationPreparations(preparations);
     }
-    const commands = appends.map((append): CorrelationAppendInput => ({
-      append,
-      acceptedAt,
-    }));
-    for (const command of commands) {
-      const serializedBytes = correlationAppendManyBytes({
-        kind: "append-many",
-        commands: [command],
-      });
-      if (serializedBytes > this.#config.maxBatchBytes) {
-        throw new AttentionCapacityError(
-          `one correlation command exceeds the serialized batch limit of ` +
-            `${this.#config.maxBatchBytes} bytes`,
-        );
-      }
-      if (correlationAppendInputBytes(command) > this.#maxLocalPendingBytes) {
-        throw new AttentionCapacityError(
-          `one correlation command exceeds the process-local pending limit of ` +
-            `${this.#maxLocalPendingBytes} bytes`,
-        );
-      }
-    }
-    await Promise.all(commands.map(async (command) => {
-      const token = await correlationToken(this.#config, command.append.streamKey);
-      const queueKey = correlationQueueKey({
-        token,
-        registrationTimeoutMs: this.#registrationTimeoutMs,
-        maxLocalPendingCommands: this.#maxLocalPendingCommands,
-        maxLocalPendingBytes: this.#maxLocalPendingBytes,
-      });
-      await enqueueCorrelationAppend({
-        queueKey,
-        token,
-        config: this.#config,
-        maxPendingCommands: this.#maxLocalPendingCommands,
-        maxPendingBytes: this.#maxLocalPendingBytes,
-        input: command,
-        publish: (batch) => this.#publishBatch(queueKey, token, batch),
-      });
-    }));
-    return Object.freeze({
-      eventKey: fanout.eventKey,
-      occurrenceKey: fanout.occurrenceKey,
-      inputHash: fanout.inputHash,
-      branchKeys: Object.freeze(fanout.branches.map((branch) => branch.branchKey)),
-      acceptedAt,
-    });
   }
 
   async #publishBatch(
@@ -447,6 +491,7 @@ function enqueueCorrelationAppend(input: {
   readonly maxPendingBytes: number;
   readonly input: CorrelationAppendInput;
   readonly publish: (command: CorrelationAppendManyCommand) => Promise<void>;
+  readonly preparation: CorrelationPreparationGroup | undefined;
 }): Promise<void> {
   let queue = correlationPublishQueues.get(input.queueKey);
   if (queue === undefined) {
@@ -492,8 +537,24 @@ function enqueueCorrelationAppend(input: {
       settled: false,
     });
   });
-  scheduleCorrelationFlush(queue);
+  scheduleCorrelationFlushAfterPreparation(queue, input.preparation);
   return result;
+}
+
+function scheduleCorrelationFlushAfterPreparation(
+  queue: CorrelationPublishQueue,
+  preparation: CorrelationPreparationGroup | undefined,
+): void {
+  if (preparation === undefined || preparation.released) {
+    scheduleCorrelationFlush(queue);
+    return;
+  }
+  preparation.waitingQueues.add(queue);
+  if (preparation.releaseTimer !== undefined) return;
+  preparation.releaseTimer = setTimeout(() => {
+    preparation.releaseTimer = undefined;
+    releaseCorrelationPreparation(preparation);
+  }, BATCH_PREPARATION_MAX_WAIT_MS);
 }
 
 function scheduleCorrelationFlush(queue: CorrelationPublishQueue): void {
@@ -564,6 +625,100 @@ function settleCorrelationAppend(
   } else {
     entry.reject(error);
   }
+}
+
+function correlationPreparationKeys(
+  input: AcceptedFanout,
+  options: CorrelationPreparationOptions,
+): readonly string[] {
+  try {
+    if (!Array.isArray(input.branches)) return [];
+    return [...new Set(input.branches.map((branch) =>
+      correlationPreparationKey(branch, options)))];
+  } catch {
+    // Validation remains authoritative; malformed inputs simply skip this optimization.
+    return [];
+  }
+}
+
+function correlationPreparationKey(
+  branch: FullAttentionBranch,
+  options: CorrelationPreparationOptions,
+): string {
+  const { config } = options;
+  return JSON.stringify([
+    config.namespace,
+    config.callbackUrl,
+    config.callbackSecretEnv,
+    config.preparePath,
+    config.deliverPath,
+    config.maxRecentMessages,
+    config.claimLeaseMs,
+    config.retryDelayMs,
+    config.maxAttempts,
+    config.maxPreparedWakeBytes,
+    config.maxPendingBranches,
+    config.maxPendingBytes,
+    config.maxBatchCommands,
+    config.maxBatchBytes,
+    options.registrationTimeoutMs,
+    options.maxLocalPendingCommands,
+    options.maxLocalPendingBytes,
+    branch.applicationId,
+    branch.tenantId,
+    branch.event.source.channelId,
+    branch.event.source.installationId,
+    branch.partitionKey,
+    branch.monitorId,
+    branch.definitionVersion,
+    branch.correlationKey,
+  ]);
+}
+
+function beginCorrelationPreparations(
+  keys: readonly string[],
+): ReadonlyMap<string, CorrelationPreparationGroup> {
+  const preparations = new Map<string, CorrelationPreparationGroup>();
+  for (const key of keys) {
+    let preparation = correlationPreparations.get(key);
+    if (preparation === undefined || preparation.released) {
+      preparation = {
+        pendingAccepts: 0,
+        waitingQueues: new Set(),
+        releaseTimer: undefined,
+        released: false,
+      };
+      correlationPreparations.set(key, preparation);
+    }
+    preparation.pendingAccepts += 1;
+    preparations.set(key, preparation);
+  }
+  return preparations;
+}
+
+function finishCorrelationPreparations(
+  preparations: ReadonlyMap<string, CorrelationPreparationGroup>,
+): void {
+  for (const [key, preparation] of preparations) {
+    preparation.pendingAccepts -= 1;
+    if (preparation.pendingAccepts > 0) continue;
+    if (correlationPreparations.get(key) === preparation) {
+      correlationPreparations.delete(key);
+    }
+    if (preparation.releaseTimer !== undefined) {
+      clearTimeout(preparation.releaseTimer);
+      preparation.releaseTimer = undefined;
+    }
+    releaseCorrelationPreparation(preparation);
+  }
+}
+
+function releaseCorrelationPreparation(preparation: CorrelationPreparationGroup): void {
+  if (preparation.released) return;
+  preparation.released = true;
+  const queues = [...preparation.waitingQueues];
+  preparation.waitingQueues.clear();
+  for (const queue of queues) scheduleCorrelationFlush(queue);
 }
 
 function correlationQueueKey(input: {

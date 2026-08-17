@@ -63,6 +63,74 @@ describe("Workflow attention admission", () => {
     }
   });
 
+  it("coalesces arrivals whose same-correlation preparation finishes apart", async () => {
+    workflowApi.resumeHook.mockResolvedValue(undefined);
+    const inputs = await fanouts("staggered-preparation", 2);
+    const preparationGate = deferred<void>();
+    const preparationBlocked = deferred<void>();
+    const digest = crypto.subtle.digest.bind(crypto.subtle);
+    let blockedOneDigest = false;
+    vi.spyOn(crypto.subtle, "digest").mockImplementation((algorithm, data) => {
+      if (blockedOneDigest) return digest(algorithm, data);
+      blockedOneDigest = true;
+      preparationBlocked.resolve();
+      return preparationGate.promise.then(() => digest(algorithm, data));
+    });
+    const shared = engine("staggered-preparation");
+
+    const accepted = inputs.map((input) => shared.accept(input));
+    await preparationBlocked.promise;
+    setTimeout(() => preparationGate.resolve(), 8);
+    await Promise.all(accepted);
+
+    expect(workflowApi.resumeHook).toHaveBeenCalledTimes(1);
+    expect(workflowApi.resumeHook.mock.calls[0]?.[1].commands).toHaveLength(2);
+  });
+
+  it("bounds waits for a stalled same-correlation preparation", async () => {
+    workflowApi.resumeHook.mockResolvedValue(undefined);
+    const inputs = await fanouts("stalled-preparation", 2);
+    const preparationGate = deferred<void>();
+    const preparationBlocked = deferred<void>();
+    const digest = crypto.subtle.digest.bind(crypto.subtle);
+    let blockedOneDigest = false;
+    vi.spyOn(crypto.subtle, "digest").mockImplementation((algorithm, data) => {
+      if (blockedOneDigest) return digest(algorithm, data);
+      blockedOneDigest = true;
+      preparationBlocked.resolve();
+      return preparationGate.promise.then(() => digest(algorithm, data));
+    });
+    const shared = engine("stalled-preparation");
+
+    const accepted = inputs.map((input) => shared.accept(input));
+    await preparationBlocked.promise;
+    await vi.waitFor(() => expect(workflowApi.resumeHook).toHaveBeenCalledTimes(1));
+    expect(workflowApi.resumeHook.mock.calls[0]?.[1].commands).toHaveLength(1);
+    preparationGate.resolve();
+    await Promise.all(accepted);
+
+    expect(workflowApi.resumeHook).toHaveBeenCalledTimes(2);
+    expect(workflowApi.resumeHook.mock.calls[1]?.[1].commands).toHaveLength(1);
+  });
+
+  it("releases a same-correlation cohort when one preparation rejects", async () => {
+    workflowApi.resumeHook.mockResolvedValue(undefined);
+    const input = await fanout("rejected-preparation");
+    const invalid = {
+      ...input,
+      inputHash: `eve:input:v1:${"0".repeat(64)}`,
+    } as AcceptedFanout;
+    const shared = engine("rejected-preparation");
+
+    const accepted = shared.accept(input);
+    const rejected = shared.accept(invalid);
+
+    await expect(rejected).rejects.toThrow();
+    await accepted;
+    expect(workflowApi.resumeHook).toHaveBeenCalledTimes(1);
+    expect(workflowApi.resumeHook.mock.calls[0]?.[1].commands).toHaveLength(1);
+  });
+
   it("keeps independent correlation tokens in independent batches", async () => {
     workflowApi.resumeHook.mockResolvedValue(undefined);
     const shared = engine("independent");

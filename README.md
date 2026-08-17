@@ -377,18 +377,24 @@ cold first chunk         -> 1 failed resumeHook() + 1 seeded start() + lookups
 ```
 
 Multiple matching rules that share a correlation are grouped into the same
-append. Concurrent appends with the same complete hook token are then batched
-only within the admitting process when their registration timeout and local
-backpressure limits also match. Different tokens, operational lanes, and
-processes never share a batch. The hook protocol accepts only `append-many`;
-this is a hard command-shape cutover with no legacy decoder.
+append. Concurrent `accept()` calls synchronously register a process-local
+preparation cohort from the complete correlation-token preimage and matching
+operational settings. The cohort retains only counts and ready queue references;
+validated commands are still batched exclusively by their final hook token.
+Different tokens, operational lanes, and processes never share a batch. The hook
+protocol accepts only `append-many`; this is a hard command-shape cutover with no
+legacy decoder.
 
 The 5 ms timer window was selected in the checked-in local integration after a
 2 ms window split the 20-event cold burst under CI and full-suite load. Repeated
 5 ms standalone and full-check runs each produced one warm resume and one seeded
-cold start.
-A lone event therefore waits for one nominal 5 ms window before publication;
-event-loop load can delay the timer further. The defaults cap a command at 64
+cold start. Once all already-registered same-lane accepts finish preparation,
+the queue starts that window. A ready append escapes a stalled peer after 50 ms
+and starts its own flush, so no preparation cohort can strand it. A 10 ms escape
+split a local 20-event cold burst; 50 ms produced the target across three
+consecutive runs. A lone event finishes its cohort immediately and therefore
+waits for one nominal 5 ms window; event-loop load can delay timers further. The
+defaults cap a command at 64
 appends and 16 MiB of canonical serialized bytes, and chunking also respects
 the reducer's pending-branch and pending-byte limits. Entries retain their
 process-local queue-enrollment order. Chunks publish serially; if one fails,

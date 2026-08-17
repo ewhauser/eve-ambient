@@ -22,12 +22,14 @@ migration path, or dual protocol.
 ```text
 accept(fanout)
   |
+  +-> register its exact correlation preimages in process-local preparation cohorts
   +-> validate the complete fanout and capacity
   +-> derive instanceKey for every branch
   +-> group branches by instanceKey
   +-> enqueue each append by complete deterministic hook token and
       matching operational queue settings
-  +-> after 5 ms, split by command count, serialized bytes,
+  +-> release the queue when its cohort is ready or a ready append has waited 50 ms
+  +-> after a 5 ms flush window, split by command count, serialized bytes,
       pending branches, and pending branch bytes
   +-> publish chunks serially per token; independent tokens proceed concurrently
        |
@@ -55,12 +57,17 @@ timeline; it does not terminate the correlation owner.
 Batching is process-local and keyed by the complete deterministic hook token
 plus the publisher's registration timeout and local backpressure limits. It
 never combines different correlations or operational lanes, and separate
-processes publish their own chunks. A 2 ms timer window split the checked-in
-20-event cold burst under CI and full-suite load. Repeated standalone and
-full-check runs at the fixed 5 ms window each collapsed the warm burst to one
-resume and the cold burst to one failed resume plus one seeded start. A single
-event therefore incurs one nominal 5 ms scheduling window, which may be
-extended by event-loop delay.
+processes publish their own chunks. Concurrent calls register a lightweight
+preparation cohort synchronously from the exact token preimage and operational
+settings; the final validated queue remains keyed by the hook token. A ready
+append waits at most 50 ms for already-registered peers to finish preparation.
+A 2 ms timer window split the checked-in 20-event cold burst under CI and
+full-suite load. Repeated standalone and full-check runs at the fixed 5 ms
+window each collapsed the warm burst to one resume and the cold burst to one
+failed resume plus one seeded start. A 10 ms preparation escape also split a
+local cold burst; 50 ms produced the target across three consecutive runs. A
+single event completes its preparation cohort immediately and therefore incurs
+one nominal 5 ms scheduling window, which may be extended by event-loop delay.
 
 Commands default to at most 64 appends and 16 MiB of canonical serialized
 bytes. The splitter also caps aggregate branches and branch bytes at

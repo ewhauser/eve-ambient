@@ -31,8 +31,14 @@ decode, migration, or version-negotiation machinery.
 Batching never crosses a process or deterministic token. A 2 ms window split
 the 20-event cold burst under CI and full-suite load. Repeated standalone and
 full-check runs at 5 ms each produced one public warm resume and one failed
-resume plus one seeded cold start. This adds one nominal 5 ms timer window to a
-lone event; event-loop scheduling can extend it.
+resume plus one seeded cold start. Concurrent calls synchronously register a
+lightweight cohort using the complete token preimage and operational settings;
+validated commands remain isolated by their final token. Once that cohort is
+ready, the 5 ms flush window begins. A ready append escapes a stalled cohort
+after 50 ms; a 10 ms escape split a local 20-event cold burst, while 50 ms
+produced the target across three consecutive runs. A lone event completes its
+cohort immediately and pays one nominal 5 ms timer window; event-loop scheduling
+can extend it.
 
 Commands are split in process-local queue-enrollment order by both command
 count and canonical serialized bytes. They are also constrained by aggregate
@@ -124,6 +130,7 @@ the cold lookup count variable.
 - process-local same-token bursts use bounded ordered `append-many` commands;
 - resolved hook owners are cached in a bounded process-local LRU;
 - local queued and publishing payloads are bounded with retryable backpressure;
+- ready appends wait at most 50 ms for already-registered same-lane preparation;
 - a lone event pays one nominal 5 ms batching window;
 - source dedup remains bounded and best effort;
 - final-effect safety remains durable through `wakeKey`;

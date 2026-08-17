@@ -37,6 +37,23 @@ const DEFAULT_MAX_PENDING_BRANCHES = 1_000;
 const DEFAULT_MAX_PENDING_BYTES = 16 * 1_024 * 1_024;
 const DEFAULT_MAX_CALLBACK_REQUEST_BYTES = 16 * 1_024 * 1_024;
 const DEFAULT_REGISTRATION_TIMEOUT_MS = 10_000;
+const REGISTRATION_POLL_INITIAL_DELAY_MS = 5;
+const REGISTRATION_POLL_MAX_DELAY_MS = 50;
+
+type WorkflowHook = Awaited<ReturnType<typeof getHookByToken>>;
+
+interface CorrelationInitialization {
+  readonly candidateRunId: string;
+  readonly owner: WorkflowHook;
+}
+
+interface CorrelationInitializationAttempt {
+  readonly seeded: boolean;
+  readonly result: Promise<CorrelationInitialization>;
+}
+
+/** Process-local collapse of concurrent cold initialization for one hook token. */
+const correlationInitializations = new Map<string, Promise<CorrelationInitialization>>();
 
 export interface WorkflowAttentionEngineOptions {
   /** Public base URL at which this application's callback handler is mounted. */
@@ -208,29 +225,76 @@ export class WorkflowAttentionEngine implements AttentionEngine {
         if (!isNotFound(error)) throw error;
       }
 
-      await start(correlationWorkflow, [this.#config, command.append.streamKey]);
-      target = await this.#waitForHook(token);
+      const initialization = this.#initializeCorrelation(token, command);
+      const initialized = await initialization.result;
+      if (
+        initialization.seeded &&
+        initialized.owner.runId === initialized.candidateRunId
+      ) {
+        return;
+      }
+      target = initialized.owner;
     }
     throw new Error(`could not publish append to correlation hook ${token}`);
   }
 
+  #initializeCorrelation(
+    token: string,
+    command: CorrelationAppendCommand,
+  ): CorrelationInitializationAttempt {
+    const existing = correlationInitializations.get(token);
+    if (existing !== undefined) return { seeded: false, result: existing };
+
+    const result = this.#startCorrelation(token, command);
+    correlationInitializations.set(token, result);
+    const clear = (): void => {
+      if (correlationInitializations.get(token) === result) {
+        correlationInitializations.delete(token);
+      }
+    };
+    void result.then(clear, clear);
+    return { seeded: true, result };
+  }
+
+  async #startCorrelation(
+    token: string,
+    command: CorrelationAppendCommand,
+  ): Promise<CorrelationInitialization> {
+    const candidate = await start(correlationWorkflow, [
+      this.#config,
+      command.append.streamKey,
+      command,
+    ]);
+    return {
+      candidateRunId: candidate.runId,
+      owner: await this.#waitForHook(token),
+    };
+  }
+
   async #waitForHook(token: string): Promise<WorkflowHook> {
     const deadline = Date.now() + this.#registrationTimeoutMs;
+    let delayMs = REGISTRATION_POLL_INITIAL_DELAY_MS;
     for (;;) {
       try {
         return await getHookByToken(token);
       } catch (error) {
         if (!isNotFound(error)) throw error;
       }
-      if (Date.now() >= deadline) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
         throw new Error(`timed out waiting for Workflow hook ${token}`);
       }
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      const jitteredDelayMs = Math.max(
+        1,
+        Math.round(delayMs * (0.8 + Math.random() * 0.4)),
+      );
+      await new Promise((resolve) => {
+        setTimeout(resolve, Math.min(jitteredDelayMs, remainingMs));
+      });
+      delayMs = Math.min(delayMs * 2, REGISTRATION_POLL_MAX_DELAY_MS);
     }
   }
 }
-
-type WorkflowHook = Awaited<ReturnType<typeof getHookByToken>>;
 
 export interface WorkflowAttentionCallbackHandlerOptions {
   readonly secretEnv?: string | undefined;

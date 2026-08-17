@@ -10,7 +10,7 @@ interface AttentionEngine {
 
 // Conceptual Workflow APIs used by the implementation.
 resumeHook(correlationToken, append);
-start(correlationWorkflow, [config, instanceKey]);
+start(correlationWorkflow, [config, instanceKey, firstCommand]);
 ```
 
 There is no Ambient-specific World interface.
@@ -27,23 +27,29 @@ accept(fanout)
        |
        +-> hook exists: transport accepts the append
        |
-       +-> hook missing: start candidate run
-                         wait for the hook owner
-                         resume the owner's hook
+       +-> hook missing: join process-local initialization, or
+                         start one candidate with the first append
+                         wait with jittered exponential backoff
+                         winner: seed is already accepted
+                         follower/loser: resume the hook owner
   +-> return one payload-free application receipt
 ```
 
-`accept()` resolves when Workflow has accepted every selected hook payload. It
-does not wait for the correlation reducer, prepare callback, or final delivery.
+`accept()` resolves when Workflow has accepted every selected correlation
+append, either as a hook value or a seeded run argument. It does not wait for
+the correlation reducer, prepare callback, or final delivery.
 Duplicate and conflicting append outcomes are therefore asynchronous. A
 conflicting idempotency value is recorded as a named step in the Workflow run
 timeline; it does not terminate the correlation owner.
 
-Two cold publishers may both start candidates because hook lookup and run
-creation are not atomic. Every candidate creates the same deterministic hook
-and awaits `getConflict()`. Exactly one run owns the token; losing candidates
-exit, and publishers resume the owner. The integration suite exercises a
-20-publisher cold race.
+Cold publishers in one process share a token-keyed initialization promise, so
+only one starts and polls. The winning candidate is seeded with that publisher's
+append and processes it only after `getConflict()` confirms ownership. Other
+processes may still start candidates because hook lookup and run creation are
+not globally atomic. Every candidate creates the same deterministic hook and
+awaits `getConflict()`; losing candidates exit, and their publishers resume the
+owner. The integration suite exercises both a 20-publisher local cold race and
+an explicit two-candidate ownership race.
 
 ## Correlation address and lineage
 
@@ -103,9 +109,16 @@ permanent correlation owner.
 
 ## Protocol-level call fanout
 
-Ambient makes one high-level `resumeHook()` call for every distinct correlation
-selected from an inbound event. No selected correlations means no Workflow RPC;
-several matching branches with the same correlation are grouped into one RPC.
+For a warm correlation, Ambient makes one high-level `resumeHook()` call for
+every distinct correlation selected from an inbound event. No selected
+correlations means no Workflow call, and several matching branches with the
+same correlation are grouped into one append.
+
+A cold leader makes one failed `resumeHook()`, one `start()` seeded with the
+append, and a variable number of `getHookByToken()` registration lookups. It
+does not resume again when its candidate wins. Same-process followers share the
+start and polling result, then resume the owner; cross-process losers do the
+same after deterministic ownership resolves.
 
 This is the public admission protocol. It does not promise how many reads,
 writes, or queue operations a World uses to implement that RPC.
@@ -116,14 +129,17 @@ The current Workflow 5 integration instruments public standard-World methods:
 
 | Path | Ambient protocol calls | Standard World calls | Application HTTP |
 |---|---:|---:|---:|
+| Cold buffer-only append | failed resume + start + polling | 16-17 observed | 0 |
 | Warm buffer-only append | 1 | 7 | 0 |
 | Append that closes, prepares, and delivers a batch | 1 | 15 | 2 |
 
 The 7-call warm path is one hook lookup, one run read, three event writes, and
 two queue publishes. These are observations from Workflow 5.0.0-beta.42 and the
 instrumented local test World, not calls in Ambient's public contract and not a
-required implementation shape for other Worlds. Cold creation adds a run start
-and hook-registration polling, so its count varies with scheduler timing.
+required implementation shape for other Worlds. The cold count varied between
+16 and 17 in local runs, including six or seven hook lookups, versus 27 calls
+and 12 lookups with fixed 5 ms polling. Cold counts still vary with scheduler
+timing, and deployed latency includes World, network, database, and region costs.
 
 ## Conformance
 

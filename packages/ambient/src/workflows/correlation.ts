@@ -32,6 +32,7 @@ import {
 export async function correlationWorkflow(
   config: CorrelationWorkflowConfig,
   streamKey: string,
+  initialCommand?: CorrelationAppendCommand,
 ): Promise<CorrelationOwnerConflict> {
   "use workflow";
 
@@ -44,8 +45,8 @@ export async function correlationWorkflow(
 
   const iterator = inbox[Symbol.asyncIterator]();
   let nextInput: Promise<IteratorResult<CorrelationAppendCommand>> | undefined =
-    iterator.next();
-  let pendingInput: CorrelationAppendCommand | undefined;
+    initialCommand === undefined ? iterator.next() : undefined;
+  let pendingInput = initialCommand;
   let state: AttentionStreamState | undefined;
   let timer: { readonly wakeAt: string; readonly promise: Promise<TimerWake> } | undefined;
 
@@ -54,7 +55,7 @@ export async function correlationWorkflow(
       pendingInput !== undefined &&
       attentionStreamAppendFits(state, pendingInput.append, config)
     ) {
-      state = await applyCommand(pendingInput, state, config);
+      state = await applyCommand(pendingInput, state, config, streamKey);
       const currentDueAt = nextAttentionDueAt(state);
       if (currentDueAt !== undefined && currentDueAt <= state.lastAcceptedAt) {
         state = await processDue(state, state.lastAcceptedAt, config);
@@ -113,8 +114,12 @@ async function applyCommand(
   command: CorrelationAppendCommand,
   state: AttentionStreamState | undefined,
   config: CorrelationWorkflowConfig,
+  streamKey: string,
 ): Promise<AttentionStreamState> {
   try {
+    if (command.append.streamKey !== streamKey) {
+      throw new TypeError("correlation append does not match its Workflow owner");
+    }
     const reduced = await applyAttentionStreamAppend(state, command.append, {
       now: command.acceptedAt,
       maxRecentMessages: config.maxRecentMessages,

@@ -10,18 +10,21 @@
 
 Each correlation address and immutable Workflow configuration map to one
 deterministic Workflow hook token. An event selected for that address is sent
-with `resumeHook()`. If the hook is missing, the publisher starts a candidate
-correlation run, waits for the hook owner, and resumes it.
+with `resumeHook()`. If the hook is missing, process-local publishers share one
+initialization. Its leader starts a candidate seeded with the first append and
+waits for the hook owner with jittered exponential backoff.
 
 ```text
-event 1 -> correlation K -> start owner K -> resume hook K
-event 2 -> correlation K ------------------> resume hook K
-event 3 -> correlation J -> start owner J -> resume hook J
+event 1 -> correlation K -> failed resume -> start owner K with event 1
+event 2 -> correlation K -------------------> resume hook K
+event 3 -> correlation J -> failed resume -> start owner J with event 3
 ```
 
-The workflow creates the token and awaits `getConflict()` before processing
-messages. Concurrent cold candidates therefore converge on one owner. Losing
-candidates exit; publishers deliver to the registered owner.
+The workflow creates the token and awaits `getConflict()` before processing its
+seed or hook messages. Same-process cold publications create one candidate.
+Candidates from different processes still converge on one owner. Losing
+candidates exit without processing their seed; their publishers deliver it to
+the registered owner.
 
 ## State and effects
 
@@ -59,11 +62,14 @@ can add compaction later without changing the public Ambient binding.
 
 ## Calls
 
-Ambient makes one high-level `resumeHook()` call for each selected correlation.
-With Workflow `5.0.0-beta.42` and the local World, the checked-in integration
-measures 7 public World calls for a warm buffer-only message and 15 World calls
-plus two application HTTP attempts when that message closes, prepares, and
-delivers a batch. Cold creation includes variable hook-registration polling.
+For each selected warm correlation, Ambient makes one high-level `resumeHook()`
+call. A cold leader makes a failed resume, a seeded `start()`, and variable hook
+lookups; when its candidate wins, it skips the second resume. With Workflow
+`5.0.0-beta.42` and the local World, the checked-in integration measures 7
+public World calls for a warm buffer-only message and 15 World calls plus two
+application HTTP attempts when that message closes, prepares, and delivers a
+batch. Representative cold runs used 16-17 calls, including six or seven hook
+lookups, down from 27 calls and 12 lookups before backoff and seeded startup.
 
 ## Consequences
 

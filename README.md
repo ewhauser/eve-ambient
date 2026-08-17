@@ -357,35 +357,45 @@ For each inbound event, Ambient:
 2. runs deterministic rule selection and correlation;
 3. groups selected branches by correlation address;
 4. resumes the deterministic hook for each distinct correlation;
-5. starts the correlation Workflow if that hook does not exist yet; and
-6. lets each run buffer, prepare, checkpoint, and deliver independently.
+5. on a miss, coalesces process-local initialization, starts one seeded
+   candidate, and waits for hook ownership with jittered exponential backoff;
+6. routes follower or losing-candidate appends to the elected owner; and
+7. lets each run buffer, prepare, checkpoint, and deliver independently.
 
 ### Ambient protocol fanout
 
 ```text
-0 selected correlations -> 0 hook resumes
-1 selected correlation  -> 1 hook resume
-N selected correlations -> N concurrent hook resumes
+0 selected correlations -> 0 Workflow calls
+warm correlation        -> 1 resumeHook()
+cold leader             -> 1 failed resumeHook() + 1 start() + registration lookups
+cold local follower     -> failed resume, join initialization, resume the owner
 ```
 
-This is Ambient's public protocol fanout: one high-level `resumeHook()` call per
-distinct selected correlation. Multiple matching rules that share a correlation
-are grouped into the same append.
+Multiple matching rules that share a correlation are grouped into the same
+append. Cold initialization is singleflight per process and hook token. The
+winning candidate receives the leader's append in `start()`, so that publisher
+does not perform a second `resumeHook()`. Candidates in different processes
+still converge through deterministic hook ownership; a losing publisher resumes
+the owner with its candidate's append.
 
 ### Measured Workflow and storage work
 
 The Workflow runtime expands that protocol call into internal World activity.
 The checked-in Workflow 5.0.0-beta.42 integration currently observes:
 
-| Warm path | Ambient protocol calls | Standard World method calls | Application HTTP |
+| Path | Ambient protocol calls | Standard World method calls | Application HTTP |
 |---|---:|---:|---:|
+| Cold buffer-only append | 1 failed `resumeHook()`, 1 `start()`, registration polling | 16-17 observed | 0 |
 | Buffer only | 1 `resumeHook()` | 7 | 0 |
 | Close, prepare, and deliver | 1 `resumeHook()` | 15 | 2 |
 
 The 7 internal calls are one hook lookup, one run read, three event writes, and
-two queue publishes. These counts describe the instrumented runtime and local
-test World, not a requirement imposed on every World. A cold correlation also
-needs `start()` and hook-registration polling, so its internal call count varies.
+two queue publishes. The cold count varied between 16 and 17 across local runs,
+including six or seven hook lookups; the previous fixed 5 ms polling loop used
+27 World calls and 12 lookups in the same harness. These counts describe the
+instrumented runtime and local test World, not a requirement imposed on every
+World. Deployed counts and latency also include the chosen World's network,
+database, scheduler, and regional behavior.
 
 Each run retains a bounded recent-message ring for best-effort admission
 deduplication. Ring eviction may allow an old event to be processed again, so

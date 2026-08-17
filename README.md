@@ -420,9 +420,11 @@ The checked-in Workflow 5.0.0-beta.42 integration currently observes:
 | Cached close, prepare, and deliver | 1 `resumeHook()` | 14 | 2 |
 
 The 6 internal calls are one run read, three event writes, and two queue
-publishes; cached publication avoids the prior hook lookup. Repeated standalone
-and full-check 20-event runs measured 15.8-26.9 ms warm admission and 58.2-68.3 ms cold
-admission, with 2-3 public registration lookups and 3-4 World hook lookups.
+publishes; cached publication avoids the prior hook lookup. Repeated local
+standalone and full-check 20-event runs measured 15.8-26.9 ms warm admission
+and 58.2-68.3 ms cold admission; the Node 24 CI run measured 31.5 ms warm and
+99.8 ms cold with the same one-resume/seeded-start shape. These runs used 2-3
+public registration lookups and 3-4 World hook lookups.
 Cold counts vary with scheduler timing: the same suite's
 single-append cold path used 16 World calls and six hook lookups. The previous
 fixed 5 ms polling loop used 27 World calls and 12 lookups. These counts

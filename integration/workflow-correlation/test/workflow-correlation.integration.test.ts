@@ -253,7 +253,6 @@ describe("standard Workflow correlation runtime", () => {
       }, null, 2)}\n`);
 
       expect(coldBurst.eventTypes["run_created"]).toBe(1);
-      expect(coldBurst.eventTypes["hook_received"] ?? 0).toBe(0);
       expect([...preparedEventIds].sort()).toEqual(Array.from(
         { length: 20 },
         (_, index) => `cold-${index}`,

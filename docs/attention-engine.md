@@ -181,9 +181,10 @@ The current Workflow 5 integration instruments public standard-World methods:
 | Cached append that closes, prepares, and delivers a batch | 1 | 14 | 2 |
 
 The 6-call cached warm path is one run read, three event writes, and two queue
-publishes. Repeated standalone and full-check 20-event runs took 15.8-26.9 ms
-warm and 58.2-68.3 ms cold, with 13-14 cold World calls and 2-3 public
-registration lookups; the
+publishes. Repeated local standalone and full-check 20-event runs took
+15.8-26.9 ms warm and 58.2-68.3 ms cold; the Node 24 CI run took 31.5 ms warm
+and 99.8 ms cold with the same one-resume/seeded-start shape. These runs used
+13-14 cold World calls and 2-3 public registration lookups; the
 single-append cold scenario used 16-17
 World calls because registration timing varies. These are observations from
 Workflow 5.0.0-beta.42 and the instrumented local test World, not calls in

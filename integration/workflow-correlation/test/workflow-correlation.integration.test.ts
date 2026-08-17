@@ -17,9 +17,35 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCountingWorld, waitForStableWorldCalls } from "./counting-world.js";
 import { closeServers, fanout, SECRET_ENV, serve, uniqueNamespace } from "./helpers.js";
 
+const publicWorkflowCalls = vi.hoisted(() => ({
+  getHookByToken: 0,
+  resumeHook: 0,
+  start: 0,
+}));
+
+vi.mock("workflow/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("workflow/api")>();
+  return {
+    ...actual,
+    getHookByToken(...args: Parameters<typeof actual.getHookByToken>) {
+      publicWorkflowCalls.getHookByToken += 1;
+      return actual.getHookByToken(...args);
+    },
+    resumeHook(...args: Parameters<typeof actual.resumeHook>) {
+      publicWorkflowCalls.resumeHook += 1;
+      return actual.resumeHook(...args);
+    },
+    start(...args: Parameters<typeof actual.start>) {
+      publicWorkflowCalls.start += 1;
+      return actual.start(...args);
+    },
+  };
+});
+
 afterEach(async () => {
   await closeServers();
   delete process.env[SECRET_ENV];
+  resetPublicWorkflowCalls();
 });
 
 describe("standard Workflow correlation runtime", () => {
@@ -102,11 +128,99 @@ describe("standard Workflow correlation runtime", () => {
     }
   });
 
+  it("reports one public warm resume and one seeded cold start for 20-event bursts", async () => {
+    let prepareCalls = 0;
+    const callbackUrl = await serve(createWorkflowAttentionCallbackHandler({
+      async prepare() {
+        prepareCalls += 1;
+        return { kind: "ignore", decision: null };
+      },
+      async deliver() {
+        throw new Error("delivery must not run");
+      },
+    }, { secretEnv: SECRET_ENV }));
+    process.env[SECRET_ENV] = "integration-secret";
+
+    const originalWorld = await getWorld();
+    const countingWorld = createCountingWorld(originalWorld);
+    setWorld(countingWorld.world);
+    const engine = new WorkflowAttentionEngine({
+      namespace: uniqueNamespace("burst-cost"),
+      callbackUrl,
+      callbackSecretEnv: SECRET_ENV,
+    });
+    const policy = {
+      buffer: {
+        mode: "debounce" as const,
+        quietPeriodMs: 5 * 60_000,
+        maxWaitMs: 5 * 60_000,
+        maxEvents: 100,
+        maxBytes: 1_000_000,
+      },
+    };
+    const coldInputs = await Promise.all(Array.from({ length: 20 }, (_, index) =>
+      fanout(`burst-cold-${index}`, String(index).padStart(2, "0"), policy)));
+    const warmInputs = await Promise.all(Array.from({ length: 20 }, (_, index) =>
+      fanout(`burst-warm-${index}`, String(index + 20).padStart(2, "0"), policy)));
+
+    try {
+      resetPublicWorkflowCalls();
+      const coldStartedAt = performance.now();
+      await Promise.all(coldInputs.map((input) => engine.accept(input)));
+      const coldAdmissionMs = performance.now() - coldStartedAt;
+      await waitForStableWorldCalls(countingWorld);
+      const cold = {
+        publicWorkflow: snapshotPublicWorkflowCalls(),
+        standardWorld: withoutTrace(countingWorld.snapshot()),
+        admissionMs: Number(coldAdmissionMs.toFixed(3)),
+      };
+
+      resetPublicWorkflowCalls();
+      countingWorld.reset();
+      const warmStartedAt = performance.now();
+      await Promise.all(warmInputs.map((input) => engine.accept(input)));
+      const warmAdmissionMs = performance.now() - warmStartedAt;
+      await waitForStableWorldCalls(countingWorld);
+      const warm = {
+        publicWorkflow: snapshotPublicWorkflowCalls(),
+        standardWorld: withoutTrace(countingWorld.snapshot()),
+        admissionMs: Number(warmAdmissionMs.toFixed(3)),
+      };
+
+      process.stdout.write(`\nWORKFLOW_CORRELATION_BURST_REPORT ${JSON.stringify({
+        eventsPerBurst: 20,
+        flushWindowMs: 5,
+        maxPreparationWaitMs: 50,
+        cold,
+        warm,
+        applicationHttp: { cold: 0, warm: 0 },
+      }, null, 2)}\n`);
+
+      expect(cold.publicWorkflow.resumeHook).toBe(1);
+      expect(cold.publicWorkflow.start).toBe(1);
+      expect(cold.publicWorkflow.getHookByToken).toBeGreaterThanOrEqual(1);
+      expect(cold.standardWorld.eventTypes["run_created"]).toBe(1);
+      expect(cold.standardWorld.eventTypes["hook_received"] ?? 0).toBe(0);
+      expect(warm.publicWorkflow).toEqual({
+        getHookByToken: 0,
+        resumeHook: 1,
+        start: 0,
+      });
+      expect(warm.standardWorld.total).toBeLessThanOrEqual(7);
+      expect(warm.standardWorld.eventTypes["hook_received"]).toBe(2);
+      expect(prepareCalls).toBe(0);
+    } finally {
+      setWorld(originalWorld);
+    }
+  });
+
   it("elects one cold owner without losing concurrently accepted events", async () => {
     const preparedBatchKeys = new Set<string>();
+    const preparedEventIds: string[] = [];
     const callbackUrl = await serve(createWorkflowAttentionCallbackHandler({
       async prepare(batch) {
         preparedBatchKeys.add(batch.batchKey);
+        preparedEventIds.push(...batch.branches.map((branch) => branch.event.id));
         return { kind: "ignore", decision: null };
       },
       async deliver() {
@@ -140,9 +254,10 @@ describe("standard Workflow correlation runtime", () => {
       }, null, 2)}\n`);
 
       expect(coldBurst.eventTypes["run_created"]).toBe(1);
-      // Workflow's resilient resume path records each accepted follower input
-      // from both the publisher and queue consumer; 38 writes represent 19 resumes.
-      expect(coldBurst.eventTypes["hook_received"]).toBe(38);
+      expect([...preparedEventIds].sort()).toEqual(Array.from(
+        { length: 20 },
+        (_, index) => `cold-${index}`,
+      ).sort());
       expect(await newRunIds(before)).toHaveLength(1);
     } finally {
       setWorld(originalWorld);
@@ -175,6 +290,8 @@ describe("standard Workflow correlation runtime", () => {
       maxPreparedWakeBytes: 1 * 1_024 * 1_024,
       maxPendingBranches: 1_000,
       maxPendingBytes: 16 * 1_024 * 1_024,
+      maxBatchCommands: 64,
+      maxBatchBytes: 16 * 1_024 * 1_024,
     };
     const policy = { buffer: { mode: "immediate" as const } };
     const firstAppend = (await compileAttentionStreamAppends(
@@ -184,14 +301,18 @@ describe("standard Workflow correlation runtime", () => {
       await fanout("candidate-second", "02", policy),
     ))[0]!;
     const firstCommand = {
-      kind: "append" as const,
-      append: firstAppend,
-      acceptedAt: new Date().toISOString(),
+      kind: "append-many" as const,
+      commands: [{
+        append: firstAppend,
+        acceptedAt: new Date().toISOString(),
+      }],
     };
     const secondCommand = {
-      kind: "append" as const,
-      append: secondAppend,
-      acceptedAt: new Date().toISOString(),
+      kind: "append-many" as const,
+      commands: [{
+        append: secondAppend,
+        acceptedAt: new Date().toISOString(),
+      }],
     };
 
     const [firstCandidate, secondCandidate] = await Promise.all([
@@ -560,4 +681,14 @@ function withoutTrace<T extends { readonly trace: readonly string[] }>(
 ): Omit<T, "trace"> {
   const { trace: _trace, ...summary } = snapshot;
   return summary;
+}
+
+function resetPublicWorkflowCalls(): void {
+  publicWorkflowCalls.getHookByToken = 0;
+  publicWorkflowCalls.resumeHook = 0;
+  publicWorkflowCalls.start = 0;
+}
+
+function snapshotPublicWorkflowCalls(): Readonly<typeof publicWorkflowCalls> {
+  return { ...publicWorkflowCalls };
 }

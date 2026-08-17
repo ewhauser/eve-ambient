@@ -9,74 +9,96 @@ interface AttentionEngine {
 }
 
 // Conceptual Workflow APIs used by the implementation.
-resumeHook(cachedOwner ?? correlationToken, append);
-start(correlationWorkflow, [config, instanceKey, firstCommand]);
+resumeHook(correlationToken, appendMany);
+start(correlationWorkflow, [config, instanceKey, firstAppendMany]);
 ```
 
-There is no Ambient-specific World interface.
+There is no Ambient-specific World interface. The correlation hook accepts
+only the batched `append-many` shape; there is no legacy single-append decoder,
+migration path, or dual protocol.
 
 ## Admission
 
 ```text
 accept(fanout)
   |
+  +-> register its exact correlation preimages in process-local preparation cohorts
   +-> validate the complete fanout and capacity
   +-> derive instanceKey for every branch
   +-> group branches by instanceKey
-  +-> use the process-local cached owner when available
-       +-> inactive: evict it and continue with the unchanged append
+  +-> enqueue each append by complete deterministic hook token and
+      matching operational queue settings
+  +-> release the queue when its cohort is ready or a ready append has waited 50 ms
+  +-> after a 5 ms flush window, split by command count, serialized bytes,
+      pending branches, and pending branch bytes
+  +-> publish chunks serially per token; independent tokens proceed concurrently
        |
-       +-> active: transport accepts the append without a token lookup
-  +-> on a cache miss, enter one process-local in-flight gate per instanceKey
+       +-> cached owner exists: resume it with the complete chunk
        |
-       +-> leader probes the deterministic hook
-       |    +-> warm: probe accepts the leader append
-       |    +-> cold: start one candidate with the leader append
-       |              wait with jittered exponential backoff
-       |              winner: seed is already accepted
-       |              loser: resume the elected owner
-       |
-       +-> followers join the result and resume their own appends to the owner
+       +-> no cached owner: join/lead the operational-lane token probe
+                         warm probe: token accepts the complete chunk
+                         start one candidate with the complete first chunk
+                         wait with jittered exponential backoff
+                         winner: seed is already accepted
+                         loser: resume the hook owner
   +-> return one payload-free application receipt
 ```
 
 `accept()` resolves when Workflow has accepted every selected correlation
-append, either as a hook value or a seeded run argument. It does not wait for
-the correlation reducer, prepare callback, or final delivery.
+append, as one entry of a hook value or a seeded run argument. Every original
+`accept()` keeps its own promise and receipt. Entries in a successfully
+published chunk resolve together after Workflow custody; a publication failure
+rejects each affected promise. It does not wait for the correlation reducer,
+prepare callback, or final delivery.
 Duplicate and conflicting append outcomes are therefore asynchronous. A
 conflicting idempotency value is recorded as a named step in the Workflow run
 timeline; it does not terminate the correlation owner.
 
-Concurrent publishers in one process share a token-keyed initial-probe promise.
-On a warm hit the leader's probe accepts its command; followers receive the
-owner handle but must resume their own commands. On a cold miss only the leader
-starts and polls. The winning candidate is seeded with that publisher's append
-and processes it only after `getConflict()` confirms ownership. Other processes
-may still start candidates because hook lookup and run creation are not globally
-atomic. Every candidate creates the same deterministic hook and awaits
-`getConflict()`; losing candidates exit, and their publishers resume the owner.
-Failed and completed promises are removed so later cache misses can probe
-normally. The integration suite exercises both a 20-publisher local cold race
-and an explicit two-candidate ownership race.
+Batching is process-local and keyed by the complete deterministic hook token
+plus the publisher's registration timeout and local backpressure limits. It
+never combines different correlations or operational lanes, and separate
+processes publish their own chunks. Concurrent calls register a lightweight
+preparation cohort synchronously from the exact token preimage and operational
+settings; the final validated queue remains keyed by the hook token. A ready
+append waits at most 50 ms for already-registered peers to finish preparation.
+A 2 ms timer window split the checked-in 20-event cold burst under CI and
+full-suite load. Repeated standalone and full-check runs at the fixed 5 ms
+window each collapsed the warm burst to one resume and the cold burst to one
+failed resume plus one seeded start. A 10 ms preparation escape also split a
+local cold burst; 50 ms produced the target across three consecutive runs. A
+single event completes its preparation cohort immediately and therefore incurs
+one nominal 5 ms scheduling window, which may be extended by event-loop delay.
 
-Every successful resume returns its resolved hook owner, and cold registration
-polling discovers the same standard Workflow handle. Ambient keeps those
-handles in one process-local cache shared by all `WorkflowAttentionEngine`
-instances. The cache is capped at 1,024 least-recently-used entries, and an
-entry expires after 10 minutes without a successful resume. This retains a
-substantial hot set at fixed memory. The idle TTL favors burst reuse while
-periodically revalidating dormant correlations, and active permanent
-correlations keep refreshing their handle. Token keys already fingerprint the
-immutable Workflow configuration, so configuration cutovers cannot reuse an old
-owner.
+Commands default to at most 64 appends and 16 MiB of canonical serialized
+bytes. The splitter also caps aggregate branches and branch bytes at
+`maxPendingBranches` and `maxPendingBytes`. Oversized bursts become ordered
+chunks. Arrivals during an active publication remain in the same token queue
+for a later flush. Order is defined at queue enrollment. Chunks publish
+serially; if one fails, its entries and every later unsent entry from that flush
+reject with the same failure, and no later chunk from the snapshot is
+published.
 
-The cache is advisory. `HookNotFoundError` from a cached handle evicts that
-owner and routes the unchanged append through the token-keyed probe gate. The
-leader retries by deterministic token and only then uses the normal cold
-initialization path if the token is also absent. Conditional eviction prevents
-a late failure for an old run from removing a concurrently cached replacement.
-No application storage, custom World method, or deployment dependency is
-introduced.
+Each operational lane also caps its process-local backlog, including work in a
+currently active publication, at 1,000 appends and 64 MiB of canonical append
+bytes by default. An append that cannot fit by itself is a capacity error.
+Otherwise, admission beyond either live-backlog limit rejects with retryable
+`WorkflowAdmissionBackpressureError`; the caller can retry the same stable
+input after capacity becomes available. This prevents a stalled Workflow call
+from accumulating an unbounded local payload.
+
+Cold publishers in one process and operational lane share an initialization
+probe, so only one probes, starts, and polls. The winning candidate is seeded
+with the entire first chunk and processes it only after `getConflict()` confirms
+ownership. Other lanes or processes may still start candidates because hook
+lookup and run creation are not globally atomic. Every candidate creates the
+same deterministic hook and awaits `getConflict()`; losing candidates exit,
+and their publishers resume the owner. The integration suite exercises both a
+20-publisher local cold race and an explicit two-candidate ownership race.
+
+Successful probes and starts place the resolved owner in a process-local
+1,024-entry LRU with a 10-minute idle TTL, shared across engine instances. A
+missing cached handle is evicted and the unchanged batch retries through its
+token. This cache is advisory and uses only standard Workflow hook handles.
 
 ## Correlation address and lineage
 
@@ -105,9 +127,13 @@ One permanent correlation run owns:
 
 Applied full-value payloads are limited by `maxPendingBranches` and
 `maxPendingBytes` (1,000 and 16 MiB by default). The publisher rejects a single
-correlation append that cannot fit. At capacity, the run holds at most the next
-validated append and waits for its reducer timer without requesting another
-hook value. Remaining values stay in Workflow's durable hook queue.
+correlation append that cannot fit. Every `append-many` command fits within the
+same aggregate branch budgets as an empty reducer and within its independent
+count/serialized-byte limits. The owner applies entries sequentially and never
+adds the whole command atomically. At capacity, it retains only the unprocessed
+remainder of that one bounded command and waits for its reducer timer without
+requesting another hook value. Remaining commands stay in Workflow's durable
+hook queue.
 
 Terminal processing removes source payloads and in-flight branch entries. Ring
 entries contain only keys, hashes, timestamps, and receipts. Ring eviction
@@ -136,20 +162,17 @@ permanent correlation owner.
 
 ## Protocol-level call fanout
 
-For a cached warm correlation, Ambient makes one high-level `resumeHook()` call
-with the owner for every distinct correlation selected from an inbound event.
-An uncached warm leader makes the same call by token and caches the returned
-owner. No selected correlations means no Workflow call, and several matching
-branches with the same correlation are grouped into one append.
+For a warm correlation, Ambient makes one high-level `resumeHook()` call per
+bounded same-token chunk. No selected correlations means no Workflow call,
+several matching branches from one event are grouped into one append, and
+concurrent same-process appends can share one chunk. Each append retains its own
+`acceptedAt`, append identity, and sequential reducer position.
 
 A cold leader makes one failed `resumeHook()`, one `start()` seeded with the
-append, and a variable number of `getHookByToken()` registration lookups. It
-does not resume again when its candidate wins. Same-process followers share the
-probe, start, and polling result, then resume the owner; cross-process losers do
-the same after deterministic ownership resolves. A 20-publisher in-flight warm
-burst therefore makes 20 resumes. A winning cold burst also makes 20 total
-resumes—one failed leader probe plus 19 follower resumes—alongside one start and
-one registration polling chain. The previous post-probe gate made 39 resumes.
+entire first chunk, and a variable number of `getHookByToken()` registration lookups. It
+does not resume again when its candidate wins. Other operational lanes or
+processes can still race candidates; losers resume the owner after
+deterministic ownership resolves.
 
 This is the public admission protocol. It does not promise how many reads,
 writes, or queue operations a World uses to implement that RPC.
@@ -160,28 +183,29 @@ The current Workflow 5 integration instruments public standard-World methods:
 
 | Path | Ambient protocol calls | Standard World calls | Application HTTP |
 |---|---:|---:|---:|
-| Cold buffer-only append | failed resume + start + polling | 16-17 observed | 0 |
-| 20-publisher immediate cold burst | failed probe + 19 follower resumes + start/polling | 215-226 observed | 20 |
-| Warm buffer-only append | 1 | 6 | 0 |
-| Append that closes, prepares, and delivers a batch | 1 | 14 | 2 |
+| Cold 20-event buffer-only burst | 1 failed resume + 1 seeded start + 2-3 lookups | 13-14 observed | 0 |
+| Cached warm 20-event buffer-only burst | 1 resume | 6 | 0 |
+| Cached append that closes, prepares, and delivers a batch | 1 | 14 | 2 |
 
-The 6-call warm path uses a cached owner and performs one run read, three event
-writes, and two queue publishes, with no hook-token lookup. These are
-observations from Workflow 5.0.0-beta.42 and the instrumented local test World,
-not calls in Ambient's public contract and not a required implementation shape
-for other Worlds. The cold count varied between 16 and 17 in local runs,
-including six or seven hook lookups, versus 27 calls and 12 lookups with fixed
-5 ms polling. Cold counts still vary with scheduler timing. In local
-before/after 20-publisher samples, the initial-probe gate
-reduced public resumes from 39 to 20 and World hook lookups from 22 to 3.
-Post-change total World calls ranged from 215 to 226 versus 256 in pre-change
-samples, but that total includes its 20 immediate reducers and prepare callbacks,
-whose scheduler work can vary; no latency conclusion is drawn from this harness.
+The 6-call cached warm path is one run read, three event writes, and two queue
+publishes. Repeated local standalone and full-check 20-event runs took
+15.8-26.9 ms warm and 58.2-68.3 ms cold; two Node 24 CI runs took 42.1-52.9 ms
+warm and 106.6-142.0 ms cold with the same one-resume/seeded-start shape. These
+runs used 13-14 cold World calls and 2-3 public registration lookups; the
+single-append cold scenario used 16-17
+World calls because registration timing varies. These are observations from
+Workflow 5.0.0-beta.42 and the instrumented local test World, not calls in
+Ambient's public contract and not a required implementation shape for other
+Worlds. Deployed latency includes World, network, database, and region costs.
 
 ## Conformance
 
 The reference and integration suites check grouping, same-correlation reuse,
 bounded ring dedup, conflicts, capacity, ordering, debounce, cooldown, leases,
-callback validation, exact-wake retry, reducer backpressure, configuration
-cutover, concurrent cold ownership, consumer workflow discovery, permanent-run
-behavior, and measured World calls.
+callback validation, exact-wake retry, reducer backpressure, 20-command
+coalescing, token isolation, count/byte chunking, publication failures, active
+flush arrivals, local count/byte backpressure, fail-stop chunk publication,
+operational-lane isolation, seeded cold batches, configuration cutover,
+concurrent cold ownership, cached-owner reuse/eviction/expiry, probe cleanup,
+consumer workflow discovery, permanent-run behavior, and measured public
+Workflow plus standard World calls.

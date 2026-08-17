@@ -1,4 +1,4 @@
-import { AttentionCapacityError } from "../attention.js";
+import { AttentionCapacityError, attentionValueBytes } from "../attention.js";
 import { IdempotencyConflictError } from "../idempotency.js";
 import {
   AttentionCallbackValidationError,
@@ -12,8 +12,10 @@ import {
   type AttentionStreamState,
 } from "../stream-state.js";
 import {
+  correlationAppendManyBytes,
   correlationToken,
-  type CorrelationAppendCommand,
+  type CorrelationAppendInput,
+  type CorrelationAppendManyCommand,
   type CorrelationOwnerConflict,
   type CorrelationReducerConflict,
   type CorrelationWorkflowConfig,
@@ -32,36 +34,46 @@ import {
 export async function correlationWorkflow(
   config: CorrelationWorkflowConfig,
   streamKey: string,
-  initialCommand?: CorrelationAppendCommand,
+  initialCommand?: CorrelationAppendManyCommand,
 ): Promise<CorrelationOwnerConflict> {
   "use workflow";
 
   const token = await correlationToken(config, streamKey);
-  using inbox = createHook<CorrelationAppendCommand>({ token });
+  using inbox = createHook<CorrelationAppendManyCommand>({ token });
   const conflict = await inbox.getConflict();
   if (conflict !== null) {
     return { kind: "owner-conflict", streamKey, ownerRunId: conflict.runId };
   }
 
   const iterator = inbox[Symbol.asyncIterator]();
-  let nextInput: Promise<IteratorResult<CorrelationAppendCommand>> | undefined =
+  let nextInput: Promise<IteratorResult<CorrelationAppendManyCommand>> | undefined =
     initialCommand === undefined ? iterator.next() : undefined;
-  let pendingInput = initialCommand;
+  let pendingCommands = initialCommand === undefined
+    ? undefined
+    : validateAppendMany(initialCommand, config, streamKey).commands;
   let state: AttentionStreamState | undefined;
   let timer: { readonly wakeAt: string; readonly promise: Promise<TimerWake> } | undefined;
 
   for (;;) {
     if (
-      pendingInput !== undefined &&
-      attentionStreamAppendFits(state, pendingInput.append, config)
+      pendingCommands !== undefined &&
+      attentionStreamAppendFits(state, pendingCommands[0]!.append, config)
     ) {
-      state = await applyCommand(pendingInput, state, config, streamKey);
+      state = await applyCommand(
+        pendingCommands[0]!,
+        state,
+        config,
+        streamKey,
+      );
       const currentDueAt = nextAttentionDueAt(state);
       if (currentDueAt !== undefined && currentDueAt <= state.lastAcceptedAt) {
         state = await processDue(state, state.lastAcceptedAt, config);
       }
-      pendingInput = undefined;
-      nextInput = iterator.next();
+      pendingCommands = pendingCommands.slice(1);
+      if (pendingCommands.length === 0) {
+        pendingCommands = undefined;
+        nextInput = iterator.next();
+      }
       continue;
     }
 
@@ -74,7 +86,7 @@ export async function correlationWorkflow(
     }
 
     let selected: InputWake | TimerWake;
-    if (pendingInput !== undefined) {
+    if (pendingCommands !== undefined) {
       if (timer === undefined) {
         throw new Error("a full correlation reducer has no due work to release capacity");
       }
@@ -87,7 +99,11 @@ export async function correlationWorkflow(
 
     if (selected.kind === "input") {
       if (selected.received.done) throw new Error("correlation hook closed unexpectedly");
-      pendingInput = selected.received.value;
+      pendingCommands = validateAppendMany(
+        selected.received.value,
+        config,
+        streamKey,
+      ).commands;
       nextInput = undefined;
       continue;
     }
@@ -107,11 +123,11 @@ interface TimerWake {
 
 interface InputWake {
   readonly kind: "input";
-  readonly received: IteratorResult<CorrelationAppendCommand>;
+  readonly received: IteratorResult<CorrelationAppendManyCommand>;
 }
 
 async function applyCommand(
-  command: CorrelationAppendCommand,
+  command: CorrelationAppendInput,
   state: AttentionStreamState | undefined,
   config: CorrelationWorkflowConfig,
   streamKey: string,
@@ -139,6 +155,51 @@ async function applyCommand(
     }
     return state;
   }
+}
+
+function validateAppendMany(
+  command: CorrelationAppendManyCommand,
+  config: CorrelationWorkflowConfig,
+  streamKey: string,
+): CorrelationAppendManyCommand {
+  if (command.kind !== "append-many" || !Array.isArray(command.commands)) {
+    throw new TypeError("correlation hook command must be append-many");
+  }
+  if (command.commands.length === 0) {
+    throw new TypeError("correlation append-many command must not be empty");
+  }
+  if (command.commands.length > config.maxBatchCommands) {
+    throw new AttentionCapacityError(
+      `correlation append-many command exceeds ${config.maxBatchCommands} commands`,
+    );
+  }
+  if (correlationAppendManyBytes(command) > config.maxBatchBytes) {
+    throw new AttentionCapacityError(
+      `correlation append-many command exceeds ${config.maxBatchBytes} serialized bytes`,
+    );
+  }
+
+  let branchCount = 0;
+  let branchBytes = 0;
+  for (const input of command.commands as readonly CorrelationAppendInput[]) {
+    if (input.append.streamKey !== streamKey) {
+      throw new TypeError("correlation append does not match its Workflow owner");
+    }
+    branchCount += input.append.branches.length;
+    branchBytes += input.append.branches.reduce(
+      (total, branch) => total + attentionValueBytes(branch),
+      0,
+    );
+  }
+  if (
+    branchCount > config.maxPendingBranches ||
+    branchBytes > config.maxPendingBytes
+  ) {
+    throw new AttentionCapacityError(
+      "correlation append-many command exceeds reducer capacity",
+    );
+  }
+  return command;
 }
 
 async function processDue(

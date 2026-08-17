@@ -1,3 +1,4 @@
+import { attentionValueBytes } from "./attention.js";
 import { hashIdempotencyInput } from "./idempotency.js";
 import type { AttentionStreamAppend } from "./stream-protocol.js";
 
@@ -15,13 +16,32 @@ export interface CorrelationWorkflowConfig {
   readonly maxPreparedWakeBytes: number;
   readonly maxPendingBranches: number;
   readonly maxPendingBytes: number;
+  readonly maxBatchCommands: number;
+  readonly maxBatchBytes: number;
 }
 
-/** One transport-accepted message sent to a correlation Workflow hook. */
-export interface CorrelationAppendCommand {
-  readonly kind: "append";
+/** One independently accepted append retained inside a shared hook command. */
+export interface CorrelationAppendInput {
   readonly acceptedAt: string;
   readonly append: AttentionStreamAppend;
+}
+
+/** The only command shape accepted by a correlation Workflow hook. */
+export interface CorrelationAppendManyCommand {
+  readonly kind: "append-many";
+  readonly commands: readonly CorrelationAppendInput[];
+}
+
+/** Returns the exact canonical serialized size of one retained append. */
+export function correlationAppendInputBytes(input: CorrelationAppendInput): number {
+  return attentionValueBytes(input);
+}
+
+/** Returns the exact canonical serialized size used for batching limits. */
+export function correlationAppendManyBytes(
+  command: CorrelationAppendManyCommand,
+): number {
+  return attentionValueBytes(command);
 }
 
 /** An append reused an idempotency key with a different canonical value. */

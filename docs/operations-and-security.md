@@ -3,16 +3,26 @@
 ## Durability
 
 - `accept()` returns after Workflow transport accepts every selected
-  correlation append.
-- Distinct correlation resumes run concurrently.
-- The initial probe and any cold initialization are coalesced by hook token
-  while in flight within one process; completed and failed gates are removed,
-  and separate processes may still start candidates that resolve through hook
-  ownership.
-- Resolved hook owners are shared across engine instances in a process-local
-  1,024-entry LRU and expire after 10 minutes without a successful resume.
-- A missing or inactive cached owner is evicted; the unchanged append re-enters
-  the token-keyed probe and cold initialization if no active owner exists.
+  correlation append as part of a bounded `append-many` command. Each original
+  call retains an individual promise and receipt; all entries affected by a
+  failed publication reject.
+- Distinct correlation tokens flush and resume independently. They are never
+  combined.
+- Same-token arrivals in one process register a lightweight preparation cohort
+  before asynchronous validation. A ready append waits at most 50 ms for peers
+  already registered in that cohort, then starts the fixed 5 ms flush window.
+  A lone event finishes its cohort immediately, so 5 ms is its nominal added
+  latency; event-loop load may delay the timer. A 2 ms window split a 20-event
+  cold burst under CI and full-suite load; repeated standalone and full-check
+  integration runs at 5 ms each produced one warm resume and one seeded cold
+  start. A 10 ms preparation escape split a local cold burst; 50 ms produced
+  the target across three consecutive runs.
+- Cold initialization is coalesced by hook token within one process when the
+  registration timeout and local backpressure settings match. Other lanes or
+  processes may still start candidates that resolve through hook ownership.
+- Resolved hook handles are cached process-locally in a 1,024-entry LRU with a
+  10-minute idle TTL. A missing cached owner is evicted and the same bounded
+  batch retries through its deterministic token.
 - Reducer deduplication and idempotency conflicts are asynchronous to that
   receipt.
 - Prepared output is checkpointed before delivery and retried with the same
@@ -20,13 +30,14 @@
 - Source-admission dedup is intentionally best effort and bounded by the
   recent-message ring.
 
-Monitor hook-resume latency and errors, especially not-found retries that may
-indicate stale-owner recovery, along with cold-start frequency, registration
-polling, cross-process candidate-owner conflicts, active correlation runs,
+Monitor observable `accept()` and hook-resume latency and errors, especially
+retryable `WorkflowAdmissionBackpressureError`, plus cold-start frequency,
+registration failures, candidate-owner conflicts, active correlation runs,
 event-history growth, due timer lag, callback latency and status, retry
-exhaustion, ring capacity, and final delivery conflicts. Workflow and the
-selected World provide the run and storage signals; application callback and
-turn-queue signals remain application-owned.
+exhaustion, and final delivery conflicts. Ambient does not currently export
+internal batch-size, split, or queue-age metrics. Workflow and the selected
+World provide run and storage signals; application callback and turn-queue
+signals remain application-owned.
 
 ## Permanent-run capacity
 
@@ -37,6 +48,25 @@ still grows with every resume, timer, and step. Choose correlation keys that
 bound traffic, alert before the selected World's per-run event and queue
 ceilings, and explicitly abandon or drain correlations that are no longer
 needed.
+
+Publisher batches default to 64 commands and 16 MiB of canonical serialized
+bytes. Chunk construction additionally caps aggregate branches and branch
+bytes at the reducer limits, so a large process-local burst cannot bypass
+`maxPendingBranches` or `maxPendingBytes`. The Workflow applies entries
+sequentially. If capacity fills mid-command, only that bounded remainder stays
+live and later commands remain in the World's hook queue. If a chunk
+publication fails, that chunk and all later unsent chunks in the same flush
+reject; retry them with their original stable identities.
+
+The separate process-local backlog defaults to 1,000 accepted appends and 64
+MiB of canonical append bytes per operational lane, including queued and
+currently publishing work. Exceeding either cap produces retryable
+`WorkflowAdmissionBackpressureError` instead of retaining an unbounded payload
+behind a stalled publication. Registration timeout and these local caps define
+an operational lane but do not change the hook token. Reducer and batch limits
+are immutable Workflow configuration and do change the token fingerprint;
+plan changes to those values as a drain-and-cutover rather than in-place
+tuning.
 
 ## Secrets
 

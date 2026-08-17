@@ -117,7 +117,7 @@ the checked-in 20-event integration measures one public warm `resumeHook()`,
 standalone and full-check runs. The corresponding cold
 burst measures one failed public `resumeHook()`, one seeded public `start()`,
 2-3 registration lookups, 13-14 standard World calls, and 58.2-68.3 ms local
-admission. Two Node 24 CI runs measured 31.5-41.8 ms warm and 99.8-129.2 ms
+admission. Two Node 24 CI runs measured 42.1-52.9 ms warm and 106.6-142.0 ms
 cold with the same call shapes. Cached closing, preparing, and delivering uses
 14 World calls plus two application HTTP attempts. Registration timing makes
 the cold lookup count variable.

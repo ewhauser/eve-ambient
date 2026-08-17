@@ -94,8 +94,9 @@ describe("standard Workflow correlation runtime", () => {
 
       expect(cold.eventTypes["run_created"]).toBe(1);
       expect(cold.eventTypes["hook_received"] ?? 0).toBe(0);
-      expect(warm.total).toBeLessThanOrEqual(7);
-      expect(close.total).toBeLessThanOrEqual(20);
+      expect(warm.operations["hooks.getByToken"] ?? 0).toBe(0);
+      expect(warm.total).toBe(6);
+      expect(close.total).toBe(14);
     } finally {
       setWorld(originalWorld);
     }

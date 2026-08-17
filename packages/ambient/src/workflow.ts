@@ -39,6 +39,9 @@ const DEFAULT_MAX_CALLBACK_REQUEST_BYTES = 16 * 1_024 * 1_024;
 const DEFAULT_REGISTRATION_TIMEOUT_MS = 10_000;
 const REGISTRATION_POLL_INITIAL_DELAY_MS = 5;
 const REGISTRATION_POLL_MAX_DELAY_MS = 50;
+const MAX_CACHED_CORRELATION_HOOKS = 1_024;
+const CACHED_CORRELATION_HOOK_TTL_MS = 10 * 60_000;
+const MAX_CORRELATION_PROBE_ATTEMPTS = 4;
 
 type WorkflowHook = Awaited<ReturnType<typeof getHookByToken>>;
 
@@ -52,8 +55,16 @@ interface CorrelationProbeAttempt {
   readonly result: Promise<CorrelationProbeResult>;
 }
 
+interface CachedCorrelationHook {
+  readonly hook: WorkflowHook;
+  readonly expiresAt: number;
+}
+
 /** Process-local collapse of the initial probe and any cold start for one hook token. */
 const correlationProbes = new Map<string, Promise<CorrelationProbeResult>>();
+
+/** Process-local hot set shared by every engine using the active Workflow World. */
+const cachedCorrelationHooks = new Map<string, CachedCorrelationHook>();
 
 export interface WorkflowAttentionEngineOptions {
   /** Public base URL at which this application's callback handler is mounted. */
@@ -216,15 +227,30 @@ export class WorkflowAttentionEngine implements AttentionEngine {
 
   async #publish(command: CorrelationAppendCommand): Promise<void> {
     const token = await correlationToken(this.#config, command.append.streamKey);
-    let probe = this.#probeCorrelation(token, command);
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      const probed = await probe.result;
-      if (probe.leader && probed.leaderCommandAccepted) return;
+    const cached = cachedCorrelationHook(token);
+    if (cached !== undefined) {
       try {
-        await resumeHook(probed.owner, command);
+        const owner = await resumeHook(cached, command);
+        cacheCorrelationHook(token, owner);
         return;
       } catch (error) {
         if (!isNotFound(error)) throw error;
+        evictCachedCorrelationHook(token, cached);
+      }
+    }
+
+    let probe = this.#probeCorrelation(token, command);
+    for (let attempt = 0; attempt < MAX_CORRELATION_PROBE_ATTEMPTS; attempt += 1) {
+      const probed = await probe.result;
+      cacheCorrelationHook(token, probed.owner);
+      if (probe.leader && probed.leaderCommandAccepted) return;
+      try {
+        const owner = await resumeHook(probed.owner, command);
+        cacheCorrelationHook(token, owner);
+        return;
+      } catch (error) {
+        if (!isNotFound(error)) throw error;
+        evictCachedCorrelationHook(token, probed.owner);
       }
       probe = this.#probeCorrelation(token, command);
     }
@@ -453,6 +479,36 @@ function nonEmpty(value: string, name: string): string {
 
 function isNotFound(error: unknown): boolean {
   return HookNotFoundError.is(error);
+}
+
+function cachedCorrelationHook(token: string): WorkflowHook | undefined {
+  const cached = cachedCorrelationHooks.get(token);
+  if (cached === undefined) return undefined;
+  if (cached.expiresAt <= Date.now()) {
+    cachedCorrelationHooks.delete(token);
+    return undefined;
+  }
+  cachedCorrelationHooks.delete(token);
+  cachedCorrelationHooks.set(token, cached);
+  return cached.hook;
+}
+
+function cacheCorrelationHook(token: string, hook: WorkflowHook): void {
+  cachedCorrelationHooks.delete(token);
+  cachedCorrelationHooks.set(token, {
+    hook,
+    expiresAt: Date.now() + CACHED_CORRELATION_HOOK_TTL_MS,
+  });
+  while (cachedCorrelationHooks.size > MAX_CACHED_CORRELATION_HOOKS) {
+    const oldest = cachedCorrelationHooks.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    cachedCorrelationHooks.delete(oldest);
+  }
+}
+
+function evictCachedCorrelationHook(token: string, rejected: WorkflowHook): void {
+  const cached = cachedCorrelationHooks.get(token);
+  if (cached?.hook.runId === rejected.runId) cachedCorrelationHooks.delete(token);
 }
 
 function message(error: unknown): string {

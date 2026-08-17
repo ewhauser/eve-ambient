@@ -160,20 +160,93 @@ describe("Workflow attention admission", () => {
     expect(workflowApi.start).toHaveBeenCalledTimes(1);
   });
 
-  it("cleans up a completed probe instead of retaining an owner cache", async () => {
+  it("reuses the owner returned by a completed warm probe", async () => {
     const owner = { runId: "warm-owner" };
     workflowApi.resumeHook.mockResolvedValue(owner);
-    const admission = engine("completed-cleanup");
+    const admission = engine("completed-cache");
     const inputs = await fanouts("completed", 2);
 
     await admission.accept(inputs[0]!);
     await admission.accept(inputs[1]!);
 
     expect(workflowApi.resumeHook).toHaveBeenCalledTimes(2);
-    expect(
-      workflowApi.resumeHook.mock.calls.every(([target]) => typeof target === "string"),
-    ).toBe(true);
+    expect(workflowApi.resumeHook.mock.calls[0]?.[0]).toEqual(expect.any(String));
+    expect(workflowApi.resumeHook.mock.calls[1]?.[0]).toBe(owner);
     expect(workflowApi.start).not.toHaveBeenCalled();
+  });
+
+  it("shares a cold owner across engine instances after initialization", async () => {
+    const owner = { runId: "shared-cold-owner" };
+    workflowApi.resumeHook
+      .mockRejectedValueOnce(new HookNotFoundError("missing"))
+      .mockResolvedValueOnce(owner);
+    workflowApi.start.mockResolvedValueOnce(owner);
+    workflowApi.getHookByToken.mockResolvedValueOnce(owner);
+    const first = engine("cross-engine-cache");
+    const second = engine("cross-engine-cache");
+
+    await first.accept(await fanout("cross-engine-first"));
+    await second.accept(await fanout("cross-engine-second"));
+
+    expect(workflowApi.start).toHaveBeenCalledTimes(1);
+    expect(workflowApi.getHookByToken).toHaveBeenCalledTimes(1);
+    expect(workflowApi.resumeHook).toHaveBeenCalledTimes(2);
+    expect(workflowApi.resumeHook.mock.calls[1]?.[0]).toBe(owner);
+  });
+
+  it("evicts a stale owner and retries the append through its token", async () => {
+    const staleOwner = { runId: "stale-owner" };
+    const activeOwner = { runId: "active-owner" };
+    workflowApi.resumeHook
+      .mockResolvedValueOnce(staleOwner)
+      .mockRejectedValueOnce(new HookNotFoundError("inactive"))
+      .mockResolvedValueOnce(activeOwner)
+      .mockResolvedValueOnce(activeOwner);
+    const first = await fanout("stale-token-first");
+    const recovered = await fanout("stale-token-recovered");
+
+    await engine("stale-token").accept(first);
+    await engine("stale-token").accept(recovered);
+    await engine("stale-token").accept(await fanout("stale-token-after"));
+
+    expect(workflowApi.resumeHook).toHaveBeenCalledTimes(4);
+    expect(workflowApi.resumeHook.mock.calls[1]?.[0]).toBe(staleOwner);
+    expect(workflowApi.resumeHook.mock.calls[2]?.[0]).toEqual(expect.any(String));
+    expect(workflowApi.resumeHook.mock.calls[3]?.[0]).toBe(activeOwner);
+    expect(workflowApi.resumeHook.mock.calls[1]?.[1]).toMatchObject({
+      append: { eventKey: recovered.eventKey },
+    });
+    expect(workflowApi.resumeHook.mock.calls[2]?.[1]).toMatchObject({
+      append: { eventKey: recovered.eventKey },
+    });
+    expect(workflowApi.start).not.toHaveBeenCalled();
+  });
+
+  it("seeds a replacement owner when a stale handle and token are both inactive", async () => {
+    const staleOwner = { runId: "stale-cold-owner" };
+    const replacement = { runId: "replacement-owner" };
+    workflowApi.resumeHook
+      .mockResolvedValueOnce(staleOwner)
+      .mockRejectedValueOnce(new HookNotFoundError("inactive"))
+      .mockRejectedValueOnce(new HookNotFoundError("missing"))
+      .mockResolvedValueOnce(replacement);
+    workflowApi.start.mockResolvedValueOnce(replacement);
+    workflowApi.getHookByToken.mockResolvedValueOnce(replacement);
+    const recovered = await fanout("stale-cold-recovered");
+    const instance = engine("stale-cold");
+
+    await instance.accept(await fanout("stale-cold-first"));
+    await instance.accept(recovered);
+    await instance.accept(await fanout("stale-cold-after"));
+
+    expect(workflowApi.resumeHook).toHaveBeenCalledTimes(4);
+    expect(workflowApi.resumeHook.mock.calls[1]?.[0]).toBe(staleOwner);
+    expect(workflowApi.resumeHook.mock.calls[2]?.[0]).toEqual(expect.any(String));
+    expect(workflowApi.resumeHook.mock.calls[3]?.[0]).toBe(replacement);
+    expect(workflowApi.start).toHaveBeenCalledTimes(1);
+    expect(workflowApi.start.mock.calls[0]?.[1]?.[2]).toMatchObject({
+      append: { eventKey: recovered.eventKey },
+    });
   });
 
   it("does not serialize unrelated correlation tokens", async () => {
@@ -224,6 +297,45 @@ describe("Workflow attention admission", () => {
     expect(workflowApi.getHookByToken).toHaveBeenCalledTimes(4);
     expect(workflowApi.start).toHaveBeenCalledTimes(1);
     expect(workflowApi.resumeHook).toHaveBeenCalledTimes(1);
+  });
+
+  it("expires an idle cached owner after ten minutes", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const owner = { runId: "expiring-owner" };
+    workflowApi.resumeHook.mockResolvedValue(owner);
+    const instance = engine("cache-ttl");
+
+    await instance.accept(await fanout("cache-ttl-first"));
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    await instance.accept(await fanout("cache-ttl-second"));
+
+    expect(workflowApi.resumeHook).toHaveBeenCalledTimes(2);
+    expect(workflowApi.resumeHook.mock.calls[0]?.[0]).toEqual(expect.any(String));
+    expect(workflowApi.resumeHook.mock.calls[1]?.[0]).toEqual(expect.any(String));
+  });
+
+  it("bounds the process-local hook cache with LRU eviction", async () => {
+    workflowApi.resumeHook.mockImplementation(async (target: string | { runId: string }) =>
+      typeof target === "string" ? { runId: `owner-${target}` } : target);
+    const instance = engine("cache-bounds");
+
+    for (let index = 0; index < 1_025; index += 1) {
+      await instance.accept(await fanout(
+        `cache-bounds-${index}`,
+        `correlation-${index}`,
+      ));
+    }
+    workflowApi.resumeHook.mockClear();
+
+    await instance.accept(await fanout("cache-bounds-first-again", "correlation-0"));
+    await instance.accept(await fanout("cache-bounds-last-again", "correlation-1024"));
+
+    expect(workflowApi.resumeHook).toHaveBeenCalledTimes(2);
+    expect(workflowApi.resumeHook.mock.calls[0]?.[0]).toEqual(expect.any(String));
+    expect(workflowApi.resumeHook.mock.calls[1]?.[0]).toEqual(expect.objectContaining({
+      runId: expect.any(String),
+    }));
   });
 });
 

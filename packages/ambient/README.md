@@ -35,6 +35,12 @@ The binding provides:
 - `fetch()` for authenticated `/ambient/prepare` and `/ambient/deliver`
   callbacks.
 
+Workflow admission shares resolved hook-owner handles across engine instances
+in a process-local 1,024-entry LRU with a 10-minute idle TTL. A missing or
+inactive cached owner is evicted, and the unchanged append safely retries by
+token before cold initialization. This is an advisory optimization over the
+standard Workflow API and requires no additional infrastructure.
+
 Workflow selects its standard World. Vercel uses the managed World
 automatically. For Workflow 5 self-hosting, use the official Postgres package's
 `beta` channel or published `@ewhauser/world-celld@^0.3.0`; both require the

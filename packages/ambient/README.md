@@ -29,6 +29,11 @@ it:
 export * from "@ewhauser/eve-ambient/workflows";
 ```
 
+The package also exposes the defining correlation and callback-step modules so
+Workflow can assign package-based durable IDs instead of embedding
+package-manager or build-system filesystem paths. Applications should continue
+to use the aggregate `workflows` export shown above.
+
 The binding provides:
 
 - `engine.accept()` for grouped correlation admission; and

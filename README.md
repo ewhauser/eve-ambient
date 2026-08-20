@@ -275,6 +275,20 @@ export * from "@ewhauser/eve-ambient/workflows";
 Configure Workflow for the application's framework, and mount the returned
 `fetch` handler at its authenticated prepare and deliver callback paths.
 
+When a trusted transport layer already authenticates and authorizes the
+callback caller, explicitly disable the redundant bearer token on both the
+Workflow steps and callback handler with `callbackAuth: "none"`:
+
+```ts
+definition(turns).with(workflow({
+  callbackUrl: "http://ambient.internal",
+  callbackAuth: "none",
+}));
+```
+
+Do not use this mode for a callback endpoint that is reachable without an
+independently enforced workload-identity policy.
+
 The complete typechecked example is
 [`examples/slack-sequence/src/slack-message-sequence.ts`](examples/slack-sequence/src/slack-message-sequence.ts).
 

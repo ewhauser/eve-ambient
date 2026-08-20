@@ -6,7 +6,8 @@ import type { AttentionStreamAppend } from "./stream-protocol.js";
 export interface CorrelationWorkflowConfig {
   readonly namespace: string;
   readonly callbackUrl: string;
-  readonly callbackSecretEnv: string;
+  /** Bearer-secret environment name, or null when transport authentication is authoritative. */
+  readonly callbackSecretEnv: string | null;
   readonly preparePath: string;
   readonly deliverPath: string;
   readonly maxRecentMessages: number;

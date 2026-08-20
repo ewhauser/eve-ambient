@@ -142,6 +142,8 @@ export interface WorkflowAttentionEngineOptions {
   readonly callbackUrl: string;
   /** Optional isolation prefix when multiple deployments share one World. */
   readonly namespace?: string | undefined;
+  /** Defaults to bearer authentication. Use none only behind authenticated transport policy. */
+  readonly callbackAuth?: "bearer" | "none" | undefined;
   readonly callbackSecretEnv?: string | undefined;
   readonly preparePath?: string | undefined;
   readonly deliverPath?: string | undefined;
@@ -187,6 +189,9 @@ export function workflow(
       return Object.freeze({
         engine: new WorkflowAttentionEngine(options),
         fetch: createWorkflowAttentionCallbackHandler(callbacks, {
+          ...(options.callbackAuth === undefined
+            ? {}
+            : { callbackAuth: options.callbackAuth }),
           ...(options.callbackSecretEnv === undefined
             ? {}
             : { secretEnv: options.callbackSecretEnv }),
@@ -217,12 +222,16 @@ export class WorkflowAttentionEngine implements AttentionEngine {
     if (options === null || typeof options !== "object") {
       throw new TypeError("Workflow attention engine options are required");
     }
+    const callbackAuth = callbackAuthMode(options.callbackAuth ?? "bearer");
+    if (callbackAuth === "none" && options.callbackSecretEnv !== undefined) {
+      throw new TypeError("callbackSecretEnv cannot be set when callbackAuth is none");
+    }
     this.#config = {
       namespace: nonEmpty(options.namespace ?? "default", "namespace"),
       callbackUrl: callbackBaseUrl(options.callbackUrl),
-      callbackSecretEnv: environmentName(
-        options.callbackSecretEnv ?? "AMBIENT_CALLBACK_SECRET",
-      ),
+      callbackSecretEnv: callbackAuth === "none"
+        ? null
+        : environmentName(options.callbackSecretEnv ?? "AMBIENT_CALLBACK_SECRET"),
       preparePath: pathName(options.preparePath ?? "/ambient/prepare", "preparePath"),
       deliverPath: pathName(options.deliverPath ?? "/ambient/deliver", "deliverPath"),
       maxRecentMessages: positiveInteger(
@@ -804,6 +813,8 @@ function populatedAppendManyBytes(serializedInputBytes: number, count: number): 
 }
 
 export interface WorkflowAttentionCallbackHandlerOptions {
+  /** Defaults to bearer authentication. Use none only behind authenticated transport policy. */
+  readonly callbackAuth?: "bearer" | "none" | undefined;
   readonly secretEnv?: string | undefined;
   readonly preparePath?: string | undefined;
   readonly deliverPath?: string | undefined;
@@ -820,7 +831,7 @@ export type WorkflowAttentionCallbackEnvelope =
       readonly terminal: boolean;
     };
 
-/** Handles authenticated by-value prepare and deliver Workflow steps. */
+/** Handles by-value prepare and deliver Workflow steps with explicit callback authentication. */
 export function createWorkflowAttentionCallbackHandler(
   callbacks: AttentionCallbacks,
   options: WorkflowAttentionCallbackHandlerOptions = {},
@@ -833,7 +844,13 @@ export function createWorkflowAttentionCallbackHandler(
   ) {
     throw new TypeError("attention callbacks must define prepare and deliver");
   }
-  const secretEnv = environmentName(options.secretEnv ?? "AMBIENT_CALLBACK_SECRET");
+  const callbackAuth = callbackAuthMode(options.callbackAuth ?? "bearer");
+  if (callbackAuth === "none" && options.secretEnv !== undefined) {
+    throw new TypeError("secretEnv cannot be set when callbackAuth is none");
+  }
+  const secretEnv = callbackAuth === "none"
+    ? null
+    : environmentName(options.secretEnv ?? "AMBIENT_CALLBACK_SECRET");
   const preparePath = pathName(options.preparePath ?? "/ambient/prepare", "preparePath");
   const deliverPath = pathName(options.deliverPath ?? "/ambient/deliver", "deliverPath");
   if (preparePath === deliverPath) throw new TypeError("preparePath and deliverPath must be different");
@@ -845,11 +862,13 @@ export function createWorkflowAttentionCallbackHandler(
 
   return async (request) => {
     if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
-    const secret = process.env[secretEnv];
-    if (secret === undefined || secret.length === 0) {
-      return json({ error: `callback secret environment variable ${secretEnv} is not set` }, 503);
+    if (secretEnv !== null) {
+      const secret = process.env[secretEnv];
+      if (secret === undefined || secret.length === 0) {
+        return json({ error: `callback secret environment variable ${secretEnv} is not set` }, 503);
+      }
+      if (!secretsMatch(bearerToken(request), secret)) return json({ error: "unauthorized" }, 401);
     }
-    if (!secretsMatch(bearerToken(request), secret)) return json({ error: "unauthorized" }, 401);
     const path = new URL(request.url).pathname;
     if (path !== preparePath && path !== deliverPath) return json({ error: "not found" }, 404);
     let body: unknown;
@@ -938,6 +957,13 @@ function environmentName(value: string): string {
     throw new TypeError("callbackSecretEnv must be an environment variable name");
   }
   return normalized;
+}
+
+function callbackAuthMode(value: string): "bearer" | "none" {
+  if (value !== "bearer" && value !== "none") {
+    throw new TypeError("callbackAuth must be bearer or none");
+  }
+  return value;
 }
 
 function pathName(value: string, name: string): string {

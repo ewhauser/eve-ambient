@@ -99,10 +99,15 @@ storage per rule.
 
 ## Callback endpoint
 
-The Workflow steps need the application's public callback base URL and the same
-bearer secret named by `callbackSecretEnv`. Keep the endpoint on a trusted
-network where possible. Rotate the secret in the step and application
+The Workflow steps need the application's callback base URL and, by default,
+the same bearer secret named by `callbackSecretEnv`. Keep the endpoint on a
+trusted network where possible. Rotate the secret in the step and application
 environments together.
+
+If an authenticated transport policy already restricts the endpoint to the
+Workflow workload identity, set `callbackAuth: "none"`. This explicitly omits
+the bearer header and verification. Do not use it as a substitute for caller
+authentication or on a publicly reachable callback endpoint.
 
 ## Lifecycle and cutover
 

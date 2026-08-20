@@ -268,6 +268,20 @@ describe("Workflow attention admission", () => {
       .toEqual(inputs.map((input) => input.event.id).sort());
   });
 
+  it("records transport-authenticated callbacks without a bearer secret", async () => {
+    const owner = { runId: "transport-auth-owner" };
+    workflowApi.resumeHook.mockRejectedValueOnce(new HookNotFoundError("missing"));
+    workflowApi.start.mockResolvedValueOnce(owner);
+    workflowApi.getHookByToken.mockResolvedValueOnce(owner);
+
+    await engine("transport-auth", { callbackAuth: "none" })
+      .accept(await fanout("transport-auth"));
+
+    expect(workflowApi.start.mock.calls[0]?.[1]?.[0]).toMatchObject({
+      callbackSecretEnv: null,
+    });
+  });
+
   it("resumes the elected owner when its seeded candidate loses", async () => {
     const candidate = { runId: "candidate-run" };
     const owner = { runId: "owner-run" };

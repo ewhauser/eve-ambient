@@ -75,6 +75,13 @@ and Workflow step read the value at request time, and the handler compares
 bearer tokens in constant time. Do not put the secret in append payloads,
 decisions, evidence, receipts, or logs.
 
+Bearer authentication remains the fail-closed default. Deployments whose
+transport layer independently authenticates and authorizes workload identities
+may set `callbackAuth: "none"` on the Workflow binding. This omits the bearer
+header and disables bearer verification; use it only when network policy makes
+the callback endpoint unreachable to unauthorized callers. Supplying a secret
+environment name together with `callbackAuth: "none"` is rejected.
+
 The callback URL, environment-variable name, and reducer inputs are recorded as
 Workflow data. Use Workflow encryption where supported and do not place secret
 values in `callbackUrl`.

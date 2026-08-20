@@ -10,6 +10,11 @@ import type {
 import { compileAttentionStreamAppends } from "@ewhauser/eve-ambient/protocol";
 import { hashIdempotencyInput } from "@ewhauser/eve-ambient/idempotency";
 import { correlationWorkflow } from "@ewhauser/eve-ambient/workflows";
+import {
+  invokeDeliver,
+  invokePrepare,
+  reportReducerConflict,
+} from "@ewhauser/eve-ambient/workflows/callback-steps";
 import { getHookByToken, resumeHook, start } from "workflow/api";
 import { HookNotFoundError } from "workflow/errors";
 import { getWorld, setWorld } from "workflow/runtime";
@@ -49,6 +54,17 @@ afterEach(async () => {
 });
 
 describe("standard Workflow correlation runtime", () => {
+  it("uses stable package IDs for published durable modules", () => {
+    expect(durableId(correlationWorkflow, "workflowId")).toMatch(
+      /^workflow\/\/@ewhauser\/eve-ambient\/workflows\/correlation@[^/]+\/\/correlationWorkflow$/,
+    );
+    for (const step of [invokeDeliver, invokePrepare, reportReducerConflict]) {
+      expect(durableId(step, "stepId")).toMatch(
+        /^step\/\/@ewhauser\/eve-ambient\/workflows\/callback-steps@[^/]+\/\/[^/]+$/,
+      );
+    }
+  });
+
   it("keeps warm admission within the measured World-call budget", async () => {
     const applicationCalls = { prepare: 0, deliver: 0 };
     const callbackUrl = await serve(createWorkflowAttentionCallbackHandler({
@@ -650,6 +666,17 @@ describe("standard Workflow correlation runtime", () => {
     expect(await newRunIds(before)).toEqual(afterWrap);
   });
 });
+
+function durableId(
+  fn: unknown,
+  property: "stepId" | "workflowId",
+): string {
+  const value = (fn as Record<string, unknown>)[property];
+  if (typeof value !== "string") {
+    throw new TypeError(`${property} is not registered`);
+  }
+  return value;
+}
 
 async function runIds(): Promise<Set<string>> {
   const world = await getWorld();

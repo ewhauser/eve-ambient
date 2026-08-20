@@ -34,6 +34,8 @@ export const packages = new Map([
         "dist/workflow-protocol.js",
         "dist/workflows/index.d.ts",
         "dist/workflows/index.js",
+        "dist/workflows/callback-steps.d.ts",
+        "dist/workflows/callback-steps.js",
         "dist/workflows/correlation.d.ts",
         "dist/workflows/correlation.js",
         "LICENSE",
@@ -95,6 +97,25 @@ function validateManifest(packagePath, expected) {
   }
 
   if (packagePath === "packages/ambient") {
+    // Workflow derives stable package IDs only for files that are direct
+    // package export targets. Keep every module containing a durable directive
+    // exported so pnpm and Bazel filesystem paths never leak into those IDs.
+    const durableModuleExports = {
+      "./workflows/callback-steps": "./dist/workflows/callback-steps",
+      "./workflows/correlation": "./dist/workflows/correlation",
+    };
+    for (const [subpath, target] of Object.entries(durableModuleExports)) {
+      const exported = manifest.exports?.[subpath];
+      if (
+        exported?.types !== `${target}.d.ts` ||
+        exported?.import !== `${target}.js` ||
+        exported?.default !== `${target}.js`
+      ) {
+        failures.push(
+          `${subpath} must directly export its durable Workflow module`,
+        );
+      }
+    }
     const eveDependency = [
       manifest.dependencies?.eve,
       manifest.optionalDependencies?.eve,

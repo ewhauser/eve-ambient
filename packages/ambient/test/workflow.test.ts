@@ -55,6 +55,40 @@ describe("Workflow callback handler", () => {
     expect(response.status).toBe(401);
   });
 
+  it("allows transport-authenticated callbacks without a bearer secret", async () => {
+    const prepare = vi.fn(async () => ({ kind: "ignore" as const, decision: null }));
+    const handler = createWorkflowAttentionCallbackHandler({
+      prepare,
+      async deliver() {
+        throw new Error("not called");
+      },
+    }, { callbackAuth: "none" });
+
+    const response = await handler(
+      new Request("https://application.example.test/ambient/prepare", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ batchKey: "batch-1" }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true });
+    expect(prepare).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an ambiguous secret when callback authentication is disabled", () => {
+    expect(() => createWorkflowAttentionCallbackHandler({
+      async prepare() {
+        return { kind: "ignore", decision: null };
+      },
+      async deliver() {
+        throw new Error("not called");
+      },
+    }, { callbackAuth: "none", secretEnv: SECRET_ENV }))
+      .toThrow("secretEnv cannot be set when callbackAuth is none");
+  });
+
   it("rejects callback URLs that cannot be composed safely", () => {
     expect(() => createWorkflowAttentionCallbackHandler({
       async prepare() {

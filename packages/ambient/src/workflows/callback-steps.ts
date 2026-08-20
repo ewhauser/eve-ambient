@@ -28,7 +28,7 @@ interface CallbackFailure {
 export async function invokePrepare(
   callbackUrl: string,
   path: string,
-  secretEnv: string,
+  secretEnv: string | null,
   batch: FrozenAttentionBatch,
 ): Promise<PrepareCallbackResult> {
   "use step";
@@ -39,7 +39,7 @@ export async function invokePrepare(
 export async function invokeDeliver(
   callbackUrl: string,
   path: string,
-  secretEnv: string,
+  secretEnv: string | null,
   wake: PreparedAttentionWake,
 ): Promise<DeliverCallbackResult> {
   "use step";
@@ -59,13 +59,13 @@ export async function reportReducerConflict(
 async function invoke(
   callbackUrl: string,
   path: string,
-  secretEnv: string,
+  secretEnv: string | null,
   body: unknown,
 ): Promise<PrepareCallbackResult | DeliverCallbackResult> {
   const completedAt = () => new Date().toISOString();
   try {
-    const secret = process.env[secretEnv];
-    if (secret === undefined || secret.length === 0) {
+    const secret = secretEnv === null ? undefined : process.env[secretEnv];
+    if (secretEnv !== null && (secret === undefined || secret.length === 0)) {
       return {
         ok: false,
         completedAt: completedAt(),
@@ -75,10 +75,12 @@ async function invoke(
     }
     const response = await globalThis.fetch(`${callbackUrl}${path}`, {
       method: "POST",
-      headers: {
-        authorization: `Bearer ${secret}`,
-        "content-type": "application/json",
-      },
+      headers: secret === undefined
+        ? { "content-type": "application/json" }
+        : {
+            authorization: `Bearer ${secret}`,
+            "content-type": "application/json",
+          },
       body: JSON.stringify(body),
     });
     const value = await response.json() as unknown;

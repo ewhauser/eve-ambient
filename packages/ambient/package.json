@@ -45,6 +45,16 @@
       "import": "./dist/workflows/index.js",
       "default": "./dist/workflows/index.js"
     },
+    "./workflows/correlation": {
+      "types": "./dist/workflows/correlation.d.ts",
+      "import": "./dist/workflows/correlation.js",
+      "default": "./dist/workflows/correlation.js"
+    },
+    "./workflows/callback-steps": {
+      "types": "./dist/workflows/callback-steps.d.ts",
+      "import": "./dist/workflows/callback-steps.js",
+      "default": "./dist/workflows/callback-steps.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

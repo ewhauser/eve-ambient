@@ -1,6 +1,6 @@
 {
   "name": "@ewhauser/eve-ambient",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Durable ambient attention engine for typed channel events.",
   "license": "MIT",
   "type": "module",

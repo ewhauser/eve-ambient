@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.3](https://github.com/ewhauser/eve-ambient/compare/v0.6.2...v0.6.3) (2026-08-20)
+
+
+### Bug Fixes
+
+* **ambient:** allow transport-authenticated callbacks ([#47](https://github.com/ewhauser/eve-ambient/issues/47)) ([4ddcea4](https://github.com/ewhauser/eve-ambient/commit/4ddcea41733331a3213cb8fea04e158fc2648777))
+
 ## [0.6.2](https://github.com/ewhauser/eve-ambient/compare/v0.6.1...v0.6.2) (2026-08-20)
 
 

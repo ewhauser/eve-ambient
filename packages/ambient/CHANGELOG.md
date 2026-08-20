@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.2](https://github.com/ewhauser/eve-ambient/compare/v0.6.1...v0.6.2) (2026-08-20)
+
+
+### Bug Fixes
+
+* **ambient:** publish stable durable module IDs ([#45](https://github.com/ewhauser/eve-ambient/issues/45)) ([94a34f9](https://github.com/ewhauser/eve-ambient/commit/94a34f90d9d7fdc6ac2fcc18b33df8de13e9fad3))
+
 ## [0.6.1](https://github.com/ewhauser/eve-ambient/compare/v0.6.0...v0.6.1) (2026-08-17)
 
 

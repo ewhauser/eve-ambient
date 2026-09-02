@@ -127,8 +127,8 @@ function validateManifest(packagePath, expected) {
     if (manifest.dependencies?.workflow !== undefined) {
       failures.push("Workflow must remain an optional peer, not a direct dependency");
     }
-    if (manifest.devDependencies?.workflow !== "5.0.0-beta.42") {
-      failures.push("Workflow development dependency must be exactly 5.0.0-beta.42");
+    if (manifest.devDependencies?.workflow !== "5.0.0-beta.44") {
+      failures.push("Workflow development dependency must be exactly 5.0.0-beta.44");
     }
     if (manifest.peerDependencies?.workflow !== ">=5.0.0-beta.42 <6") {
       failures.push("Workflow peer range must cover the supported Workflow 5 runtime");

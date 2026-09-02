@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/ewhauser/eve-ambient/compare/v0.6.3...v0.7.0) (2026-09-02)
+
+
+### Features
+
+* **eve-adapter:** upgrade to Eve 0.49 ([#51](https://github.com/ewhauser/eve-ambient/issues/51)) ([d64fa16](https://github.com/ewhauser/eve-ambient/commit/d64fa16277088bde5c804b26a9a66aaf0e76ec4e))
+
 ## [0.6.3](https://github.com/ewhauser/eve-ambient/compare/v0.6.2...v0.6.3) (2026-08-20)
 
 

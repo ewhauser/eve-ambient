@@ -20,7 +20,7 @@ minimumReleaseAge: 1440
 # package patch for vercel/eve#1842. Consumers must apply the same patch in
 # their own workspace; a dependency cannot activate pnpm patches for its host.
 minimumReleaseAgeExclude:
-  - "eve@0.38.1"
+  - "eve@0.49.0"
 
 patchedDependencies:
-  "eve@0.38.1": packages/eve-adapter/patches/eve@0.38.1.patch
+  "eve@0.49.0": packages/eve-adapter/patches/eve@0.49.0.patch

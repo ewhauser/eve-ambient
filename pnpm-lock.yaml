@@ -9,7 +9,7 @@ overrides:
   undici@7.28.0: 7.29.0
 
 patchedDependencies:
-  eve@0.38.1: d32bd74253cdb621fa7401a045a43bfc505a9d5906211932ff0c38cc741085f0
+  eve@0.49.0: 672fd356cc8834ac4a76b54b2370177610fd637ee815fdcd216b17f222e2627f
 
 importers:
 
@@ -43,8 +43,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/eve-adapter
       eve:
-        specifier: 0.38.1
-        version: 0.38.1(patch_hash=d32bd74253cdb621fa7401a045a43bfc505a9d5906211932ff0c38cc741085f0)(@vercel/functions@3.9.3(@aws-sdk/credential-provider-web-identity@3.972.49)(ws@8.21.3))(@vercel/queue@0.3.1)(ai@7.0.62(zod@4.4.3))(chokidar@5.0.0)(dotenv@17.4.2)(drizzle-orm@0.45.2(@types/pg@8.21.0)(pg@8.23.0))(giget@3.3.1)(jiti@2.7.0)(vite@8.2.1(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0))
+        specifier: 0.49.0
+        version: 0.49.0(patch_hash=672fd356cc8834ac4a76b54b2370177610fd637ee815fdcd216b17f222e2627f)(@vercel/functions@3.9.3(@aws-sdk/credential-provider-web-identity@3.972.49)(ws@8.21.3))(@vercel/queue@0.3.1)(ai@7.0.87(zod@4.4.3))(chokidar@5.0.0)(dotenv@17.4.2)(drizzle-orm@0.45.2(@types/pg@8.21.0)(pg@8.23.0))(giget@3.3.1)(jiti@2.7.0)(vite@8.2.1(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0))
     devDependencies:
       '@types/node':
         specifier: ^26.1.2
@@ -99,8 +99,8 @@ importers:
         specifier: workspace:*
         version: link:../ambient
       eve:
-        specifier: 0.38.1
-        version: 0.38.1(patch_hash=d32bd74253cdb621fa7401a045a43bfc505a9d5906211932ff0c38cc741085f0)(@vercel/functions@3.9.3(@aws-sdk/credential-provider-web-identity@3.972.49)(ws@8.21.3))(@vercel/queue@0.3.1)(ai@7.0.62(zod@4.4.3))(chokidar@5.0.0)(dotenv@17.4.2)(drizzle-orm@0.45.2(@types/pg@8.21.0)(pg@8.23.0))(giget@3.3.1)(jiti@2.7.0)(vite@8.2.1(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0))
+        specifier: 0.49.0
+        version: 0.49.0(patch_hash=672fd356cc8834ac4a76b54b2370177610fd637ee815fdcd216b17f222e2627f)(@vercel/functions@3.9.3(@aws-sdk/credential-provider-web-identity@3.972.49)(ws@8.21.3))(@vercel/queue@0.3.1)(ai@7.0.87(zod@4.4.3))(chokidar@5.0.0)(dotenv@17.4.2)(drizzle-orm@0.45.2(@types/pg@8.21.0)(pg@8.23.0))(giget@3.3.1)(jiti@2.7.0)(vite@8.2.1(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0))
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
@@ -110,20 +110,20 @@ importers:
 
 packages:
 
-  '@ai-sdk/gateway@4.0.49':
-    resolution: {integrity: sha512-qdSUr4FAN7e+MHBdVzkmbGMtpf7XQdQp1AgMI3jV0QPmld/4k4QbR7mXRQgjUsPeIfAwBzMPMPziHAPP1tXRwg==}
+  '@ai-sdk/gateway@4.0.70':
+    resolution: {integrity: sha512-0tzAH2vwXOs/kVktAZRS04dATEQJk1hf1QR+VuVfvo9QmW3UPgcjhhJD9QFgP8HZLxkrEGDImwLIQ7sUfQTIsA==}
     engines: {node: '>=22'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
 
-  '@ai-sdk/provider-utils@5.0.27':
-    resolution: {integrity: sha512-EzAn4pdgG5g0xXtH6lE2zyNmfjDQIDjATkfqzuidEI35g++hh4+07vnjzkT/RmGmIClPZiRj/Q2GMPV2V7mkHw==}
+  '@ai-sdk/provider-utils@5.0.34':
+    resolution: {integrity: sha512-tRBdgRcys/4d8wyQdOdyYScq1AxfMdMd0hIlwolxJKVIbBwXUgClZuQT0VIsz4e7pylY8FE6utYCCZ494UAMJQ==}
     engines: {node: '>=22'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
 
-  '@ai-sdk/provider@4.0.7':
-    resolution: {integrity: sha512-6or44XprPzKbr8zkmzosowSE0pxkvJcoojBL+mCZvPUt3kvXp3XSNqeVun9golb1acEfSo6yaEBRT18h2VU+1Q==}
+  '@ai-sdk/provider@4.0.9':
+    resolution: {integrity: sha512-XnGXPWiBIfqjsVEud5pOaVneRByJQOu2sYNwlSVJTPCvakdCDkVuYKKfNuStkIpMUYl7JIkBZGBx+B5YfNeVjA==}
     engines: {node: '>=22'}
 
   '@aws-sdk/core@3.977.7':
@@ -1120,8 +1120,8 @@ packages:
     engines: {node: '>=0.4.0'}
     hasBin: true
 
-  ai@7.0.62:
-    resolution: {integrity: sha512-/YiuaaFIUPAiGqzHphnu9NuHQKbToZjlZkKoqGsQx6TFd7CZj6Z3eQUNeK6er1kXb9Ou5hRntRX4dvvE/kHYiQ==}
+  ai@7.0.87:
+    resolution: {integrity: sha512-/hrT7toRx8vLIyr/lTKOOPDxCGdxk2tVs5viHDwIPlUsge5FBaLe9h3BhPAr7cOmEAXkN/Cf2+2N8HYGCjJbHg==}
     engines: {node: '>=22'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
@@ -1647,15 +1647,15 @@ packages:
     resolution: {integrity: sha512-aIL5Fx7mawVa300al2BnEE4iNvo1qETxLrPI/o05L7z6go7fCw1J6EQmbK4FmJ2AS7kgVF/KEZWufBfdClMcPg==}
     engines: {node: '>= 0.6'}
 
-  eve@0.38.1:
-    resolution: {integrity: sha512-rFAagaPtzui4krwq9ubG9w6y758xVAueGjy1zmx3gTO/ppF9ob7RmZWiXTB2TMcg2XhA7AAPEp75eLWQmZB1Gg==}
+  eve@0.49.0:
+    resolution: {integrity: sha512-ij2RJtGs0RNO+1jKtneHfx/atP9LbjlBmyj8SHVoEsFGPgexOOrl1vlvxzIsI2/LY136VBhJ+Lak+dmPjMtpWA==}
     engines: {node: '>=24'}
     hasBin: true
     peerDependencies:
       '@opentelemetry/api': ^1.0.0
-      ai: ^7.0.58
+      ai: ^7.0.82
       braintrust: ^3.0.0
-      just-bash: ^3.0.0
+      just-bash: ^3.1.0
       microsandbox: ^0.5.0
     peerDependenciesMeta:
       '@opentelemetry/api':
@@ -3089,23 +3089,23 @@ packages:
 
 snapshots:
 
-  '@ai-sdk/gateway@4.0.49(zod@4.4.3)':
+  '@ai-sdk/gateway@4.0.70(zod@4.4.3)':
     dependencies:
-      '@ai-sdk/provider': 4.0.7
-      '@ai-sdk/provider-utils': 5.0.27(zod@4.4.3)
+      '@ai-sdk/provider': 4.0.9
+      '@ai-sdk/provider-utils': 5.0.34(zod@4.4.3)
       '@vercel/oidc': 3.2.0
       zod: 4.4.3
 
-  '@ai-sdk/provider-utils@5.0.27(zod@4.4.3)':
+  '@ai-sdk/provider-utils@5.0.34(zod@4.4.3)':
     dependencies:
-      '@ai-sdk/provider': 4.0.7
+      '@ai-sdk/provider': 4.0.9
       '@standard-schema/spec': 1.1.0
       '@workflow/serde': 4.1.0
       eventsource-parser: 3.1.1
       undici: 7.29.0
       zod: 4.4.3
 
-  '@ai-sdk/provider@4.0.7':
+  '@ai-sdk/provider@4.0.9':
     dependencies:
       json-schema: 0.4.0
 
@@ -4527,11 +4527,11 @@ snapshots:
 
   acorn@8.18.0: {}
 
-  ai@7.0.62(zod@4.4.3):
+  ai@7.0.87(zod@4.4.3):
     dependencies:
-      '@ai-sdk/gateway': 4.0.49(zod@4.4.3)
-      '@ai-sdk/provider': 4.0.7
-      '@ai-sdk/provider-utils': 5.0.27(zod@4.4.3)
+      '@ai-sdk/gateway': 4.0.70(zod@4.4.3)
+      '@ai-sdk/provider': 4.0.9
+      '@ai-sdk/provider-utils': 5.0.34(zod@4.4.3)
       zod: 4.4.3
 
   ansi-align@3.0.1:
@@ -4928,9 +4928,9 @@ snapshots:
 
   etag@1.8.1: {}
 
-  eve@0.38.1(patch_hash=d32bd74253cdb621fa7401a045a43bfc505a9d5906211932ff0c38cc741085f0)(@vercel/functions@3.9.3(@aws-sdk/credential-provider-web-identity@3.972.49)(ws@8.21.3))(@vercel/queue@0.3.1)(ai@7.0.62(zod@4.4.3))(chokidar@5.0.0)(dotenv@17.4.2)(drizzle-orm@0.45.2(@types/pg@8.21.0)(pg@8.23.0))(giget@3.3.1)(jiti@2.7.0)(vite@8.2.1(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0)):
+  eve@0.49.0(patch_hash=672fd356cc8834ac4a76b54b2370177610fd637ee815fdcd216b17f222e2627f)(@vercel/functions@3.9.3(@aws-sdk/credential-provider-web-identity@3.972.49)(ws@8.21.3))(@vercel/queue@0.3.1)(ai@7.0.87(zod@4.4.3))(chokidar@5.0.0)(dotenv@17.4.2)(drizzle-orm@0.45.2(@types/pg@8.21.0)(pg@8.23.0))(giget@3.3.1)(jiti@2.7.0)(vite@8.2.1(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0)):
     dependencies:
-      ai: 7.0.62(zod@4.4.3)
+      ai: 7.0.87(zod@4.4.3)
       nitro: 3.0.260610-beta(@vercel/functions@3.9.3(@aws-sdk/credential-provider-web-identity@3.972.49)(ws@8.21.3))(@vercel/queue@0.3.1)(chokidar@5.0.0)(dotenv@17.4.2)(drizzle-orm@0.45.2(@types/pg@8.21.0)(pg@8.23.0))(giget@3.3.1)(jiti@2.7.0)(vite@8.2.1(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0))
       undici: 8.9.0
     transitivePeerDependencies:

@@ -1,8 +1,8 @@
 diff --git i/packages/eve/src/channel/channel-address.test.ts w/packages/eve/src/channel/channel-address.test.ts
-index 6ed63f5..6e3d838 100644
+index a8cc3808..065a48c5 100644
 --- i/packages/eve/src/channel/channel-address.test.ts
 +++ w/packages/eve/src/channel/channel-address.test.ts
-@@ -58,0 +59,47 @@ describe("createChannelAddress", () => {
+@@ -62,0 +63,48 @@ describe("createChannelAddress", () => {
 +  it("carries one explicit idempotency key through existing and initial sessions", async () => {
 +    const existingRuntime = createRuntime();
 +    const existingAddress = createChannelAddress({
@@ -29,8 +29,9 @@ index 6ed63f5..6e3d838 100644
 +      status: "session_not_active",
 +    });
 +    vi.mocked(initialRuntime.createSession).mockResolvedValue({
++      events: new ReadableStream(),
 +      sessionId: "sess_2",
-+    } as never);
++    });
 +    const initialAddress = createChannelAddress({
 +      adapter: { kind: "slack" },
 +      channelName: "slack",
@@ -51,7 +52,7 @@ index 6ed63f5..6e3d838 100644
 +  });
 +
 diff --git i/packages/eve/src/channel/channel-address.ts w/packages/eve/src/channel/channel-address.ts
-index 9e30aa3..6735606 100644
+index 4e9df5d5..5f0385c5 100644
 --- i/packages/eve/src/channel/channel-address.ts
 +++ w/packages/eve/src/channel/channel-address.ts
 @@ -30,0 +31 @@ interface BaseChannelAddressDeliveryOptions {
@@ -60,39 +61,39 @@ index 9e30aa3..6735606 100644
 +        ...(options.idempotencyKey === undefined
 +          ? {}
 +          : { taskDeliveryId: options.idempotencyKey }),
-@@ -151,0 +156,3 @@ export function createChannelAddress<TState = undefined>(input: {
+@@ -149,0 +154,3 @@ export function createChannelAddress<TState = undefined>(input: {
 +        ...(options.idempotencyKey === undefined
 +          ? {}
 +          : { idempotencyKey: options.idempotencyKey }),
 diff --git i/packages/eve/src/channel/channel-operations.ts w/packages/eve/src/channel/channel-operations.ts
-index d2a25ef..f95b0e0 100644
+index ddf45703..5bd65f2d 100644
 --- i/packages/eve/src/channel/channel-operations.ts
 +++ w/packages/eve/src/channel/channel-operations.ts
-@@ -28,0 +29,5 @@ interface BaseChannelSendOptions {
+@@ -32,0 +33,5 @@ interface BaseChannelSendOptions {
 +  /**
 +   * Stable identity for one logical delivery. Retrying the same key while
 +   * this address is owned does not admit another turn.
 +   */
 +  readonly idempotencyKey?: string;
 diff --git i/packages/eve/src/channel/types.ts w/packages/eve/src/channel/types.ts
-index 623f2e9..4cbf20b 100644
+index b33fea57..dc0737f5 100644
 --- i/packages/eve/src/channel/types.ts
 +++ w/packages/eve/src/channel/types.ts
-@@ -436,0 +437,5 @@ export interface RunInput {
+@@ -440,0 +441,5 @@ export interface RunInput {
 +  /**
 +   * Stable identity for the initial channel delivery. The workflow seeds its
 +   * durable session-local delivery ledger with this key before the first turn.
 +   */
 +  readonly idempotencyKey?: string;
 diff --git i/packages/eve/src/execution/workflow-entry.ts w/packages/eve/src/execution/workflow-entry.ts
-index b069027..e149af0 100644
+index b3bcc757..812daee5 100644
 --- i/packages/eve/src/execution/workflow-entry.ts
 +++ w/packages/eve/src/execution/workflow-entry.ts
-@@ -62,0 +63 @@ export interface WorkflowEntryInput {
+@@ -69,0 +70 @@ export interface WorkflowEntryInput {
 +  readonly idempotencyKey?: RunInput["idempotencyKey"];
-@@ -210,0 +212 @@ export async function workflowEntry(input: WorkflowEntryInput): Promise<Workflow
-+        taskDeliveryId: input.idempotencyKey,
-@@ -389,0 +392,6 @@ async function runDriverLoop(input: {
+@@ -280,0 +282 @@ export async function workflowEntry(input: WorkflowEntryInput): Promise<Workflow
++          taskDeliveryId: input.idempotencyKey,
+@@ -487,0 +490,6 @@ async function runDriverLoop(input: {
 +  if (
 +    input.initialInput.kind === "deliver" &&
 +    input.initialInput.taskDeliveryId !== undefined
@@ -100,10 +101,10 @@ index b069027..e149af0 100644
 +    seenTaskDeliveries.add(input.initialInput.taskDeliveryId);
 +  }
 diff --git i/packages/eve/src/execution/workflow-runtime.ts w/packages/eve/src/execution/workflow-runtime.ts
-index a08ee48..55de3ae 100644
+index a83d5670..068e20a4 100644
 --- i/packages/eve/src/execution/workflow-runtime.ts
 +++ w/packages/eve/src/execution/workflow-runtime.ts
-@@ -152,0 +153,3 @@ export function createWorkflowRuntime(config: {
+@@ -209,0 +210,3 @@ export function createWorkflowRuntime(config: {
 +      if (input.idempotencyKey !== undefined) {
 +        workflowInput.idempotencyKey = input.idempotencyKey;
 +      }

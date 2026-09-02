@@ -37,9 +37,9 @@ for (const packageRoot of [baseline, modified]) {
   const manifest = JSON.parse(
     readFileSync(resolve(packageRoot, "package.json"), "utf8"),
   );
-  if (manifest.name !== "eve" || manifest.version !== "0.38.1") {
+  if (manifest.name !== "eve" || manifest.version !== "0.49.0") {
     throw new Error(
-      `expected eve@0.38.1 at ${packageRoot}, found ${String(manifest.name)}@${String(manifest.version)}`,
+      `expected eve@0.49.0 at ${packageRoot}, found ${String(manifest.name)}@${String(manifest.version)}`,
     );
   }
 }
@@ -98,9 +98,9 @@ try {
     });
     if (
       sourceHead.status !== 0 ||
-      sourceHead.stdout.trim() !== "a6c6ef46ea43b037155e987ef576ad0f1c316f67"
+      sourceHead.stdout.trim() !== "78fa9046b8ad377b7fdca2c6d18cd3c10afcfc77"
     ) {
-      throw new Error("Eve source repository is not at the eve@0.38.1 commit");
+      throw new Error("Eve source repository is not at the eve@0.49.0 commit");
     }
     const sourceFiles = [
       "packages/eve/src/channel/channel-address.test.ts",

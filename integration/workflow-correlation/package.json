@@ -13,9 +13,9 @@
     "workflow": "5.0.0-beta.42"
   },
   "devDependencies": {
-    "@types/node": "^26.1.2",
+    "@types/node": "^26.3.0",
     "@workflow/vitest": "5.0.0-beta.42",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   }
 }

@@ -49,6 +49,6 @@
     "@ewhauser/eve-ambient": "workspace:*",
     "eve": "0.49.0",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   }
 }

@@ -24,8 +24,8 @@ export {
   type EveGitHubPullRequestTarget,
 } from "./github.js";
 
-export const SUPPORTED_EVE_VERSION = "0.38.1" as const;
-export const EVE_PATCH_FILE = "patches/eve@0.38.1.patch" as const;
+export const SUPPORTED_EVE_VERSION = "0.49.0" as const;
+export const EVE_PATCH_FILE = "patches/eve@0.49.0.patch" as const;
 
 export type EveChannelAuth = ChannelSendOptions["auth"];
 

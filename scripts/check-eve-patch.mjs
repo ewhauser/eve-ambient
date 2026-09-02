@@ -5,9 +5,9 @@ const packageRoot = resolve("packages/eve-adapter/node_modules/eve");
 const manifest = JSON.parse(
   readFileSync(resolve(packageRoot, "package.json"), "utf8"),
 );
-if (manifest.name !== "eve" || manifest.version !== "0.38.1") {
+if (manifest.name !== "eve" || manifest.version !== "0.49.0") {
   throw new Error(
-    `expected patched eve@0.38.1, found ${String(manifest.name)}@${String(manifest.version)}`,
+    `expected patched eve@0.49.0, found ${String(manifest.name)}@${String(manifest.version)}`,
   );
 }
 
@@ -21,28 +21,28 @@ const assertions = [
     "taskDeliveryId:o.idempotencyKey",
   ],
   ["dist/src/channel/channel-address.js", "idempotencyKey:o.idempotencyKey"],
-  ["dist/src/execution/workflow-entry.js", "taskDeliveryId:e.idempotencyKey"],
+  ["dist/src/execution/workflow-entry.js", "taskDeliveryId:r.idempotencyKey"],
   [
     "dist/src/execution/workflow-runtime.js",
-    "d.idempotencyKey=i.idempotencyKey",
+    "a.idempotencyKey!==void 0&&(m.idempotencyKey=a.idempotencyKey)",
   ],
 ];
 
 for (const [file, marker] of assertions) {
   const contents = readFileSync(resolve(packageRoot, file), "utf8");
   if (!contents.includes(marker)) {
-    throw new Error(`eve@0.38.1 is missing carried patch marker in ${file}`);
+    throw new Error(`eve@0.49.0 is missing carried patch marker in ${file}`);
   }
 }
 
 const patch = readFileSync(
-  resolve("packages/eve-adapter/patches/eve@0.38.1.patch"),
+  resolve("packages/eve-adapter/patches/eve@0.49.0.patch"),
   "utf8",
 );
 for (const marker of [
   "readonly idempotencyKey?: string;",
   "taskDeliveryId:o.idempotencyKey",
-  "d.idempotencyKey=i.idempotencyKey",
+  "a.idempotencyKey!==void 0&&(m.idempotencyKey=a.idempotencyKey)",
 ]) {
   if (!patch.includes(marker)) {
     throw new Error(`published Eve patch is missing marker ${marker}`);
@@ -50,7 +50,7 @@ for (const marker of [
 }
 
 const sourcePatch = readFileSync(
-  resolve("packages/eve-adapter/patches/eve@0.38.1-source.patch"),
+  resolve("packages/eve-adapter/patches/eve@0.49.0-source.patch"),
   "utf8",
 );
 for (const marker of [
@@ -63,4 +63,4 @@ for (const marker of [
   }
 }
 
-console.log("verified carried Eve idempotency patch for eve@0.38.1");
+console.log("verified carried Eve idempotency patch for eve@0.49.0");

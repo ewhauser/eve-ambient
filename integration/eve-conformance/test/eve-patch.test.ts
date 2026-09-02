@@ -23,7 +23,7 @@ describe("carried eve patch", () => {
     const manifest = JSON.parse(
       readFileSync(resolve(eveRoot, "package.json"), "utf8"),
     );
-    expect(manifest.version).toBe("0.38.1");
+    expect(manifest.version).toBe("0.49.0");
 
     const options: ChannelSendOptions = {
       auth: null,
@@ -102,7 +102,7 @@ describe("carried eve patch", () => {
       resolve(eveRoot, "dist/src/execution/workflow-entry.js"),
       "utf8",
     );
-    expect(workflow).toContain("taskDeliveryId:e.idempotencyKey");
+    expect(workflow).toMatch(/taskDeliveryId:[A-Za-z_$][\w$]*\.idempotencyKey/);
     expect(workflow).toMatch(
       /initialInput\.kind===`deliver`&&.*seenTaskDeliveries|\.kind===`deliver`&&.*\.add\(/,
     );

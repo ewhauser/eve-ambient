@@ -5,7 +5,7 @@
 
 ### Features
 
-* **eve-adapter:** upgrade to Eve 0.49 ([#51](https://github.com/ewhauser/eve-ambient/issues/51)) ([d64fa16](https://github.com/ewhauser/eve-ambient/commit/d64fa16277088bde5c804b26a9a66aaf0e76ec4e))
+* **eve-adapter:** upgrade to Eve 0.71.2 ([#51](https://github.com/ewhauser/eve-ambient/pull/51), [#60](https://github.com/ewhauser/eve-ambient/pull/60))
 
 
 ### Bug Fixes

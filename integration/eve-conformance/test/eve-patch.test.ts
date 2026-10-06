@@ -23,7 +23,7 @@ describe("carried eve patch", () => {
     const manifest = JSON.parse(
       readFileSync(resolve(eveRoot, "package.json"), "utf8"),
     );
-    expect(manifest.version).toBe("0.49.0");
+    expect(manifest.version).toBe("0.71.2");
 
     const options: ChannelSendOptions = {
       auth: null,
@@ -97,14 +97,13 @@ describe("carried eve patch", () => {
     ]);
   });
 
-  it("seeds the durable workflow's delivery ledger before its first turn", () => {
-    const workflow = readFileSync(
-      resolve(eveRoot, "dist/src/execution/workflow-entry.js"),
-      "utf8",
-    );
-    expect(workflow).toMatch(/taskDeliveryId:[A-Za-z_$][\w$]*\.idempotencyKey/);
-    expect(workflow).toMatch(
-      /initialInput\.kind===`deliver`&&.*seenTaskDeliveries|\.kind===`deliver`&&.*\.add\(/,
-    );
+  it("seeds and retains delivery identity across session owners", () => {
+    const entry = readFileSync(resolve(eveRoot, "dist/src/execution/session/entry.js"), "utf8");
+    const program = readFileSync(resolve(eveRoot, "dist/src/execution/session/program.js"), "utf8");
+    const inbox = readFileSync(resolve(eveRoot, "dist/src/execution/session-inbox/inbox.js"), "utf8");
+    expect(entry).toContain("createSessionInbox(t,e.idempotencyKey");
+    expect(entry).toContain("e.checkpoint.seenTaskDeliveries");
+    expect(program).toContain("seenTaskDeliveries:i.seenTaskDeliveries");
+    expect(inbox).toContain("seen.has(e.value.taskDeliveryId)");
   });
 });

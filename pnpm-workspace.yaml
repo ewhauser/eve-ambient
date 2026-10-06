@@ -17,10 +17,10 @@ overrides:
 minimumReleaseAge: 1440
 
 # The official Eve adapter targets this exact release because it carries a
-# package patch for vercel/eve#1842. Consumers must apply the same patch in
-# their own workspace; a dependency cannot activate pnpm patches for its host.
+# package patch for durable channel-delivery identity. Consumers must apply
+# the same patch; a dependency cannot activate pnpm patches for its host.
 minimumReleaseAgeExclude:
-  - "eve@0.49.0"
+  - "eve@0.71.2"
 
 patchedDependencies:
-  "eve@0.49.0": packages/eve-adapter/patches/eve@0.49.0.patch
+  "eve@0.71.2": packages/eve-adapter/patches/eve@0.71.2.patch

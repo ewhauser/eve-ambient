@@ -51,8 +51,7 @@ export const packages = new Map([
       requiredFiles: [
         "dist/index.d.ts",
         "dist/index.js",
-        "patches/eve@0.49.0-source.patch",
-        "patches/eve@0.49.0.patch",
+        "patches/eve@0.71.2.patch",
         "LICENSE",
         "README.md",
       ],
@@ -139,11 +138,11 @@ function validateManifest(packagePath, expected) {
   }
 
   if (packagePath === "packages/eve-adapter") {
-    if (manifest.peerDependencies?.eve !== "0.49.0") {
-      failures.push("eve peer dependency must be exactly 0.49.0");
+    if (manifest.peerDependencies?.eve !== "0.71.2") {
+      failures.push("eve peer dependency must be exactly 0.71.2");
     }
-    if (manifest.devDependencies?.eve !== "0.49.0") {
-      failures.push("eve development dependency must be exactly 0.49.0");
+    if (manifest.devDependencies?.eve !== "0.71.2") {
+      failures.push("eve development dependency must be exactly 0.71.2");
     }
   }
 

@@ -3,12 +3,12 @@
 The official Eve ingress and delivery adapter for `@ewhauser/eve-ambient`.
 
 ```sh
-pnpm add @ewhauser/eve-ambient @ewhauser/eve-ambient-eve eve@0.49.0
+pnpm add @ewhauser/eve-ambient @ewhauser/eve-ambient-eve eve@0.71.2
 ```
 
-The adapter targets exactly Eve `0.49.0`. Consumers must apply the included
-`patches/eve@0.49.0.patch` for `vercel/eve#1842`; the patch makes Eve's durable
-session admission honor the supplied idempotency key.
+The adapter targets exactly Eve `0.71.2`. Consumers must apply the included
+`patches/eve@0.71.2.patch` so durable session admission honors the supplied
+idempotency key, including after a session owner handoff.
 
 ## Attention route
 

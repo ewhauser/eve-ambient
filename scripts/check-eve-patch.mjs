@@ -1,66 +1,25 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+const version = "0.71.2";
 const packageRoot = resolve("packages/eve-adapter/node_modules/eve");
-const manifest = JSON.parse(
-  readFileSync(resolve(packageRoot, "package.json"), "utf8"),
-);
-if (manifest.name !== "eve" || manifest.version !== "0.49.0") {
-  throw new Error(
-    `expected patched eve@0.49.0, found ${String(manifest.name)}@${String(manifest.version)}`,
-  );
+const manifest = JSON.parse(readFileSync(resolve(packageRoot, "package.json"), "utf8"));
+if (manifest.name !== "eve" || manifest.version !== version) {
+  throw new Error(`expected patched eve@${version}, found ${manifest.name}@${manifest.version}`);
 }
 
 const assertions = [
-  [
-    "dist/src/channel/channel-operations.d.ts",
-    "readonly idempotencyKey?: string;",
-  ],
-  [
-    "dist/src/channel/channel-address.js",
-    "taskDeliveryId:o.idempotencyKey",
-  ],
-  ["dist/src/channel/channel-address.js", "idempotencyKey:o.idempotencyKey"],
-  ["dist/src/execution/workflow-entry.js", "taskDeliveryId:r.idempotencyKey"],
-  [
-    "dist/src/execution/workflow-runtime.js",
-    "a.idempotencyKey!==void 0&&(m.idempotencyKey=a.idempotencyKey)",
-  ],
+  ["dist/src/channel/channel-operations.d.ts", "readonly idempotencyKey?: string;"],
+  ["dist/src/channel/channel-address.js", "taskDeliveryId:i.idempotencyKey"],
+  ["dist/src/execution/workflow-runtime.js", "l.idempotencyKey=t.idempotencyKey"],
+  ["dist/src/execution/session/entry.js", "createSessionInbox(t,e.idempotencyKey"],
+  ["dist/src/execution/session/entry.js", "e.checkpoint.seenTaskDeliveries"],
+  ["dist/src/execution/session/program.js", "seenTaskDeliveries:i.seenTaskDeliveries"],
+  ["dist/src/execution/session-inbox/inbox.js", "seen.has(e.value.taskDeliveryId)"],
 ];
-
 for (const [file, marker] of assertions) {
-  const contents = readFileSync(resolve(packageRoot, file), "utf8");
-  if (!contents.includes(marker)) {
-    throw new Error(`eve@0.49.0 is missing carried patch marker in ${file}`);
+  if (!readFileSync(resolve(packageRoot, file), "utf8").includes(marker)) {
+    throw new Error(`eve@${version} is missing patch marker in ${file}: ${marker}`);
   }
 }
-
-const patch = readFileSync(
-  resolve("packages/eve-adapter/patches/eve@0.49.0.patch"),
-  "utf8",
-);
-for (const marker of [
-  "readonly idempotencyKey?: string;",
-  "taskDeliveryId:o.idempotencyKey",
-  "a.idempotencyKey!==void 0&&(m.idempotencyKey=a.idempotencyKey)",
-]) {
-  if (!patch.includes(marker)) {
-    throw new Error(`published Eve patch is missing marker ${marker}`);
-  }
-}
-
-const sourcePatch = readFileSync(
-  resolve("packages/eve-adapter/patches/eve@0.49.0-source.patch"),
-  "utf8",
-);
-for (const marker of [
-  'readonly idempotencyKey?: string;',
-  'seenTaskDeliveries.add(input.initialInput.taskDeliveryId);',
-  'it("carries one explicit idempotency key through existing and initial sessions"',
-]) {
-  if (!sourcePatch.includes(marker)) {
-    throw new Error(`Eve source review patch is missing marker ${marker}`);
-  }
-}
-
-console.log("verified carried Eve idempotency patch for eve@0.49.0");
+console.log(`verified Eve idempotency patch for eve@${version}`);

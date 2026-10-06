@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0](https://github.com/ewhauser/eve-ambient/compare/eve-ambient-eve-v0.1.0...eve-ambient-eve-v0.2.0) (2026-10-06)
+
+
+### Features
+
+* **eve-adapter:** upgrade to Eve 0.71.2 ([#51](https://github.com/ewhauser/eve-ambient/pull/51), [#60](https://github.com/ewhauser/eve-ambient/pull/60))
+
+
+### Bug Fixes
+
+* **eve-adapter:** record Eve 0.71.2 delivery support ([#62](https://github.com/ewhauser/eve-ambient/issues/62)) ([4bf6484](https://github.com/ewhauser/eve-ambient/commit/4bf6484e50307fe5c830962f6d5940ba85c8deb6))
+
 ## 0.1.0 (2026-08-16)
 
 

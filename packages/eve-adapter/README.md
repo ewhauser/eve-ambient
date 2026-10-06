@@ -26,7 +26,9 @@ Set `address` only for custom routing. Use the route in
 `defineAmbientApplication({ rules, routes: [eveRoute] })`. It serializes
 trusted instructions separately from untrusted evidence and maps the prepared
 wake's `wakeKey` directly to Eve's `idempotencyKey`. A retry of the same
-recorded wake therefore reaches the same durable Eve turn.
+recorded wake does not start another turn while that Eve session owns the
+address. The patch retains accepted delivery keys when Eve hands the session
+to a new owner.
 
 Customize `renderMessage` only when the replacement preserves the trust
 boundary and complete lineage needed by the receiving agent.

@@ -66,7 +66,7 @@ Everything below comes from `@ewhauser/eve-ambient` or is defined in the
 example itself:
 
 ```sh
-pnpm add @ewhauser/eve-ambient@^0.6.0 workflow@5.0.0-beta.42
+pnpm add @ewhauser/eve-ambient@^0.8.0 workflow@5.0.0-beta.42
 ```
 
 ### Define the event boundary

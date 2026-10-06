@@ -9,8 +9,16 @@ allowBuilds:
   esbuild: true
 
 overrides:
+  "brace-expansion@2.1.4": "2.1.6"
+  "brace-expansion@5.0.9": "5.0.11"
+  "devalue@5.9.0": "5.9.3"
+  "http-cache-semantics@4.2.0": "4.3.0"
   "nanoid@5.1.6": "5.1.16"
-  "undici@7.28.0": "7.29.0"
+  "piscina@4.9.3": "4.9.4"
+  "proxy-addr@2.0.7": "2.0.8"
+  "source-map-js@1.2.1": "1.2.2"
+  "undici@7.28.0": "7.29.1"
+  "undici@7.29.0": "7.29.1"
 
 # Hold new direct and transitive releases for one day. Security updates can
 # still be selected explicitly when a faster upgrade is required.

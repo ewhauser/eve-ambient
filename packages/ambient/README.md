@@ -4,8 +4,18 @@ Provider-independent durable attention with one standard Workflow run per
 correlation.
 
 ```sh
-pnpm add @ewhauser/eve-ambient@^0.6.0 workflow@5.0.0-beta.42
+pnpm add @ewhauser/eve-ambient@^0.8.0 workflow@5.0.0-beta.42
 ```
+
+For Eve delivery, install the separate adapter with Eve `0.71.2`:
+
+```sh
+pnpm add @ewhauser/eve-ambient-eve@^0.2.0 eve@0.71.2
+```
+
+The adapter's [setup guide](https://github.com/ewhauser/eve-ambient/tree/main/packages/eve-adapter#readme)
+explains the required Eve patch. The core attention package does not depend on
+Eve.
 
 Bind an application to Workflow:
 

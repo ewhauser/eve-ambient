@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/ewhauser/eve-ambient/compare/v0.7.0...v0.8.0) (2026-10-06)
+
+
+### Features
+
+* **ambient:** document Eve 0.71.2 adapter integration ([f172704](https://github.com/ewhauser/eve-ambient/commit/f17270484e9b5e42e31b3782f3cebad4571b6bd6))
+
 ## [0.7.0](https://github.com/ewhauser/eve-ambient/compare/v0.6.3...v0.7.0) (2026-09-02)
 
 

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const version = "0.71.2";
+const version = "0.75.1";
 const packageRoot = resolve("packages/eve-adapter/node_modules/eve");
 const manifest = JSON.parse(readFileSync(resolve(packageRoot, "package.json"), "utf8"));
 if (manifest.name !== "eve" || manifest.version !== version) {

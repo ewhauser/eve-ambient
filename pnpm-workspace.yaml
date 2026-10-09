@@ -29,7 +29,7 @@ minimumReleaseAge: 1440
 # package patch for durable channel-delivery identity. Consumers must apply
 # the same patch; a dependency cannot activate pnpm patches for its host.
 minimumReleaseAgeExclude:
-  - "eve@0.71.2"
+  - "eve@0.75.1"
 
 patchedDependencies:
-  "eve@0.71.2": packages/eve-adapter/patches/eve@0.71.2.patch
+  "eve@0.75.1": packages/eve-adapter/patches/eve@0.75.1.patch

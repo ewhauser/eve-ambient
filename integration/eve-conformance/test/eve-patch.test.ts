@@ -23,7 +23,7 @@ describe("carried eve patch", () => {
     const manifest = JSON.parse(
       readFileSync(resolve(eveRoot, "package.json"), "utf8"),
     );
-    expect(manifest.version).toBe("0.71.2");
+    expect(manifest.version).toBe("0.75.1");
 
     const options: ChannelSendOptions = {
       auth: null,

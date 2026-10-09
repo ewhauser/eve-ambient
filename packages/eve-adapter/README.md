@@ -3,11 +3,11 @@
 The official Eve ingress and delivery adapter for `@ewhauser/eve-ambient`.
 
 ```sh
-pnpm add @ewhauser/eve-ambient @ewhauser/eve-ambient-eve eve@0.71.2
+pnpm add @ewhauser/eve-ambient @ewhauser/eve-ambient-eve eve@0.75.1
 ```
 
-The adapter targets exactly Eve `0.71.2`. Consumers must apply the included
-`patches/eve@0.71.2.patch` so durable session admission honors the supplied
+The adapter targets exactly Eve `0.75.1`. Consumers must apply the included
+`patches/eve@0.75.1.patch` so durable session admission honors the supplied
 idempotency key, including after a session owner handoff.
 
 ## Attention route

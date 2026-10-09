@@ -22,9 +22,9 @@ for (const packageRoot of [baseline, modified]) {
   const manifest = JSON.parse(
     readFileSync(resolve(packageRoot, "package.json"), "utf8"),
   );
-  if (manifest.name !== "eve" || manifest.version !== "0.71.2") {
+  if (manifest.name !== "eve" || manifest.version !== "0.75.1") {
     throw new Error(
-      `expected eve@0.71.2 at ${packageRoot}, found ${String(manifest.name)}@${String(manifest.version)}`,
+      `expected eve@0.75.1 at ${packageRoot}, found ${String(manifest.name)}@${String(manifest.version)}`,
     );
   }
 }

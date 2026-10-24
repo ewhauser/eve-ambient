@@ -3,12 +3,11 @@
 The official Eve ingress and delivery adapter for `@ewhauser/eve-ambient`.
 
 ```sh
-pnpm add @ewhauser/eve-ambient @ewhauser/eve-ambient-eve eve@0.71.2
+pnpm add @ewhauser/eve-ambient @ewhauser/eve-ambient-eve eve@0.83.0
 ```
 
-The adapter targets exactly Eve `0.71.2`. Consumers must apply the included
-`patches/eve@0.71.2.patch` so durable session admission honors the supplied
-idempotency key, including after a session owner handoff.
+The adapter targets exactly Eve `0.83.0`, whose native channel delivery
+idempotency handles retries across replay and session owner handoffs.
 
 ## Attention route
 
@@ -27,8 +26,7 @@ Set `address` only for custom routing. Use the route in
 trusted instructions separately from untrusted evidence and maps the prepared
 wake's `wakeKey` directly to Eve's `idempotencyKey`. A retry of the same
 recorded wake does not start another turn while that Eve session owns the
-address. The patch retains accepted delivery keys when Eve hands the session
-to a new owner.
+address. Eve retains accepted delivery keys when it hands the session to a new owner.
 
 Customize `renderMessage` only when the replacement preserves the trust
 boundary and complete lineage needed by the receiving agent.

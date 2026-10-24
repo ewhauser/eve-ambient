@@ -18,12 +18,21 @@ async function loadChannelAddress(): Promise<{
   )) as never;
 }
 
-describe("carried eve patch", () => {
-  it("pins the exact package and exposes the public idempotency option", () => {
-    const manifest = JSON.parse(
-      readFileSync(resolve(eveRoot, "package.json"), "utf8"),
-    );
-    expect(manifest.version).toBe("0.71.2");
+async function loadInputQueue(): Promise<{
+  SessionInputQueue: new (admittedKeys: readonly string[]) => {
+    readonly admittedDeliveryKeys: string[];
+    enqueueDelivery(input: { readonly idempotencyKey?: string }): unknown;
+  };
+}> {
+  return (await import(
+    pathToFileURL(resolve(eveRoot, "dist/src/execution/session/input-queue.js")).href
+  )) as never;
+}
+
+describe("native Eve channel idempotency", () => {
+  it("uses the exact stable package and public idempotency option", () => {
+    const manifest = JSON.parse(readFileSync(resolve(eveRoot, "package.json"), "utf8"));
+    expect(manifest.version).toBe("0.83.0");
 
     const options: ChannelSendOptions = {
       auth: null,
@@ -33,7 +42,7 @@ describe("carried eve patch", () => {
     expect(options.idempotencyKey).toBe("eve:wake:v1:conformance");
   });
 
-  it("maps retries for an owned address into Eve's durable delivery ledger", async () => {
+  it("passes a follow-up key to the durable continuation command", async () => {
     const commands: unknown[] = [];
     const { createChannelAddress } = await loadChannelAddress();
     const address = createChannelAddress({
@@ -58,14 +67,14 @@ describe("carried eve patch", () => {
       {
         command: {
           kind: "send",
-          taskDeliveryId: "eve:wake:v1:wake-1",
+          idempotencyKey: "eve:wake:v1:wake-1",
         },
         continuationToken: "ambient:incident-42",
       },
     ]);
   });
 
-  it("carries the key into first-session workflow input", async () => {
+  it("passes the key through first-session workflow creation", async () => {
     const runs: unknown[] = [];
     const { createChannelAddress } = await loadChannelAddress();
     const address = createChannelAddress({
@@ -97,13 +106,32 @@ describe("carried eve patch", () => {
     ]);
   });
 
-  it("seeds and retains delivery identity across session owners", () => {
+  it("deduplicates across reconstructed owners, scopes keys, and bounds retention", async () => {
+    const { SessionInputQueue } = await loadInputQueue();
+    const firstOwner = new SessionInputQueue([]);
+    expect(firstOwner.enqueueDelivery({ idempotencyKey: "wake-1" })).toBeDefined();
+    expect(firstOwner.enqueueDelivery({ idempotencyKey: "wake-1" })).toBeUndefined();
+    expect(firstOwner.enqueueDelivery({})).toBeDefined();
+    expect(firstOwner.enqueueDelivery({})).toBeDefined();
+
+    const successor = new SessionInputQueue(firstOwner.admittedDeliveryKeys);
+    expect(successor.enqueueDelivery({ idempotencyKey: "wake-1" })).toBeUndefined();
+    expect(new SessionInputQueue([]).enqueueDelivery({ idempotencyKey: "wake-1" })).toBeDefined();
+
+    for (let i = 0; i < 1024; i++) {
+      expect(successor.enqueueDelivery({ idempotencyKey: `later-${i}` })).toBeDefined();
+    }
+    expect(successor.admittedDeliveryKeys).toHaveLength(1024);
+    expect(successor.enqueueDelivery({ idempotencyKey: "later-0" })).toBeUndefined();
+    expect(successor.enqueueDelivery({ idempotencyKey: "wake-1" })).toBeDefined();
+    expect(successor.admittedDeliveryKeys).toHaveLength(1024);
+  });
+
+  it("seeds and carries the admitted ledger through owner handoffs", () => {
     const entry = readFileSync(resolve(eveRoot, "dist/src/execution/session/entry.js"), "utf8");
     const program = readFileSync(resolve(eveRoot, "dist/src/execution/session/program.js"), "utf8");
-    const inbox = readFileSync(resolve(eveRoot, "dist/src/execution/session-inbox/inbox.js"), "utf8");
-    expect(entry).toContain("createSessionInbox(t,e.idempotencyKey");
-    expect(entry).toContain("e.checkpoint.seenTaskDeliveries");
-    expect(program).toContain("seenTaskDeliveries:i.seenTaskDeliveries");
-    expect(inbox).toContain("seen.has(e.value.taskDeliveryId)");
+    expect(entry).toContain("admittedDeliveryKeys:e.idempotencyKey");
+    expect(entry).toContain("admittedDeliveryKeys:i.admittedDeliveryKeys");
+    expect(program).toContain("admittedDeliveryKeys:o.admittedDeliveryKeys");
   });
 });

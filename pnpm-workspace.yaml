@@ -35,7 +35,3 @@ minimumReleaseAge: 1440
 # Pin the current stable Eve release for the adapter.
 minimumReleaseAgeExclude:
   - "eve@0.83.0"
-  - "body-parser@2.4.0"
-  - "undici@7.30.1"
-  - "undici@8.12.2"
-  - "zod@4.6.6"

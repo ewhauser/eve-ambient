@@ -5,6 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
+  body-parser@2.3.0: 2.4.0
   brace-expansion@2.1.4: 2.1.7
   brace-expansion@5.0.9: 5.0.12
   devalue@5.9.0: 5.9.3
@@ -14,9 +15,14 @@ overrides:
   proxy-addr@2.0.7: 2.0.8
   qs@6.15.3: 6.16.0
   source-map-js@1.2.1: 1.2.2
-  undici@7.28.0: 7.29.1
-  undici@7.29.0: 7.29.1
+  undici@7.28.0: 7.30.1
+  undici@7.29.0: 7.30.1
+  undici@7.29.1: 7.30.1
+  undici@8.10.2: 8.12.2
   vite@8.2.1: 8.2.4
+  zod@4.1.11: 4.6.6
+  zod@4.3.6: 4.6.6
+  zod@4.4.3: 4.6.6
 
 importers:
 
@@ -51,7 +57,7 @@ importers:
         version: link:../../packages/eve-adapter
       eve:
         specifier: 0.83.0
-        version: 0.83.0(ai@7.0.141(zod@4.4.3))
+        version: 0.83.0(ai@7.0.141(zod@4.6.6))
     devDependencies:
       '@types/node':
         specifier: ^26.3.0
@@ -107,7 +113,7 @@ importers:
         version: link:../ambient
       eve:
         specifier: 0.83.0
-        version: 0.83.0(ai@7.0.141(zod@4.4.3))
+        version: 0.83.0(ai@7.0.141(zod@4.6.6))
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
@@ -121,13 +127,13 @@ packages:
     resolution: {integrity: sha512-q4FiOnWmkdvCx9Z+bGiwAIcPo0nx5resKoI02VGLpWA9PuVSZvVtrg1/TyA07Lv2rnQUR7cu6lq2Gug5FB02hg==}
     engines: {node: '>=22'}
     peerDependencies:
-      zod: ^3.25.76 || ^4.1.8
+      zod: 4.6.6
 
   '@ai-sdk/provider-utils@5.0.60':
     resolution: {integrity: sha512-Tw56Xw8RdmWH30RuWdYrBK+XvJWwTlBre8v1ARH8oNyzC6xxDNB/ss0yzQbO3hkP+sdtvZH10RIAFP1GwjWGgw==}
     engines: {node: '>=22'}
     peerDependencies:
-      zod: ^3.25.76 || ^4.1.8
+      zod: 4.6.6
 
   '@ai-sdk/provider@4.0.27':
     resolution: {integrity: sha512-TtWwm6SxFiPomlMIbTQa+yhJte+w4/oCsW+wJrJzMC3MqHpAY9e5dJF1Y4HxyKt3W2Csac0KiI76Ckio11TFYw==}
@@ -1182,7 +1188,7 @@ packages:
     resolution: {integrity: sha512-vzkkd/613Gt7xNiV740UqwCmgdk4vh4dwQsDSHl+gpUJm8U+SFb7TRnUIj1lPxO0ZY8vhr4KXcJi0mDK/UNM2Q==}
     engines: {node: '>=22'}
     peerDependencies:
-      zod: ^3.25.76 || ^4.1.8
+      zod: 4.6.6
 
   ansi-align@3.0.1:
     resolution: {integrity: sha512-IOfwwBF5iczOjp/WeY4YxyjqAFMQoZufdQWDd19SEExbVLNXqvpzSJ/M7Za4/sCPmQ0+GRquoA7bGcINcxew6w==}
@@ -1263,8 +1269,8 @@ packages:
     resolution: {integrity: sha512-Iy//vPc3ANPNlIWd242Npqc8MK0a/i4kVcHDlDA6HNMv5zMxz4ulIFhOSYJVKw/8AbHdHy0CnGYEt1QqSXxPsw==}
     engines: {node: '>=18'}
 
-  body-parser@2.3.0:
-    resolution: {integrity: sha512-2cGmJupaNgg+QUwVLAucDuWuoMZ6EX9iHDRswZ5lsNYEmwPaRknMPCLZz07yTzVq/83p4o/wzbDZbBrTvGGTIw==}
+  body-parser@2.4.0:
+    resolution: {integrity: sha512-Ifk1KcLrxaGt1occQagQNFNNOqRt1LFuehEnHHzB8Z6cRgIxRU1TBaiIsUiCdA+gy5PL7Y1IX31DNKkRmxtXjQ==}
     engines: {node: '>=18'}
 
   bowser@2.14.1:
@@ -2304,6 +2310,10 @@ packages:
     resolution: {integrity: sha512-h6fhOIaRrID2CbEY2fqs+7t+UXZo+MLAnU5gRIq85uFtdiUPCdsApMlHhXogKVM4HM2DVbIjGNTTYH2OcmP1vA==}
     engines: {node: '>=0.6'}
 
+  qs@6.16.1:
+    resolution: {integrity: sha512-5Px6J7rfHBAGUhNQ3es4YzcOdBBw0SDcVtThJml4RdnKw4tKs2epA0kPZ+K8X+WiHktT93RHVcQ/3ym5aTCgtg==}
+    engines: {node: '>=0.6'}
+
   quick-lru@5.1.1:
     resolution: {integrity: sha512-WuyALRjWPDGtt/wzJiadO5AXY+8hZ80hVpe6MyivgraREW751X3SbhRvG3eLKOYN+8VEvqLcf3wdnt44Z4S4SA==}
     engines: {node: '>=10'}
@@ -2641,12 +2651,12 @@ packages:
   undici-types@8.3.0:
     resolution: {integrity: sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ==}
 
-  undici@7.29.1:
-    resolution: {integrity: sha512-RYONW2MeafgYlkVOKYKkA/Ag7BmXqgIWCa8t1m0JcxrQg9pI9lEqRhAOruOBCbAohOa/gkCF+iPi9hrgvTzu6Q==}
+  undici@7.30.1:
+    resolution: {integrity: sha512-03KrMbjIFDWQR5RNPrSw3bd1r12JpyFQl9/yxjUbJtqkjmllqC5lFjZh6ujeuJCKr8EOQvRW872Oy/az+nLYxg==}
     engines: {node: '>=20.18.1'}
 
-  undici@8.10.2:
-    resolution: {integrity: sha512-/y4/bH9YNU5hi9NIrpOuvGXFcxrj3CMrV+/AYpowAYTpHn8gX/XPFjNy766FPoYY0miQhdW977JFWKGNhBdwyQ==}
+  undici@8.12.2:
+    resolution: {integrity: sha512-XtuDWVdqTLr3NAxm2ly9/hU6kUsJOgGh1RASzMBbsw6aWCOaQzHdW+QQDfdERjfJ2V5vL5pRPa4RetO9UfivDg==}
     engines: {node: '>=22.19.0'}
 
   unenv@2.0.0-rc.24:
@@ -2862,32 +2872,26 @@ packages:
     resolution: {integrity: sha512-xYqdZFUK/VYazNl/oCDYN+3WloWQwMfZxBoiNt6qNyk+xfOdi598muWE42rNZFp1kNOiqW936q5RhUdnpqElSg==}
     engines: {node: '>=18'}
 
-  zod@4.1.11:
-    resolution: {integrity: sha512-WPsqwxITS2tzx1bzhIKsEs19ABD5vmCVa4xBo2tq/SrV4RNZtfws1EnCWQXM6yh8bD08a1idvkB5MZSBiZsjwg==}
-
-  zod@4.3.6:
-    resolution: {integrity: sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg==}
-
-  zod@4.4.3:
-    resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
+  zod@4.6.6:
+    resolution: {integrity: sha512-4UmzQUF5fxvfcYHlbjBmejU+w+hbDnWFx4aS8kBx7nPBHcO2SqPbpAG8snbdg+Xse4pRefR98hgjFgIMCI/UhA==}
 
 snapshots:
 
-  '@ai-sdk/gateway@4.0.114(zod@4.4.3)':
+  '@ai-sdk/gateway@4.0.114(zod@4.6.6)':
     dependencies:
       '@ai-sdk/provider': 4.0.27
-      '@ai-sdk/provider-utils': 5.0.60(zod@4.4.3)
+      '@ai-sdk/provider-utils': 5.0.60(zod@4.6.6)
       '@vercel/oidc': 3.2.0
-      zod: 4.4.3
+      zod: 4.6.6
 
-  '@ai-sdk/provider-utils@5.0.60(zod@4.4.3)':
+  '@ai-sdk/provider-utils@5.0.60(zod@4.6.6)':
     dependencies:
       '@ai-sdk/provider': 4.0.27
       '@standard-schema/spec': 1.1.0
       '@workflow/serde': 4.1.0
       eventsource-parser: 3.1.1
-      undici: 7.29.1
-      zod: 4.4.3
+      undici: 7.30.1
+      zod: 4.6.6
 
   '@ai-sdk/provider@4.0.27':
     dependencies:
@@ -3508,12 +3512,12 @@ snapshots:
       async-listen: 3.0.0
       open: 8.4.0
       xdg-app-paths: 5.5.1
-      zod: 4.1.11
+      zod: 4.6.6
 
   '@vercel/cli-config@0.2.3':
     dependencies:
       xdg-app-paths: 5.5.1
-      zod: 4.1.11
+      zod: 4.6.6
 
   '@vercel/cli-exec@1.0.1':
     dependencies:
@@ -3720,7 +3724,7 @@ snapshots:
       terminal-link: 5.0.0
       tinyglobby: 0.2.17
       xdg-app-paths: 5.1.0
-      zod: 4.3.6
+      zod: 4.6.6
     transitivePeerDependencies:
       - '@aws-sdk/credential-provider-web-identity'
       - '@opentelemetry/api'
@@ -3762,7 +3766,7 @@ snapshots:
       terminal-link: 5.0.0
       tinyglobby: 0.2.17
       xdg-app-paths: 5.1.0
-      zod: 4.3.6
+      zod: 4.6.6
     transitivePeerDependencies:
       - '@aws-sdk/credential-provider-web-identity'
       - '@opentelemetry/api'
@@ -3794,7 +3798,7 @@ snapshots:
       seedrandom: 3.0.5
       semver: 7.7.4
       ulid: 3.0.2
-      zod: 4.3.6
+      zod: 4.6.6
     transitivePeerDependencies:
       - bufferutil
       - supports-color
@@ -3822,7 +3826,7 @@ snapshots:
       seedrandom: 3.0.5
       semver: 7.7.4
       ulid: 3.0.2
-      zod: 4.3.6
+      zod: 4.6.6
     transitivePeerDependencies:
       - bufferutil
       - supports-color
@@ -3850,7 +3854,7 @@ snapshots:
       seedrandom: 3.0.5
       semver: 7.7.4
       ulid: 3.0.2
-      zod: 4.3.6
+      zod: 4.6.6
     transitivePeerDependencies:
       - bufferutil
       - supports-color
@@ -4176,8 +4180,8 @@ snapshots:
       async-sema: 3.1.1
       proper-lockfile: 4.1.2
       ulid: 3.0.2
-      undici: 7.29.1
-      zod: 4.3.6
+      undici: 7.30.1
+      zod: 4.6.6
 
   '@workflow/world-local@5.0.0-beta.38':
     dependencies:
@@ -4188,8 +4192,8 @@ snapshots:
       async-sema: 3.1.1
       proper-lockfile: 4.1.2
       ulid: 3.0.2
-      undici: 7.29.1
-      zod: 4.3.6
+      undici: 7.30.1
+      zod: 4.6.6
 
   '@workflow/world-vercel@5.0.0-beta.38(@aws-sdk/credential-provider-web-identity@3.972.49)':
     dependencies:
@@ -4200,9 +4204,9 @@ snapshots:
       '@workflow/world': 5.0.0-beta.27
       cbor-x: 1.6.0
       ulid: 3.0.2
-      undici: 7.29.1
+      undici: 7.30.1
       ws: 8.21.3
-      zod: 4.3.6
+      zod: 4.6.6
     transitivePeerDependencies:
       - '@aws-sdk/credential-provider-web-identity'
       - bufferutil
@@ -4218,9 +4222,9 @@ snapshots:
       '@workflow/world': 5.0.0-beta.29
       cbor-x: 1.6.0
       ulid: 3.0.2
-      undici: 7.29.1
+      undici: 7.30.1
       ws: 8.21.3
-      zod: 4.3.6
+      zod: 4.6.6
     transitivePeerDependencies:
       - '@aws-sdk/credential-provider-web-identity'
       - bufferutil
@@ -4229,12 +4233,12 @@ snapshots:
   '@workflow/world@5.0.0-beta.27':
     dependencies:
       ulid: 3.0.2
-      zod: 4.3.6
+      zod: 4.6.6
 
   '@workflow/world@5.0.0-beta.29':
     dependencies:
       ulid: 3.0.2
-      zod: 4.3.6
+      zod: 4.6.6
 
   '@xhmikosr/archive-type@8.1.0(supports-color@10.2.2)':
     dependencies:
@@ -4420,12 +4424,12 @@ snapshots:
 
   acorn@8.18.0: {}
 
-  ai@7.0.141(zod@4.4.3):
+  ai@7.0.141(zod@4.6.6):
     dependencies:
-      '@ai-sdk/gateway': 4.0.114(zod@4.4.3)
+      '@ai-sdk/gateway': 4.0.114(zod@4.6.6)
       '@ai-sdk/provider': 4.0.27
-      '@ai-sdk/provider-utils': 5.0.60(zod@4.4.3)
-      zod: 4.4.3
+      '@ai-sdk/provider-utils': 5.0.60(zod@4.6.6)
+      zod: 4.6.6
 
   ansi-align@3.0.1:
     dependencies:
@@ -4480,7 +4484,7 @@ snapshots:
       execa: 8.0.1
       find-versions: 6.0.0
 
-  body-parser@2.3.0(supports-color@10.2.2):
+  body-parser@2.4.0(supports-color@10.2.2):
     dependencies:
       bytes: 3.1.2
       content-type: 2.1.0
@@ -4488,13 +4492,13 @@ snapshots:
       http-errors: 2.0.1
       iconv-lite: 0.7.3
       on-finished: 2.4.1
-      qs: 6.16.0
+      qs: 6.16.1
       raw-body: 3.0.2
       type-is: 2.1.0
     transitivePeerDependencies:
       - supports-color
 
-  body-parser@2.3.0(supports-color@8.1.1):
+  body-parser@2.4.0(supports-color@8.1.1):
     dependencies:
       bytes: 3.1.2
       content-type: 2.1.0
@@ -4502,7 +4506,7 @@ snapshots:
       http-errors: 2.0.1
       iconv-lite: 0.7.3
       on-finished: 2.4.1
-      qs: 6.16.0
+      qs: 6.16.1
       raw-body: 3.0.2
       type-is: 2.1.0
     transitivePeerDependencies:
@@ -4811,11 +4815,11 @@ snapshots:
 
   etag@1.8.1: {}
 
-  eve@0.83.0(ai@7.0.141(zod@4.4.3)):
+  eve@0.83.0(ai@7.0.141(zod@4.6.6)):
     dependencies:
-      ai: 7.0.141(zod@4.4.3)
+      ai: 7.0.141(zod@4.6.6)
       nitro: 3.0.260903-beta
-      undici: 8.10.2
+      undici: 8.12.2
 
   events-universal@1.0.1:
     dependencies:
@@ -4869,7 +4873,7 @@ snapshots:
   express@5.2.1(supports-color@10.2.2):
     dependencies:
       accepts: 2.0.0
-      body-parser: 2.3.0(supports-color@10.2.2)
+      body-parser: 2.4.0(supports-color@10.2.2)
       content-disposition: 1.1.0
       content-type: 1.0.5
       cookie: 0.7.2
@@ -4902,7 +4906,7 @@ snapshots:
   express@5.2.1(supports-color@8.1.1):
     dependencies:
       accepts: 2.0.0
-      body-parser: 2.3.0(supports-color@8.1.1)
+      body-parser: 2.4.0(supports-color@8.1.1)
       content-disposition: 1.1.0
       content-type: 1.0.5
       cookie: 0.7.2
@@ -5526,6 +5530,11 @@ snapshots:
       es-define-property: 1.0.1
       side-channel: 1.1.1
 
+  qs@6.16.1:
+    dependencies:
+      es-define-property: 1.0.1
+      side-channel: 1.1.1
+
   quick-lru@5.1.1: {}
 
   quickjs-wasi@3.4.0: {}
@@ -5927,9 +5936,9 @@ snapshots:
 
   undici-types@8.3.0: {}
 
-  undici@7.29.1: {}
+  undici@7.30.1: {}
 
-  undici@8.10.2: {}
+  undici@8.12.2: {}
 
   unenv@2.0.0-rc.24:
     dependencies:
@@ -6137,8 +6146,4 @@ snapshots:
 
   yoctocolors@2.2.0: {}
 
-  zod@4.1.11: {}
-
-  zod@4.3.6: {}
-
-  zod@4.4.3: {}
+  zod@4.6.6: {}

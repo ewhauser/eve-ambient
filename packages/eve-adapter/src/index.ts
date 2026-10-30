@@ -24,7 +24,7 @@ export {
   type EveGitHubPullRequestTarget,
 } from "./github.js";
 
-export const SUPPORTED_EVE_VERSION = "0.83.0" as const;
+export const SUPPORTED_EVE_VERSION = "0.90.0" as const;
 
 export type EveChannelAuth = ChannelSendOptions["auth"];
 
@@ -105,7 +105,7 @@ export function createEveAttentionRoute<TState = undefined>(
         (options.renderMessage ?? renderEveAttentionMessage)(wake),
         sendOptions,
       );
-      return { address, sessionId: session.id, turnId: wake.wakeKey };
+      return { address, sessionId: session.sessionId, turnId: wake.wakeKey };
     },
   };
 }
@@ -166,7 +166,7 @@ export function createEveDirectDispatchAdapter(
         idempotencyKey: request.idempotencyKey,
         inputHash: request.inputHash,
         dispatchedAt: (options.now ?? (() => new Date()))().toISOString(),
-        result: { address, sessionId: session.id, turnId: request.idempotencyKey },
+        result: { address, sessionId: session.sessionId, turnId: request.idempotencyKey },
       };
     },
   };

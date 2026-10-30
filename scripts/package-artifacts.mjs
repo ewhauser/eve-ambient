@@ -137,11 +137,11 @@ function validateManifest(packagePath, expected) {
   }
 
   if (packagePath === "packages/eve-adapter") {
-    if (manifest.peerDependencies?.eve !== "0.83.0") {
-      failures.push("eve peer dependency must be exactly 0.83.0");
+    if (manifest.peerDependencies?.eve !== "0.90.0") {
+      failures.push("eve peer dependency must be exactly 0.90.0");
     }
-    if (manifest.devDependencies?.eve !== "0.83.0") {
-      failures.push("eve development dependency must be exactly 0.83.0");
+    if (manifest.devDependencies?.eve !== "0.90.0") {
+      failures.push("eve development dependency must be exactly 0.90.0");
     }
   }
 

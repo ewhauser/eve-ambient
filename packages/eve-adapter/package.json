@@ -42,11 +42,11 @@
   "homepage": "https://github.com/ewhauser/eve-ambient/tree/main/packages/eve-adapter#readme",
   "peerDependencies": {
     "@ewhauser/eve-ambient": ">=0.4.0 <1",
-    "eve": "0.83.0"
+    "eve": "0.90.0"
   },
   "devDependencies": {
     "@ewhauser/eve-ambient": "workspace:*",
-    "eve": "0.83.0",
+    "eve": "0.90.0",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11"
   }

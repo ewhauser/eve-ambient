@@ -34,4 +34,4 @@ minimumReleaseAge: 1440
 
 # Pin the current stable Eve release for the adapter.
 minimumReleaseAgeExclude:
-  - "eve@0.83.0"
+  - "eve@0.90.0"

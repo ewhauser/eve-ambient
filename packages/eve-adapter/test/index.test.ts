@@ -20,7 +20,7 @@ function fakeFrom(
   return ((address: string) => ({
     async send(message: string, options: ChannelSendOptions) {
       deliveries.push({ address, message, options });
-      return { id: "session-1" };
+      return { sessionId: "session-1", deliveryId: "delivery-1" };
     },
   })) as ChannelFrom;
 }
@@ -106,6 +106,7 @@ describe("Eve attention adapter", () => {
       idempotencyKey,
       inputHash,
       dispatchedAt: "2026-01-01T00:00:00.000Z",
+      result: { address: "chat:thread-7", sessionId: "session-1", turnId: idempotencyKey },
     });
     expect(deliveries[0]?.options.idempotencyKey).toBe(idempotencyKey);
     expect(JSON.parse(deliveries[0]?.message ?? "").event).toEqual(request.event);

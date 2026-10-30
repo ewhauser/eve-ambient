@@ -3,10 +3,10 @@
 The official Eve ingress and delivery adapter for `@ewhauser/eve-ambient`.
 
 ```sh
-pnpm add @ewhauser/eve-ambient @ewhauser/eve-ambient-eve eve@0.83.0
+pnpm add @ewhauser/eve-ambient @ewhauser/eve-ambient-eve eve@0.90.0
 ```
 
-The adapter targets exactly Eve `0.83.0`, whose native channel delivery
+The adapter targets exactly Eve `0.90.0`, whose native channel delivery
 idempotency handles retries across replay and session owner handoffs.
 
 ## Attention route

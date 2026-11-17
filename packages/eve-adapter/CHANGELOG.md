@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.0](https://github.com/ewhauser/eve-ambient/compare/eve-ambient-eve-v0.2.0...eve-ambient-eve-v0.3.0) (2026-11-17)
+
+
+### Features
+
+* **eve-adapter:** support Eve 0.83.0 ([#65](https://github.com/ewhauser/eve-ambient/issues/65)) ([40c1137](https://github.com/ewhauser/eve-ambient/commit/40c1137575828b96cb6d4bf4ece6e26261901b18))
+* **eve-adapter:** support Eve 0.90.0 ([41dcdd2](https://github.com/ewhauser/eve-ambient/commit/41dcdd2367e3b0b018e83f057fb59e5686f6c2a9))
+* **eve-adapter:** support Eve 0.91.0 ([50f39ab](https://github.com/ewhauser/eve-ambient/commit/50f39ab587891b0c7859c857283f01d78c059215))
+
 ## [0.2.0](https://github.com/ewhauser/eve-ambient/compare/eve-ambient-eve-v0.1.0...eve-ambient-eve-v0.2.0) (2026-10-06)
 
 

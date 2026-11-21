@@ -32,7 +32,7 @@ async function loadInputQueue(): Promise<{
 describe("native Eve channel idempotency", () => {
   it("uses the exact stable package and public idempotency option", () => {
     const manifest = JSON.parse(readFileSync(resolve(eveRoot, "package.json"), "utf8"));
-    expect(manifest.version).toBe("0.91.0");
+    expect(manifest.version).toBe("1.1.0");
 
     const options: ChannelSendOptions = {
       auth: null,
@@ -129,9 +129,11 @@ describe("native Eve channel idempotency", () => {
 
   it("seeds and carries the admitted ledger through owner handoffs", () => {
     const entry = readFileSync(resolve(eveRoot, "dist/src/execution/session/entry.js"), "utf8");
+    const boot = readFileSync(resolve(eveRoot, "dist/src/execution/session/owner-boot.js"), "utf8");
     const program = readFileSync(resolve(eveRoot, "dist/src/execution/session/program.js"), "utf8");
-    expect(entry).toContain("admittedDeliveryKeys:e.idempotencyKey");
-    expect(entry).toContain("admittedDeliveryKeys:i.admittedDeliveryKeys");
-    expect(program).toContain("admittedDeliveryKeys:o.admittedDeliveryKeys");
+    expect(entry).toContain("bootInitialOwner");
+    expect(boot).toMatch(/admittedDeliveryKeys:([\w$]+)\.idempotencyKey===void 0\?\[\]:\[\1\.idempotencyKey\]/);
+    expect(entry).toMatch(/admittedDeliveryKeys:[\w$]+\.admittedDeliveryKeys/);
+    expect(program).toMatch(/admittedDeliveryKeys:[\w$]+\.admittedDeliveryKeys/);
   });
 });

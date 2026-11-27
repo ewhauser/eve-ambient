@@ -32,7 +32,7 @@ async function loadInputQueue(): Promise<{
 describe("native Eve channel idempotency", () => {
   it("uses the exact stable package and public idempotency option", () => {
     const manifest = JSON.parse(readFileSync(resolve(eveRoot, "package.json"), "utf8"));
-    expect(manifest.version).toBe("1.1.0");
+    expect(manifest.version).toBe("1.5.0");
 
     const options: ChannelSendOptions = {
       auth: null,

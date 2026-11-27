@@ -8,6 +8,16 @@ import { describe, expect, it } from "vitest";
 import { createEveGitHubAmbientChannel } from "../src/index.js";
 
 describe("Eve GitHub Ambient ingress", () => {
+  it("allows Eve to attach instrumentation metadata when loading the channel", () => {
+    const channel = createEveGitHubAmbientChannel({
+      publisher: { publish: async () => ({}) as AmbientPublishReceipt },
+      tenantId: "tenant-1",
+      credentials: { webhookVerifier: () => true },
+    });
+
+    expect(Object.isExtensible(channel)).toBe(true);
+  });
+
   it("does not return Eve's acknowledgement until Ambient accepts the delivery", async () => {
     let accept: ((receipt: AmbientPublishReceipt) => void) | undefined;
     let markStarted: (() => void) | undefined;

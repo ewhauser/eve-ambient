@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/ewhauser/eve-ambient/compare/v0.9.0...v0.10.0) (2026-11-27)
+
+
+### Features
+
+* **eve-adapter:** support Eve 1.5.0 ([#70](https://github.com/ewhauser/eve-ambient/issues/70)) ([409fbf2](https://github.com/ewhauser/eve-ambient/commit/409fbf25e3527ab21a8dd007dea010e8ffcb4122))
+
 ## [0.9.0](https://github.com/ewhauser/eve-ambient/compare/v0.8.0...v0.9.0) (2026-11-21)
 
 

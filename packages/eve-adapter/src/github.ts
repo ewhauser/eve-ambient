@@ -345,7 +345,8 @@ function awaitDurableAdmission(
       },
     });
   });
-  return Object.freeze({ ...channel, routes: Object.freeze(routes) });
+  // Eve attaches instrumentation metadata to the channel when loading the agent.
+  return { ...channel, routes: Object.freeze(routes) };
 }
 
 function repositoryData(repository: GitHubRepositoryRef): EveGitHubRepositoryData {

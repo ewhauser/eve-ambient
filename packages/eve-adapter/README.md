@@ -3,11 +3,18 @@
 The official Eve ingress and delivery adapter for `@ewhauser/eve-ambient`.
 
 ```sh
-pnpm add @ewhauser/eve-ambient @ewhauser/eve-ambient-eve eve@1.1.0
+pnpm add @ewhauser/eve-ambient @ewhauser/eve-ambient-eve eve@1.5.0
 ```
 
-The adapter targets exactly Eve `1.1.0`, whose native channel delivery
+The adapter targets exactly Eve `1.5.0`, whose native channel delivery
 idempotency handles retries across replay and session owner handoffs.
+
+Eve 1.5.0 bundles Workflow 5.8.0. New runs use spec 10 on the bundled local and
+Vercel Worlds. On `@ewhauser/world-celld@0.11.0`, Eve uses the World's spec 8
+without an environment override. Eve sessions require atomic start hooks, so
+use the asynchronous World factory and matching worker that advertises that
+capability. The older celld 0.3.x line documented for standalone Ambient
+workflows lacks it. Postgres migration 0033 applies only to the Postgres World.
 
 ## Attention route
 
